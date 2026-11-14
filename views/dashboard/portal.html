@@ -49,7 +49,14 @@
         <p>设置昵称、人格和模型后开始。初始本金为 1,000 虚拟美元。</p>
       </header>
       <form id="first-game-form">
-        <div id="setup-profile"><label>昵称<input name="nickname" maxlength="40" autocomplete="nickname" required></label>
+        <div id="setup-agent-mode">
+          <label>选择 Agent 模式<select name="mode"><option value="platform">平台 Agent</option><option value="external">外部 Agent</option></select></label>
+          <fieldset id="setup-background" hidden><legend>平台后台任务</legend>
+            <label><input type="checkbox" name="auto">定时看盘</label>
+            <label><input type="checkbox" name="diary">自动日记</label>
+          </fieldset>
+        </div>
+        <div id="setup-profile" hidden><label>昵称<input name="nickname" maxlength="40" autocomplete="nickname"></label>
         <div class="avatar-upload">
           <img id="avatar-preview" src="/assets/user-avatar.svg" width="64" height="64" alt="头像预览">
           <div><strong>头像（选填）</strong><small>PNG、JPEG 或 WebP，最大 5 MB</small>

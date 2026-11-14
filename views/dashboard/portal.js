@@ -309,7 +309,11 @@ avatarFile.onchange = async () => {
   } catch (error) { setStatus(error.message || "无法读取图片", true); }
 };
 
-let setupStep = 0;
+let setupStep = -1;
+const onboarding = byId("first-game-form");
+onboarding.elements.mode.onchange = () => {
+  byId("setup-background").hidden = onboarding.elements.mode.value !== "external";
+};
 let presets = [];
 const providerChoice = byId("setup-provider");
 const modelChoice = byId("setup-model-choice");
@@ -326,6 +330,17 @@ byId("first-game-form").onsubmit = async event => {
   button.disabled = true;
   try {
     const form = byId("first-game-form");
+    if (setupStep === -1) {
+      byId("setup-agent-mode").hidden = true;
+      byId("setup-profile").hidden = false;
+      setupStep = 0;
+      form.elements.nickname.required = true;
+      form.elements.nickname.focus();
+      return;
+    }
+    const external = form.elements.mode.value === "external";
+    const background = external && (form.elements.auto.checked || form.elements.diary.checked);
+    if (setupStep === 0 && external && !background) setupStep = 2;
     if (setupStep === 0) {
       const config = await api("model-presets");
       presets = config.presets;
@@ -346,6 +361,9 @@ byId("first-game-form").onsubmit = async event => {
     }
     const payload = Object.fromEntries(new FormData(form));
     const preset = presets[Number(providerChoice.value)];
+    payload.auto = external && form.elements.auto.checked;
+    payload.diary = external && form.elements.diary.checked;
+    if (background && !payload.key.trim()) throw Error("请填写后台 API Key。");
     const model = modelChoice.value === "custom" ? payload.model.trim() : modelChoice.value;
     if (payload.key.trim() && !model) {
       const input = customModel.querySelector("input");
@@ -358,7 +376,7 @@ byId("first-game-form").onsubmit = async event => {
     payload.agent_avatar = await encodeAgentAvatar(form.elements.agent_picture.files[0]);
     delete payload.agent_picture;
     await api("onboarding", payload);
-    location.replace("/workspace/");
+    location.replace(external ? "/workspace/#agent-settings" : "/workspace/");
   } catch (error) { setStatus(error.message, true); }
   finally { button.disabled = false; }
 };

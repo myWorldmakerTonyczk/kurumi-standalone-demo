@@ -1,4 +1,6 @@
+import { mountAgentMode } from "/assets/agent-mode.js";
 import { mountCommunity } from "/assets/community.js";
+import { createHome } from "/assets/home/home.js";
 import { mountChat } from "/assets/workspace-chat.js";
 import { mountPreferences } from "/assets/user-preferences.js";
 import { JournalPanel } from "./journal-panel.js";
@@ -15,7 +17,7 @@ import { TradingNotices } from "./notifications.js";
 import { instanceGroups } from "./instance-catalog.js";
 import { createPortalBridge } from "./portal-bridge.js";
 import { createAdminBridge } from "./standalone-bridge.js";
-import { mountProfile } from "./standalone-profile.js";
+import { mountAdvanced, mountModels, mountProfile, mountUserSettings, mountSocialSettings } from "./standalone-profile.js";
 const remote = document.body.hasAttribute("data-remote-workspace");
 const bridge = remote ? createPortalBridge(() => gid) : createAdminBridge();
 const tradingNotices = new TradingNotices(bridge);
@@ -64,6 +66,10 @@ let state = null,
 let priceChart;
 let workspaceMode = "instances",
   instancePage = "replay",
+  defaultPage = "replay",
+  homeView = null,
+  communityView = null,
+  shownPage = "",
   selectedOwner = "";
 const expandedPositions = new Set();
 let connectionDirty = false;
@@ -144,7 +150,7 @@ function workspace(mode) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   }
-  $("instance-nav").hidden = !inInstance;
+  $("instance-nav").hidden = !gid || mode !== "instances";
   $("personal-settings-nav").hidden = !remote || mode !== "settings";
   $("settings-nav").hidden = remote || mode !== "settings";
   document.querySelector(".workspace>aside").hidden = catalog;
@@ -152,10 +158,15 @@ function workspace(mode) {
     .querySelector(".workspace")
     .classList.toggle("catalog-mode", catalog);
   $("instance-context").hidden = !inInstance;
-  document.querySelector(".character-banner").hidden = !inInstance || instancePage === "conversation";
+  document.querySelector(".character-banner").hidden = !inInstance || instancePage === "conversation" || instancePage === "home";
   const page = mode === "community" ? "community" : mode === "settings" ? (remote ? "user-settings" : "setup") : gid ? instancePage : "catalog";
   for (const section of document.querySelectorAll("[data-page]"))
     section.hidden = section.dataset.page !== page;
+  if (page !== shownPage) {
+    shownPage = page;
+    if (page === "home") homeView?.open();
+    communityView?.setVisible();
+  }
   const current = state?.current?.game.id === gid ? state.current : null;
   $("title").textContent =
     mode === "community" ? "社区" : mode === "settings"
@@ -164,8 +175,12 @@ function workspace(mode) {
         ? "用户列表"
         : current?.game.name || "正在打开交易实例…";
   $("instance-loading").hidden = !inInstance || !!current;
-  for (const button of document.querySelectorAll("[data-tab]"))
-    button.classList.toggle("selected", button.dataset.tab === instancePage);
+  for (const button of document.querySelectorAll("[data-tab],[data-nav]")) {
+    const current = button.dataset.nav ? mode === "community" : mode !== "community" && button.dataset.tab === instancePage;
+    button.classList.toggle("selected", current);
+    if (current) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
   $("open-instance-settings").disabled = !gid;
   tradingNotices.setScope(
     inInstance &&
@@ -398,6 +413,7 @@ function render() {
   }
   workspace(workspaceMode);
   const selected = gid && state.current?.game.id === gid ? state.current : null;
+  if (remote) homeView?.update(state, selected);
   $("desk").hidden = !selected;
   $("pause-notice").hidden = selected?.game.status !== "paused";
   refreshRequired();
@@ -1287,6 +1303,15 @@ if (bridge) {
       event.stopPropagation();
       message("管理员已禁止此操作", true);
     }, true);
+    const unreadBadges = [];
+    const badge = () => { const el = node("span", "", "ui-count"); el.hidden = true; unreadBadges.push(el); return el; };
+    const setUnread = total => {
+      for (const el of unreadBadges) {
+        el.hidden = total <= 0;
+        el.textContent = total > 99 ? "99+" : String(total);
+        el.setAttribute("aria-label", `${total} 条未读群消息`);
+      }
+    };
     const picker = node("select");
     picker.setAttribute("aria-label", "交易实例");
     const games = session.games || [];
@@ -1308,13 +1333,9 @@ if (bridge) {
       chatTab.classList.add("persistent-chat-tab");
       const chat = mountChat(() => gid, {
         onExpand: () => { chatTab.hidden = false; tab("conversation"); },
-        onCollapse: () => { chat.setFull(false); tab("replay"); },
+        onCollapse: () => { chat.setFull(false); tab(defaultPage); },
       });
       chatTab.onclick = () => chat.setFull(true);
-      const communityNav = node("button", "社区");
-      communityNav.type = "button";
-      communityNav.onclick = () => document.querySelector('[data-workspace="community"]').click();
-      $("instance-nav").append(communityNav);
       activeChat = {leaveFull: () => {
         if (document.querySelector(".kurumi-chat.full-chat")) chat.setFull(false);
       }};
@@ -1324,16 +1345,38 @@ if (bridge) {
     logout.type = "button";
     logout.onclick = () => bridge.logout().catch(error => message(error.message, true));
     const actions = $("user-settings-actions");
-    const panels = Array.from({length: 7}, () => node("div"));
+    const panels = Array.from({length: 12}, () => node("div"));
+    const {usageTab, providerTab} = mountModels(panels[1], panels[8]);
     const buttons = [mountProfile(() => gid, {container: panels[0]}),
-      mountProfile(() => gid, {container: panels[1], api: true}),
+      usageTab,
       ...["root", "rest", "notices", "diary"].map((group, i) =>
         mountPreferences(() => gid, {container: panels[i + 2], group}))];
     const general = mountProfile(() => gid, {container: panels[6], general: true});
-    buttons.push(general);
+    buttons.push(general, mountAgentMode(panels[7], (config, mode) => {
+      const background = panels[7].querySelector("form");
+      const show = mode !== "external" || background.elements.auto.checked || background.elements.diary.checked;
+      for (const [index, label] of [[0, "人格设定"], [1, "模型与 API"]]) {
+        buttons[index].hidden = !show;
+        buttons[index].textContent = mode === "external" ? "后台" + label : label;
+      }
+      if (config) {
+        const external = config.mode === "external";
+        document.body.classList.toggle("external-agent-mode", external);
+        document.body.classList.toggle("external-no-watch", external && !config.auto);
+        buttons[2].hidden = buttons[3].hidden = external && !config.auto;
+        buttons[5].hidden = external && !config.diary;
+        buttons[6].hidden = external;
+        buttons[11].hidden = external || session.mode !== "account";
+        if (external && instancePage === "conversation") tab("replay");
+      }
+    }));
+    buttons.push(providerTab, mountAdvanced(panels[9]), mountUserSettings(panels[10]), mountSocialSettings(panels[11]));
+    panels[7].addEventListener("change", () => panels[7].querySelector("select").onchange());
     actions.after(...panels);
     const openSettings = buttons.map(button => button.onclick);
-    const categories = [["Agent 设置", [0, 1]], ["外汇相关设置", [2, 3, 4, 5]], ["通用", [6]]];
+    buttons[11].hidden = session.mode !== "account";
+    const categories = [["Agent 设置", [7, 0, 1, 8, 6, 11, 9]], ["外汇相关设置", [2, 3, 4, 5]]];
+    if (session.mode === "account") categories.push(["用户设置", [10]]);
     const nav = $("personal-settings-nav");
     const visited = new Set();
     function selectPanel(index) {
@@ -1342,7 +1385,7 @@ if (bridge) {
         button.classList.toggle("active", i === index);
         button.setAttribute("aria-pressed", String(i === index));
       });
-      if (!visited.has(index)) {
+      if (!visited.has(index) || [1, 8, 9].includes(index)) {
         visited.add(index);
         openSettings[index]();
       }
@@ -1357,26 +1400,57 @@ if (bridge) {
           item.setAttribute("aria-pressed", String(item === button));
         }
         actions.replaceChildren(...indices.map(index => buttons[index]));
-        selectPanel(indices[0]);
+        selectPanel(indices.find(index => !buttons[index].hidden) ?? indices[0]);
       };
       nav.append(button);
     });
     nav.firstElementChild.click();
     const switcher = document.querySelector(".workspace-switch");
     if (session.mode === "account") {
-      const community = mountCommunity(document.querySelector('[data-page="community"]'));
+      communityView = mountCommunity(document.querySelector('[data-page="community"]'), {
+        game: () => gid,
+        pairs: () => state?.current?.game.pairs || [],
+        onUnread: setUnread,
+        sidebar: document.querySelector(".workspace > aside"),
+        dock: () => workspace("community"),
+      });
       const communityTab = node("button", "社区");
       communityTab.type = "button";
       communityTab.dataset.workspace = "community";
-      communityTab.onclick = () => { workspace("community"); community.open(); };
+      communityTab.append(" ", badge());
+      communityTab.onclick = () => { workspace("community"); communityView.open(); };
       switcher.append(communityTab);
+      const shortcut = node("button", "社区");
+      shortcut.type = "button";
+      shortcut.className = "community-shortcut";
+      shortcut.onclick = () => communityView.openFloating();
+      shortcut.append(" ", badge());
+      document.body.append(shortcut);
+      communityView.warm();
+      defaultPage = "home";
+      instancePage = "home";
+      $("nav-home").hidden = false;
+      homeView = createHome(document.querySelector('[data-page="home"]'), {
+        game: () => gid,
+        labels,
+        unread: () => communityView.unread(),
+        goto: name => tab(name),
+        openCommunity: name => { workspace("community"); communityView.open(name); },
+        draftFromReview: (data, ref) => {
+          workspace("community");
+          communityView.openDraft({
+            title: data.title, body: data.publishable_body || data.summary,
+            tags: ["交易复盘", ref.pair].filter(Boolean),
+          }, "ai", { days: ref.days, pair: ref.pair, end: data.stats?.end ?? 0 });
+        },
+      });
     }
     switcher.querySelector('[data-workspace="instances"]').textContent = "交易工作区";
     document.querySelector(".header-actions").append(logout);
     const back = node("button", "返回交易工作区");
     back.type = "button";
     back.className = "conversation-back";
-    back.onclick = () => tab("replay");
+    back.onclick = () => tab(defaultPage);
     document.querySelector('[data-page="conversation"]').prepend(back);
     fetch("/api/state?" + new URLSearchParams({game: gid})).then(response => response.json()).then(profile => {
       if (profile.avatar?.startsWith("data:image/webp;base64,"))
@@ -1388,6 +1462,10 @@ if (bridge) {
   }
 }
 await load();
+if (remote && location.hash === "#agent-settings") {
+  history.replaceState(null, "", location.pathname);
+  workspace("settings");
+}
 setInterval(() => {
   if (!document.hidden && !posting) load();
 }, 10000);

@@ -210,6 +210,41 @@ class PortalAccounts:
             self.access.cleanup(now)
             return self.access.session_token(row["owner"], None, "account", now, ACCOUNT_TTL)
 
+    async def change_credentials(self, owner, token, username, password, new_password):
+        from .access import digest
+
+        if not isinstance(username, str) or not re.fullmatch(r"[\w.-]{1,40}", username):
+            raise ValueError("用户名格式无效")
+        if not isinstance(password, str) or not 1 <= len(password) <= 128:
+            raise ValueError("请输入当前密码")
+        if not isinstance(new_password, str) or (new_password and not 12 <= len(new_password) <= 128):
+            raise ValueError("新密码须为 12～128 个字符")
+        row = self.db.execute("SELECT * FROM portal_accounts WHERE owner=?", (owner,)).fetchone()
+        if not row or not self.rate_limit(row["username"]):
+            raise ValueError("请稍后再试")
+        async with self.hash_slots:
+            verifier = await asyncio.to_thread(password_hash, password, row["salt"])
+            if not hmac.compare_digest(verifier, row["verifier"]):
+                raise ValueError("当前密码错误")
+            salt = secrets.token_bytes(16) if new_password else row["salt"]
+            if new_password:
+                verifier = await asyncio.to_thread(password_hash, new_password, salt)
+        with self.access.engine.transaction():
+            session = self.access.session(token)
+            if not session or session["owner"] != owner or session["mode"] != "account":
+                raise ValueError("请重新登录")
+            if any(r[0].casefold() == username.casefold() for r in self.db.execute(
+                "SELECT username FROM portal_accounts WHERE owner<>?", (owner,)
+            )):
+                raise ValueError("用户名已被使用")
+            updated = self.db.execute("""UPDATE portal_accounts SET username=?,salt=?,verifier=?,admin_password=''
+                WHERE owner=? AND username=? AND salt=? AND verifier=?""",
+                (username, salt, verifier, owner, row["username"], row["salt"], row["verifier"]))
+            if not updated.rowcount:
+                raise ValueError("账号已变化，请重新登录")
+            self.db.execute("DELETE FROM portal_sessions WHERE owner=? AND mode='account' AND digest<>?",
+                            (owner, digest(token)))
+
     def reset(self, owner):
         with self.access.engine.transaction():
             self.db.execute("DELETE FROM portal_accounts WHERE owner=?", (owner,))
