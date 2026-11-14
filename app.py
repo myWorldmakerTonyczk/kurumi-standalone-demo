@@ -68,6 +68,8 @@ class Demo:
             self.db.execute("ALTER TABLE demo_chat ADD COLUMN created REAL")
         if "reasoning" not in {row["name"] for row in self.db.execute("PRAGMA table_info(demo_chat)")}:
             self.db.execute("ALTER TABLE demo_chat ADD COLUMN reasoning TEXT")
+        if "proactive" not in {row["name"] for row in self.db.execute("PRAGMA table_info(demo_chat)")}:
+            self.db.execute("ALTER TABLE demo_chat ADD COLUMN proactive INTEGER NOT NULL DEFAULT 0")
         if "attachments" not in {row["name"] for row in self.db.execute("PRAGMA table_info(demo_chat)")}:
             self.db.execute("ALTER TABLE demo_chat ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
         self.accounts = PortalAccounts(PortalAccess(self.engine))
@@ -790,6 +792,17 @@ class Demo:
                     self.mode_values(mode, current | settings)
                 self.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)", (owner, dump(current | settings)))
                 return web.json_response({"ok": True})
+            if action == "proactive-chat" and request.method == "GET":
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                after = request.query.get("after", "0")
+                if not after.isascii() or not after.isdecimal() or len(after) > 18:
+                    raise ValueError("消息编号无效")
+                rows = self.db.execute("""SELECT id,content FROM demo_chat
+                    WHERE game=? AND proactive=1 AND id>? ORDER BY id LIMIT 20""",
+                    (game["id"], int(after))) if game else ()
+                return web.json_response({"entries": [dict(row) for row in rows]},
+                                         headers={"Cache-Control": "no-store"})
             if action == "chat" and request.method == "POST":
                 if self.external.settings(owner)["mode"] == "external":
                     raise web.HTTPForbidden(reason="当前由外部 Agent 负责对话")
@@ -802,7 +815,7 @@ class Demo:
                 reply = await self.agent(game, message, attachments=attachments)
                 return web.json_response({"reply": reply, "attachments": attachments})
             if action == "state" and request.method == "GET":
-                rows = self.db.execute("SELECT role,content,attachments FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 20",
+                rows = self.db.execute("SELECT id,role,content,attachments FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 20",
                                        (game["id"],)).fetchall() if game else []
                 return web.json_response(dict(avatar=current.get("avatar", "user-avatar.svg"),
                     nickname=self.db.execute("SELECT nickname FROM sim_users WHERE id=?", (owner,)).fetchone()[0],

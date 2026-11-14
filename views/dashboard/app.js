@@ -130,11 +130,12 @@ function options(el, items, value) {
   );
   if (value !== undefined) el.value = value;
 }
-let activeChat;
+let activeChat, activeCommunity;
 function workspace(mode) {
   if (mode !== "instances" || instancePage !== "conversation") activeChat?.leaveFull();
   workspaceMode = mode;
   document.body.classList.toggle("community-view", mode === "community");
+  activeCommunity?.setVisible(mode === "community");
   document.body.classList.toggle("conversation-view", mode === "instances" && instancePage === "conversation");
   $("back-to-catalog").hidden = mode === "settings" || !gid;
   if (mode === "settings" || !gid) $("market-break-notice").hidden = true;
@@ -1312,10 +1313,6 @@ if (bridge) {
         onCollapse: () => { chat.setFull(false); tab("replay"); },
       });
       chatTab.onclick = () => chat.setFull(true);
-      const communityNav = node("button", "社区");
-      communityNav.type = "button";
-      communityNav.onclick = () => document.querySelector('[data-workspace="community"]').click();
-      $("instance-nav").append(communityNav);
       activeChat = {leaveFull: () => {
         if (document.querySelector(".kurumi-chat.full-chat")) chat.setFull(false);
       }};
@@ -1387,12 +1384,19 @@ if (bridge) {
     nav.firstElementChild.click();
     const switcher = document.querySelector(".workspace-switch");
     if (session.mode === "account") {
-      const community = mountCommunity(document.querySelector('[data-page="community"]'));
+      const community = mountCommunity(document.querySelector('[data-page="community"]'),
+        document.querySelector(".workspace > aside"), () => workspace("community"));
+      activeCommunity = community;
       const communityTab = node("button", "社区");
       communityTab.type = "button";
       communityTab.dataset.workspace = "community";
       communityTab.onclick = () => { workspace("community"); community.open(); };
       switcher.append(communityTab);
+      const shortcut = node("button", "社区");
+      shortcut.type = "button";
+      shortcut.className = "community-shortcut";
+      shortcut.onclick = () => community.openFloating();
+      document.body.append(shortcut);
     }
     switcher.querySelector('[data-workspace="instances"]').textContent = "交易工作区";
     document.querySelector(".header-actions").append(logout);

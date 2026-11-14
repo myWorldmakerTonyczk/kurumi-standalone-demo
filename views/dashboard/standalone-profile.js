@@ -117,6 +117,27 @@ export function mountProfile(gameId, {container, general = false}) {
   return button;
 }
 
+function probabilitySlider(label, name, max = 100, step = "any") {
+  return `<label>${label}<span class="probability-slider">
+    <input type="range" name="${name}" min="0" max="${max}" step="${step}" value="0">
+    <output aria-hidden="true">0%</output>
+  </span></label>`;
+}
+
+function bindProbabilitySlider(form, name) {
+  const input = form.elements[name];
+  const output = input.nextElementSibling;
+  const percent = new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 2});
+  function refresh() {
+    const label = percent.format(input.valueAsNumber / Number(input.max) * 100) + "%";
+    output.textContent = label;
+    input.setAttribute("aria-valuetext", label);
+  }
+  input.addEventListener("input", refresh);
+  refresh();
+  return refresh;
+}
+
 export function mountModels(usagePanel, providerPanel) {
   const section = document.createElement("section");
   section.className = "profile-settings api-settings model-providers";
@@ -161,7 +182,7 @@ export function mountModels(usagePanel, providerPanel) {
         <label>启用语音回复<input type="checkbox" name="voice_enabled"></label>
         <label>语音模型<select name="speech"></select></label>
         <label>语气分析模型<select name="emotion"></select></label>
-        <label>语音触发概率<input type="number" name="voice_probability" min="0" max="1" step=".01" required></label>
+        ${probabilitySlider("语音触发概率", "voice_probability", 1, ".01")}
         <label>音色 ID<input name="voice" maxlength="80"></label>
         <button class="primary">保存模型用途</button>
       </form>
@@ -170,6 +191,7 @@ export function mountModels(usagePanel, providerPanel) {
   usagePanel.append(usage);
   const editor = section.querySelector("[data-editor]");
   const roles = usage.querySelector("[data-roles]");
+  const refreshVoiceProbability = bindProbabilitySlider(roles, "voice_probability");
   const dialog = section.querySelector("dialog");
   const editorStatus = editor.querySelector("[role=status]");
   const add = section.querySelector("[data-new]");
@@ -225,6 +247,7 @@ export function mountModels(usagePanel, providerPanel) {
       if (name !== "voice_enabled") roles.elements[name].value = value;
     }
     roles.elements.voice_enabled.checked = data.policy.voice_enabled === true;
+    refreshVoiceProbability();
   }
   async function request(body) {
     const response = await fetch("/api/models", body ? {
@@ -318,7 +341,7 @@ export function mountStickers(container) {
     <div class="sticker-grid"></div></div>
     <div data-sticker-settings><header><h3>表情发送设置</h3></header>
     <form class="sticker-probability">
-      <label>发送表情包概率（%）<input name="probability" type="number" min="0" max="100" step="any" required></label>
+      ${probabilitySlider("发送表情包概率", "probability")}
       <button class="primary">保存概率</button><small>0% 关闭。命中概率后，由智能体判断是否适合发表情。</small>
     </form></div>
     <p class="sticker-status" role="status"></p>
@@ -347,6 +370,7 @@ export function mountStickers(container) {
     ["设置", section.querySelector("[data-sticker-settings]")],
   ]);
   const probability = section.querySelector(".sticker-probability");
+  const refreshStickerProbability = bindProbabilitySlider(probability, "probability");
   const grid = section.querySelector(".sticker-grid");
   const status = section.querySelector(".sticker-status");
   const dialog = section.querySelector("dialog");
@@ -366,7 +390,10 @@ export function mountStickers(container) {
     } : {});
     const result = await response.json();
     if (!response.ok) throw Error(result.error || "表情包请求失败");
-    if (!body || body.action === "settings") probability.elements.probability.value = result.probability;
+    if (!body || body.action === "settings") {
+      probability.elements.probability.value = result.probability;
+      refreshStickerProbability();
+    }
     categories = result.categories;
     stickers = result.stickers;
     if (filter && filter !== "all" && !categories.some(item => item.id === filter)) filter = "all";
@@ -819,6 +846,7 @@ function accountSettings(container, title, endpoint, fields, defaults, convert) 
   container.append(section);
   const form = section.querySelector("form");
   const button = form.querySelector("button");
+  const sliders = [...form.querySelectorAll(".probability-slider input")].map(input => bindProbabilitySlider(form, input.name));
   const status = form.querySelector("[role=status]");
   async function request(body) {
     const res = await fetch("/api/" + endpoint, body ? {
@@ -830,6 +858,7 @@ function accountSettings(container, title, endpoint, fields, defaults, convert) 
     for (const [key, value] of Object.entries({...defaults, ...data})) {
       if (form.elements[key]) form.elements[key].value = value;
     }
+    sliders.forEach(refresh => refresh());
     const avatar = form.querySelector("img");
     if (avatar) avatar.src = data.avatar.startsWith("data:") ? data.avatar : "/assets/" + data.avatar;
     button.disabled = false;
@@ -867,11 +896,31 @@ export function mountUserSettings(container) {
 
 export function mountSocialSettings(container) {
   return accountSettings(container, "群聊与巡视", "social-settings", `
-    <label>群聊主动发言概率（%）<input name="probability" type="number" min="0" max="100" step="any" required></label>
+    ${probabilitySlider("群聊主动发言概率", "probability")}
     <small>被 @ 时直接唤醒，由智能体决定是否回复。</small>
-    <label>定时巡视<select name="patrol"><option value="off">关闭</option><option value="fixed">每天固定时间</option><option value="random">每天在时段内随机选时</option></select></label>
-    <label>固定时间 / 时段开始（北京时间）<input name="start" type="time" required></label>
-    <label>时段结束（北京时间）<input name="end" type="time" required></label>`,
-    {probability:0, patrol:"off", start:"10:00", end:"22:00"},
-    (form, values) => ({...values, probability: form.elements.probability.valueAsNumber}));
+    <label>定时巡视<select name="patrol"><option value="off">关闭</option><option value="fixed">每天固定时间</option><option value="random">时段内随机间隔</option></select></label>
+    <div class="schedule-pair">
+      <label>固定时间 / 开始（北京时间）<input name="start" type="time" required></label>
+      <label>结束（北京时间）<input name="end" type="time" required></label>
+    </div>
+    <div class="schedule-pair">
+      <label>最短间隔（分钟）<input name="interval_min" type="number" min="1" max="1440" required></label>
+      <label>最长间隔（分钟）<input name="interval_max" type="number" min="1" max="1440" required></label>
+    </div>
+    <small>随机巡视和主动消息各自按此范围抽取间隔。</small>
+    <h3>主动消息</h3>
+    <div class="schedule-pair">
+      <label>开始（北京时间）<input name="direct_start" type="time" required></label>
+      <label>结束（北京时间）<input name="direct_end" type="time" required></label>
+    </div>
+    ${probabilitySlider("主动消息概率", "direct_probability")}
+    <label>未回复消息上限<input name="direct_limit" type="number" min="1" max="20" required></label>
+    <small>到达间隔后抽取一次概率，0% 为关闭。</small>`,
+    {probability:0, patrol:"off", start:"10:00", end:"22:00", interval_min:35, interval_max:120,
+      direct_start:"10:00", direct_end:"22:00", direct_probability:0, direct_limit:1},
+    (form, values) => {
+      for (const name of ["probability", "interval_min", "interval_max", "direct_probability", "direct_limit"])
+        values[name] = form.elements[name].valueAsNumber;
+      return values;
+    });
 }

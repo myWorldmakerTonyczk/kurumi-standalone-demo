@@ -4,6 +4,7 @@ import logging
 import random
 import re
 from datetime import datetime
+import time
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -27,7 +28,26 @@ def social_config(body):
         for value in (start, end)
     ) or (mode == "random" and start >= end):
         raise ValueError("请选择有效的巡视时间，随机时段须在同一天")
-    return dict(probability=probability, patrol=mode, start=start, end=end)
+    def integer(name, default, low, high):
+        value = body.get(name, default)
+        if type(value) is not int or not low <= value <= high:
+            raise ValueError("请输入有效的频率或未回复上限")
+        return value
+
+    minimum = integer("interval_min", 35, 1, 1440)
+    maximum = integer("interval_max", 120, minimum, 1440)
+    direct_start = body.get("direct_start", "10:00")
+    direct_end = body.get("direct_end", "22:00")
+    if not all(isinstance(value, str) and re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value)
+               for value in (direct_start, direct_end)) or direct_start >= direct_end:
+        raise ValueError("主动消息的结束时间须晚于开始时间")
+    direct_probability = body.get("direct_probability", 0)
+    if type(direct_probability) not in (int, float) or not 0 <= direct_probability <= 100:
+        raise ValueError("主动消息概率须在 0～100% 之间")
+    return dict(probability=probability, patrol=mode, start=start, end=end,
+                interval_min=minimum, interval_max=maximum, direct_start=direct_start,
+                direct_end=direct_end, direct_probability=direct_probability,
+                direct_limit=integer("direct_limit", 1, 1, 20))
 
 
 class Social:
@@ -39,6 +59,12 @@ class Social:
         self.db.execute("""CREATE TABLE IF NOT EXISTS agent_patrol_runs(
             owner TEXT PRIMARY KEY REFERENCES sim_users(id) ON DELETE CASCADE,
             day TEXT NOT NULL, minute INTEGER NOT NULL, ran INTEGER NOT NULL)""")
+
+        self.running = set()
+        self.db.execute("""CREATE TABLE IF NOT EXISTS agent_social_clock(
+            owner TEXT REFERENCES sim_users(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL, schedule TEXT NOT NULL, minute INTEGER NOT NULL,
+            PRIMARY KEY(owner,kind))""")
 
     def identity(self, owner):
         return self.app.profile(owner).get("agent_name") or "久留美"
@@ -81,7 +107,7 @@ class Social:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def on_message(self, room, message_id):
-        message = self.db.execute("SELECT body FROM community_group_messages WHERE id=? AND room=? AND NOT is_agent",
+        message = self.db.execute("SELECT body,created FROM community_group_messages WHERE id=? AND room=? AND NOT is_agent",
                                   (message_id, room)).fetchone()
         if not message:
             return
@@ -89,10 +115,13 @@ class Social:
             owner = row[0]
             profile = self.app.profile(owner)
             mention = re.search(r"@" + re.escape(self.identity(owner)) + r"(?=$|[\s，。！？、,.!?：:])", message[0])
-            if mention or random.random() * 100 < profile.get("social", {}).get("probability", 0):
-                self.submit(self.reply, owner, room, message_id)
+            followup = self.db.execute("""SELECT 1 FROM community_group_messages
+                WHERE room=? AND owner=? AND is_agent=1 AND id<? AND created BETWEEN ? AND ?
+                LIMIT 1""", (room, owner, message_id, message["created"] - 5, message["created"])).fetchone() is not None
+            if mention or followup or random.random() * 100 < profile.get("social", {}).get("probability", 0):
+                self.submit(self.reply, owner, room, message_id, followup)
 
-    async def reply(self, owner, room, message_id):
+    async def reply(self, owner, room, message_id, followup=False):
         async with self.slots:
             try:
                 if not self.joined(room, owner):
@@ -108,8 +137,9 @@ class Social:
                     return
                 context = [{"name": self.identity(row["owner"]) if row["is_agent"] else row["nickname"],
                             "message": row["body"]} for row in reversed(rows)]
+                task_prompt = workflow("group_followup" if followup else "group")
                 result = await model_client(config, self.app.model_url).ainvoke([
-                    SystemMessage(content=(profile.get("persona") or self.app.default_persona) + "\n你的名字是 " + self.identity(owner) + "\n" + workflow("group")),
+                    SystemMessage(content=(profile.get("persona") or self.app.default_persona) + "\n你的名字是 " + self.identity(owner) + "\n" + task_prompt),
                     HumanMessage(content=dump({"history": context[:-1], "new_message": context[-1]})),
                 ])
                 content = result.text.strip()
@@ -120,8 +150,8 @@ class Social:
 
     def send(self, owner, room, content):
         if self.joined(room, owner) and self.app.external.settings(owner)["mode"] == "platform":
-            self.db.execute("INSERT INTO community_group_messages(room,owner,body,is_agent) VALUES(?,?,?,1)",
-                            (room, owner, content[:1500]))
+            self.db.execute("INSERT INTO community_group_messages(room,owner,body,is_agent,created) VALUES(?,?,?,1,?)",
+                            (room, owner, content[:1500], time.time()))
             return True
         return False
 
@@ -169,31 +199,95 @@ class Social:
             except Exception:
                 log.exception("Agent patrol failed")
 
+    def unanswered(self, gid):
+        return self.db.execute("""SELECT count(*) FROM demo_chat WHERE game=? AND proactive=1
+            AND id > COALESCE((SELECT max(id) FROM demo_chat WHERE game=? AND role='user'),0)""",
+            (gid, gid)).fetchone()[0]
+
+    async def direct(self, owner):
+        async with self.slots:
+            try:
+                profile = self.app.profile(owner)
+                config = social_config(profile.get("social", {}))
+                model = selected(profile)
+                game = next((item for item in self.app.engine.games() if item["owner_id"] == owner), None)
+                clock = datetime.now(ZONE).strftime("%H:%M")
+                if (not game or not model.get("key") or not config["direct_probability"]
+                        or not config["direct_start"] <= clock <= config["direct_end"]
+                        or self.app.external.settings(owner)["mode"] != "platform"):
+                    return
+                gid = game["id"]
+                if self.unanswered(gid) >= config["direct_limit"]:
+                    return
+                history = [dict(row) for row in self.db.execute(
+                    "SELECT role,content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 8", (gid,))]
+                reply = await model_client(model, self.app.model_url).ainvoke([
+                    SystemMessage(content=(profile.get("persona") or self.app.default_persona) + "\n" + workflow("proactive")),
+                    HumanMessage(content=dump({"time": datetime.now(ZONE).isoformat(), "history": history[::-1]})),
+                ])
+                content = reply.text.strip()
+                latest = social_config(self.app.profile(owner).get("social", {}))
+                if (content and content != "[SKIP]" and latest["direct_probability"]
+                        and latest["direct_start"] <= datetime.now(ZONE).strftime("%H:%M") <= latest["direct_end"]
+                        and self.unanswered(gid) < latest["direct_limit"]
+                        and self.app.external.settings(owner)["mode"] == "platform"
+                        and any(item["id"] == gid and item["owner_id"] == owner for item in self.app.engine.games())):
+                    self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)
+                        VALUES(?,'assistant',?,?,1)""", (gid, content[:1500], time.time()))
+            except Exception:
+                log.exception("Proactive message failed")
+
+    def queue_clock(self, owner, kind, schedule, target):
+        self.db.execute("""INSERT OR REPLACE INTO agent_social_clock(owner,kind,schedule,minute)
+            VALUES(?,?,?,?)""", (owner, kind, schedule, target))
+
+    async def run_scheduled(self, owner, kind, action):
+        try:
+            await action(owner)
+        finally:
+            self.running.discard((owner, kind))
+
     def tick(self, now):
-        day = now.date().isoformat()
+        def clock(value):
+            hours, minutes = map(int, value.split(":"))
+            return hours * 60 + minutes
+
         minute = now.hour * 60 + now.minute
         for row in self.db.execute("SELECT owner FROM demo_profiles").fetchall():
             owner = row[0]
             profile = self.app.profile(owner)
-            config = profile.get("social", {})
-            mode = config.get("patrol", "off")
-            if mode == "off" or self.app.external.settings(owner)["mode"] != "platform" or not selected(profile).get("key"):
+            if self.app.external.settings(owner)["mode"] != "platform" or not selected(profile).get("key"):
                 continue
-            def clock(value):
-                hours, minutes = map(int, value.split(":"))
-                return hours * 60 + minutes
-            start = clock(config["start"])
-            end = clock(config["end"]) if mode == "random" else start
-            run = self.db.execute("SELECT day,minute,ran FROM agent_patrol_runs WHERE owner=?", (owner,)).fetchone()
-            if run and run["day"] == day and run["ran"]:
-                continue
-            if not run or run["day"] != day or not start <= run["minute"] <= end:
-                target = random.randint(start, end)
-                self.db.execute("INSERT OR REPLACE INTO agent_patrol_runs VALUES(?,?,?,0)", (owner, day, target))
-            else:
-                target = run["minute"]
-            if target <= minute <= end and self.submit(self.run_patrol, owner):
-                self.db.execute("UPDATE agent_patrol_runs SET ran=1 WHERE owner=?", (owner,))
+            config = social_config(profile.get("social", {}))
+            mode = config["patrol"]
+            interval = (config["interval_min"], config["interval_max"])
+            if mode != "off":
+                self.tick_clock(owner, "patrol", now, minute, clock(config["start"]),
+                                clock(config["end"]) if mode == "random" else clock(config["start"]),
+                                None if mode == "fixed" else interval, 100, self.run_patrol)
+            if config["direct_probability"]:
+                self.tick_clock(owner, "direct", now, minute, clock(config["direct_start"]),
+                                clock(config["direct_end"]), interval, config["direct_probability"], self.direct)
+
+    def tick_clock(self, owner, kind, now, minute, start, end, interval, probability, action):
+        if not start <= minute <= end or (owner, kind) in self.running:
+            return
+        schedule = dump((now.date().isoformat(), start, end, interval))
+        row = self.db.execute("SELECT schedule,minute FROM agent_social_clock WHERE owner=? AND kind=?",
+                              (owner, kind)).fetchone()
+        if not row or row["schedule"] != schedule:
+            target = minute + random.randint(*interval) if interval else start
+            self.queue_clock(owner, kind, schedule, target)
+        else:
+            target = row["minute"]
+        if minute < target:
+            return
+        if random.random() * 100 < probability:
+            if not self.submit(self.run_scheduled, owner, kind, action):
+                return
+            self.running.add((owner, kind))
+        next_target = minute + random.randint(*interval) if interval else end + 1
+        self.queue_clock(owner, kind, schedule, next_target)
 
     async def patrol(self):
         while True:

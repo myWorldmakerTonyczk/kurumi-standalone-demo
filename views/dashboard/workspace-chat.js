@@ -127,9 +127,10 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     row.prepend(speaker);
   }
   let floatingPosition, drag, loadedGame, busy = false;
+  let lastProactiveId = 0, polling = false;
 
-  async function request(route, gid, body) {
-    const response = await fetch("/api/" + route + "?" + new URLSearchParams({game: gid}), body ? {
+  async function request(route, gid, body, query = {}) {
+    const response = await fetch("/api/" + route + "?" + new URLSearchParams({game: gid, ...query}), body ? {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
     } : {});
     const result = await response.json();
@@ -226,11 +227,29 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
         const parts = message.role === "assistant" ? await splitReply(message.content) : [message.content];
         parts.forEach((part, i) => add(message.role, part, i === 0 ? message.attachments : []));
       }
+      lastProactiveId = chat.at(-1)?.id ?? 0;
       loadedGame = gid;
       status.textContent = "";
     } catch (error) { status.textContent = error.message; }
     finally { busy = false; form.querySelector("button").disabled = false; }
   };
+  setInterval(async () => {
+    const gid = gameId();
+    if (busy || polling || document.hidden || !loadedGame || gid !== loadedGame ||
+        windowBox.hidden || identity.agent_mode === "external") return;
+    polling = true;
+    try {
+      const {entries} = await request("proactive-chat", gid, undefined, {after: lastProactiveId});
+      if (busy || gid !== loadedGame || gameId() !== gid) return;
+      for (const entry of entries) {
+        add("assistant", entry.content);
+        lastProactiveId = entry.id;
+      }
+    } catch {
+      // A later poll retries without interrupting the chat.
+    } finally { polling = false; }
+  }, 5000);
+
   async function splitReply(reply) {
     if (identity.split_reply === false || /(^|\n)\s*(?:[#|>]|[-*+]\s|\d+[.)]\s)/.test(reply) || reply.includes("```"))
       return [reply];

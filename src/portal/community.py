@@ -1,4 +1,6 @@
 """Authenticated community forum and shared room."""
+import time
+
 from aiohttp import web
 
 
@@ -180,7 +182,7 @@ class Community:
             content = body.get("body")
             if not isinstance(content,str) or not 1 <= len(content.strip()) <= 1500:
                 raise ValueError("消息须为 1～1500 字")
-            cursor = self.db.execute("INSERT INTO community_group_messages(room,owner,body) VALUES(?,?,?)",
-                                     (room, owner, content.strip()))
+            cursor = self.db.execute("INSERT INTO community_group_messages(room,owner,body,created) VALUES(?,?,?,?)",
+                                     (room, owner, content.strip(), time.time()))
             return {"ok": True, "message_id": cursor.lastrowid}
         return {"ok": True}

@@ -1,16 +1,22 @@
 import { insertMention } from "./workspace-chat.js";
 
-export function mountCommunity(root) {
+export function mountCommunity(root, sidebar, openPage) {
   root.innerHTML = `
     <div class="settings-illustration" data-section="api"><h2>社区</h2><p>交流模拟交易心得，或者去群聊打个招呼。</p></div>
     <nav class="workspace-switch" aria-label="社区"><button type="button" data-view="forum">论坛</button><button type="button" data-view="group-chat">群聊</button></nav>
-    <div data-groups hidden></div>
+    <div class="community-groups" data-groups hidden></div>
     <dialog data-create-group class="panel"><form>
       <h3>创建群聊</h3><label>群名<input name="name" maxlength="40" required></label>
       <label>加入方式<select name="visibility"><option value="public">公开 · 直接加入</option><option value="private">私有 · 群主审核</option></select></label>
       <button type="button" data-cancel>取消</button><button class="primary">创建</button>
       <p role="status"></p>
-    </form></dialog><div class="community-layout"><div data-feed></div><form class="panel">
+    </form></dialog><div class="community-layout">
+      <div class="group-window-bar" hidden>
+        <strong data-room-title>公共大厅</strong>
+        <div>
+        <button type="button" data-float aria-pressed="false">取消固定</button>
+        <button type="button" data-full aria-pressed="false">全屏</button><button type="button" data-close-group aria-label="关闭群聊">×</button></div>
+      </div><div data-feed></div><form class="panel">
       <h3></h3><div data-agents></div><label data-title>标题<input name="title" maxlength="100"></label>
       <label>正文<textarea name="body" rows="4" maxlength="6000" required></textarea></label>
       <button class="primary" type="submit">发布</button><p role="status"></p>
@@ -21,6 +27,116 @@ export function mountCommunity(root) {
   const status = form.querySelector("[role=status]");
   let room = "";
   const groups = root.querySelector("[data-groups]");
+  const layout = root.querySelector(".community-layout");
+  const bar = root.querySelector(".group-window-bar");
+  const title = bar.querySelector("[data-room-title]");
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "community-sidebar-toggle";
+  toggle.hidden = true;
+  toggle.setAttribute("aria-controls", "community-group-list");
+  sidebar.after(toggle);
+  const float = bar.querySelector("[data-float]");
+  const full = bar.querySelector("[data-full]");
+  groups.id = "community-group-list";
+  sidebar.append(groups);
+  const overlay = document.createElement("div");
+  overlay.className = "community-room community-overlay";
+  overlay.hidden = true;
+  overlay.innerHTML = `<section class="floating-group-list" aria-label="群聊列表">
+    <header><strong>群聊列表</strong><button type="button" aria-label="关闭群聊列表">×</button></header>
+  </section>`;
+  document.body.append(overlay);
+  const picker = overlay.firstElementChild;
+  const pickerBar = picker.querySelector("header");
+  const close = bar.querySelector("[data-close-group]");
+  let shortcut = false;
+  let pickerOpen = false, chatClosed = false;
+
+  let visible = false, collapsed = false, mode = "docked", drag;
+
+  function renderWindow() {
+    const chatting = !shortcut && visible && view === "group-chat";
+    overlay.hidden = !shortcut;
+    picker.hidden = !pickerOpen;
+    layout.hidden = shortcut ? pickerOpen : chatClosed;
+    close.hidden = mode === "docked";
+    groups.hidden = shortcut ? !pickerOpen : !chatting || collapsed || mode === "full";
+    bar.hidden = view !== "group-chat";
+    document.body.classList.toggle("community-groups-active", chatting);
+    document.body.classList.toggle("community-groups-collapsed", chatting && (collapsed || mode === "full"));
+    layout.classList.toggle("group-window-floating", mode === "floating");
+    layout.classList.toggle("group-window-full", mode === "full");
+    toggle.hidden = !chatting || mode === "full";
+    toggle.title = collapsed ? "展开群列表" : "收起群列表";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-expanded", String(chatting && !groups.hidden));
+    float.hidden = mode === "full";
+    float.textContent = mode === "floating" ? "固定" : "取消固定";
+    float.setAttribute("aria-pressed", String(mode === "floating"));
+    full.textContent = mode === "full" ? "退出全屏" : "全屏";
+    full.setAttribute("aria-pressed", String(mode === "full"));
+  }
+
+  function setMode(next) {
+    mode = next;
+    drag = undefined;
+    layout.removeAttribute("style");
+    renderWindow();
+  }
+
+  toggle.onclick = () => { collapsed = !collapsed; renderWindow(); };
+  float.onclick = () => {
+    if (shortcut) {
+      const selectedRoom = room;
+      restorePage();
+      openPage();
+      select("group-chat", "", selectedRoom);
+    } else setMode(mode === "floating" ? "docked" : "floating");
+  };
+  close.onclick = () => {
+    if (shortcut) {
+      pickerOpen = true;
+      setMode("floating");
+      loadGroups().catch(showListError);
+      pickerBar.querySelector("button").focus();
+    } else {
+      chatClosed = true;
+      setMode("docked");
+    }
+  };
+  pickerBar.querySelector("button").onclick = () => restorePage();
+  full.onclick = () => setMode(mode === "full" ? (shortcut ? "floating" : "docked") : "full");
+  function position(panel, left, top) {
+    const bounds = panel.getBoundingClientRect();
+    panel.style.left = Math.max(0, Math.min(left, innerWidth - bounds.width)) + "px";
+    panel.style.top = Math.max(0, Math.min(top, innerHeight - bounds.height)) + "px";
+  }
+  function draggable(handle, panel, canDrag) {
+    handle.onpointerdown = event => {
+      if (!canDrag() || event.button !== 0 || event.target.closest("button")) return;
+      const rect = panel.getBoundingClientRect();
+      drag = {id: event.pointerId, x: event.clientX - rect.left, y: event.clientY - rect.top};
+      position(panel, rect.left, rect.top);
+      handle.setPointerCapture(event.pointerId);
+    };
+    handle.onpointermove = event => {
+      if (drag?.id === event.pointerId) position(panel, event.clientX - drag.x, event.clientY - drag.y);
+    };
+    handle.onlostpointercapture = () => { drag = undefined; };
+  }
+  draggable(bar, layout, () => mode === "floating");
+  draggable(pickerBar, picker, () => pickerOpen);
+  window.addEventListener("resize", () => {
+        const panel = shortcut && pickerOpen ? picker : layout;
+    if (panel === layout && ((!visible && !shortcut) || mode !== "floating")) return;
+    const {left, top} = panel.getBoundingClientRect();
+    position(panel, left, top);
+  });
+  document.addEventListener("keydown", event => {
+    if ((visible || shortcut) && mode === "full" && event.key === "Escape" && !dialog.open)
+      setMode(shortcut ? "floating" : "docked");
+  });
   let view = "forum", thread = "", generation = 0, latest = "", groupSignature = "";
   const node = (tag, value) => Object.assign(document.createElement(tag), {textContent: value});
   async function request(route, post, body) {
@@ -49,9 +165,32 @@ export function mountCommunity(root) {
     item.append(byline, node("p", entry.body));
     return item;
   }
+  function showListError(error) {
+    if (shortcut && pickerOpen) { groupSignature = ""; groups.replaceChildren(node("p", error.message)); }
+    else status.textContent = error.message;
+  }
+  function openRoom(id = "") {
+    if (shortcut) {
+      pickerOpen = false;
+      setMode("floating");
+    }
+    select("group-chat", "", id);
+  }
+  function restorePage() {
+    shortcut = false;
+    pickerOpen = false;
+    ++generation;
+    sidebar.append(groups);
+    root.append(dialog, layout);
+    setMode("docked");
+    if (visible) select(pageView, pageThread, pageRoom);
+  }
+  let pageView = "forum", pageThread = "", pageRoom = "";
+
   async function loadGroups() {
     const {groups: entries} = await request("groups", "");
-    if (view !== "group-chat") return;
+    if ((!visible && !shortcut) || view !== "group-chat") return;
+    title.textContent = room ? entries.find(entry => String(entry.id) === room)?.name || "群聊" : "公共大厅";
     const signature = JSON.stringify([room, entries]);
     if (groupSignature === signature) return;
     groupSignature = signature;
@@ -60,7 +199,7 @@ export function mountCommunity(root) {
     create.onclick = () => { dialog.querySelector("[role=status]").textContent = ""; dialog.showModal(); };
     list.append(create);
     const lobby = node("button", "公共大厅");
-    lobby.onclick = () => select("group-chat");
+    lobby.onclick = () => openRoom();
     list.append(lobby);
     for (const entry of entries) {
       const id = String(entry.id);
@@ -75,7 +214,7 @@ export function mountCommunity(root) {
             await loadGroups();
             return;
           }
-          select("group-chat", "", id);
+          openRoom(id);
         } catch (error) { status.textContent = error.message; }
       };
       row.append(open, node("small", (entry.private ? "私有群" : "公开群") + " · 群主 " + entry.leader));
@@ -143,7 +282,7 @@ export function mountCommunity(root) {
       const result = await request("groups", "", {name, private: visibility === "private"});
       event.target.reset();
       dialog.close();
-      select("group-chat", "", String(result.id));
+      openRoom(String(result.id));
     } catch (error) { dialog.querySelector("[role=status]").textContent = error.message; }
     finally { button.disabled = false; }
   };
@@ -198,9 +337,12 @@ export function mountCommunity(root) {
   }
   function select(route, post = "", nextRoom = "") {
     room = nextRoom;
-    groups.hidden = route !== "group-chat";
-    root.classList.toggle("community-room", !groups.hidden);
+    chatClosed = false;
     view = route;
+    if (!shortcut) [pageView, pageThread, pageRoom] = [route, post, nextRoom];
+    root.classList.toggle("community-room", route === "group-chat");
+    if (route !== "group-chat") setMode("docked");
+    else renderWindow();
     thread = post;
     latest = "";
     const posting = view === "forum" && !thread;
@@ -217,7 +359,7 @@ export function mountCommunity(root) {
     form.querySelector("[data-agents]").replaceChildren();
     status.textContent = "";
     feed.replaceChildren();
-    if (!groups.hidden) loadGroups().catch(error => { status.textContent = error.message; });
+    if (view === "group-chat") loadGroups().catch(showListError);
     load();
   }
   form.onsubmit = async event => {
@@ -234,9 +376,32 @@ export function mountCommunity(root) {
   };
   root.querySelectorAll("[data-view]").forEach(button => { button.onclick = () => select(button.dataset.view); });
   setInterval(() => {
-    if (root.hidden || document.hidden) return;
+    if ((!shortcut && root.hidden) || document.hidden) return;
     if (view === "group-chat") loadGroups().catch(() => {});
-    if (view === "group-chat" || thread) load();
+    if (!layout.hidden && (view === "group-chat" || thread)) load();
   }, 4000);
-  return {open: () => select(view, thread, room)};
+  return {
+    open() {
+      if (shortcut) restorePage();
+      else select(pageView, pageThread, pageRoom);
+    },
+    openFloating() {
+      if (shortcut && pickerOpen) { restorePage(); return; }
+      shortcut = true;
+      pickerOpen = true;
+      ++generation;
+      view = "group-chat";
+      picker.append(groups);
+      overlay.append(dialog, layout);
+      groupSignature = "";
+      setMode("floating");
+      loadGroups().catch(showListError);
+      pickerBar.querySelector("button").focus();
+    },
+    setVisible(value) {
+      visible = value;
+      if (!visible && !shortcut && mode !== "docked") setMode("docked");
+      else renderWindow();
+    },
+  };
 }
