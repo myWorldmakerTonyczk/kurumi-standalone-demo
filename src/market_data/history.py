@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import time
+from aiohttp import ClientConnectorDNSError
+
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
@@ -333,7 +335,7 @@ class History:
             bars = [b for b in bars if b["time"] < before]
         return bars
 
-    async def page(self, settings, pair, period="5m", before=0, limit=200):
+    async def page(self, settings, pair, period="5m", before=0, limit=200, *, refresh=False):
         if settings.get("history_source") == "frankfurter":
             return await self.reference.page(settings, pair, period, before, limit)
         if pair not in PAIRS or period not in PERIODS:
@@ -365,7 +367,7 @@ class History:
             fresh = bool(
                 checked and checked[0] >= bucket(time.time(), period, source(settings))
             )
-            complete = complete or bool(not before and fresh and len(bars) >= limit)
+            complete = complete or len(bars) >= limit
             request_before = before
             request_limit = limit
             checkpoint = self.engine.db.execute(
@@ -384,7 +386,7 @@ class History:
                 ).fetchone()
                 complete = complete or covered
             if (
-                not complete
+                (refresh or not complete)
                 and (len(bars) < limit or not before)
                 and time.monotonic() - self.loaded.get(key, -1000) > 30
             ):
@@ -394,6 +396,10 @@ class History:
                         remote = await self.remote(
                             settings, pair, period, request_before, request_limit
                         )
+                        if not remote and not request_before:
+                            remote = await self.remote(
+                                settings, pair, period, int(started) + 1, request_limit
+                            )
                     with self.engine.transaction():
                         for bar in remote:
                             old = self.engine.db.execute(
@@ -440,6 +446,8 @@ class History:
                     error = (
                         str(exc)
                         if isinstance(exc, ValueError)
+                        else "历史行情域名解析失败，请检查服务端网络"
+                        if isinstance(exc, ClientConnectorDNSError)
                         else "历史行情获取失败，请稍后重试"
                     )
                     if not bars:
@@ -447,8 +455,8 @@ class History:
             has_more = len(bars) > limit or self.remote_more.get(
                 (feed, pair, period, before), False
             )
-            # A full page can still have older provider data; try once at the next cursor.
-            if len(bars) == limit:
+            # Short pages can occur around holidays or provider limits. Continue until an empty page.
+            if bars:
                 has_more = True
             selected = bars[-limit:]
             return dict(

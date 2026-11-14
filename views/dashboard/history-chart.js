@@ -322,6 +322,7 @@ export class HistoryChart {
     const feed = this.feed,
       period = this.period;
     entry.loading = true;
+    if (!before && pair === this.pair) this.chart.timeScale().applyOptions({fixLeftEdge: false});
     entry.request = (async () => {
       try {
         const data = await this.bridge.apiGet("history", {
@@ -366,7 +367,10 @@ export class HistoryChart {
       await this.fetch(pair, entry.bars[0]?.time || 0);
       if (pair !== this.pair || feed !== this.feed) return;
       const added = entry.bars.length - old;
-      if (!added) entry.more = false;
+      if (!added && !entry.warning) {
+        entry.more = false;
+        this.chart.timeScale().applyOptions({fixLeftEdge: true});
+      }
       this.programmatic = true;
       if (range)
         this.chart.timeScale().setVisibleLogicalRange({
@@ -410,7 +414,7 @@ export class HistoryChart {
     if (!entry.loading)
       this.status(
         entry.warning ||
-          `已加载 ${entry.bars.length} ${this.reference ? "条参考价" : "根"} · ${this.period} · ${entry.more ? "左拖或点击加载更早" : "已到当前数据源可提供的最早记录"}`,
+          `已加载 ${entry.bars.length} ${this.reference ? "条参考价" : "根"} · ${this.period} · ${entry.more ? "左拖或点击加载更早" : "当前行情源没有返回更早的 K 线"}`,
       );
   }
   fit() {

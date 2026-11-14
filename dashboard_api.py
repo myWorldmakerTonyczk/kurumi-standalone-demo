@@ -1,4 +1,5 @@
 """HTTP adapters for the original Kurumi dashboard."""
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -12,11 +13,11 @@ from src.core.replay import review
 from src.core.trading import lock_for
 from src.diary.settings import settings as diary_settings
 from src.diary.store import DiaryStore
-from src.market_data.history import History, identity
+from src.market_data.history import History, PERIODS, identity
 from src.market_data.market import probe
 from src.market_data.settings import merge_settings, public_settings
 from src.portal.server import Portal, settings as portal_settings
-from src.users import policy
+from src.users import ownership, policy
 
 
 class Dashboard:
@@ -24,6 +25,7 @@ class Dashboard:
         self.demo = demo
         self.engine = demo.engine
         self.history = History(self.engine, demo.market)
+        self.download_lock = asyncio.Lock()
         self.diary = SimpleNamespace(store=DiaryStore(self.engine))
         self.portal = Portal(demo)
         self.portal.access = demo.accounts.access
@@ -51,12 +53,44 @@ class Dashboard:
         bars = self.history.cached(identity(config), pair, period, before or int(time.time()) + 1, limit)
         return dict(bars=bars, warning="当前为演示行情", has_more=False)
 
+    async def download_history(self):
+        if self.demo.demo:
+            raise ValueError("预下载需要启用真实行情")
+        if self.download_lock.locked():
+            raise ValueError("正在预下载，请稍候")
+        config = dict(self.demo.settings(), history_source="market")
+        async with self.download_lock:
+            async def download(pair, period):
+                total = 0
+                cursor = 0
+                for _ in range(2):
+                    page = await self.history.page(config, pair, period, cursor, 200, refresh=not cursor)
+                    total += len(page["bars"])
+                    cursor = page["next_before"]
+                    if page["warning"] or not cursor:
+                        break
+                return total, page["warning"] or ("暂无历史数据" if not total else "")
+
+            series = [(pair, period) for pair in PAIRS for period in PERIODS]
+            results = await asyncio.gather(*(download(*item) for item in series), return_exceptions=True)
+            failures = []
+            count = 0
+            for (pair, period), result in zip(series, results):
+                if isinstance(result, Exception):
+                    failures.append(f"{pair} {period}：{result}")
+                else:
+                    count += result[0]
+                    if result[1]:
+                        failures.append(f"{pair} {period}：{result[1]}")
+            return dict(message=f"预下载完成，公共缓存已覆盖 {count} 根 K 线"
+                                + (f"。{len(failures)} 组未完整获取：{failures[0]}" if failures else "。"))
+
     async def records(self, request, action, game):
         query = request.query
         gid = game["id"]
         if action == "review":
             return await review(self.demo, gid, query.get("pair", ""),
-                                int(query.get("days", 1)), int(query.get("end", 0)))
+                                int(query.get("days", 1)), int(query.get("end", 0)), period=query.get("period", ""))
         if action == "history":
             source = query.get("history_source", self.demo.settings().get("history_source", "market"))
             if source not in {"market", "frankfurter"}:
@@ -126,6 +160,8 @@ class Dashboard:
             if action == "settings":
                 self.put("market", merge_settings(self.demo.settings(), body))
                 return {"ok": True}
+            if action == "download-history":
+                return await self.download_history()
             if action == "connection-test":
                 return await probe(merge_settings(self.demo.settings(), body))
             if action == "portal-settings":
@@ -145,7 +181,14 @@ class Dashboard:
         params = body.get("params") or {}
         if name == "create":
             options = dict(body.get("options", {}))
-            options.setdefault("user_binding", {"type": "random", "values": []})
+            binding = ownership.normalize(options.get("user_binding", {"type": "random", "values": []}))
+            if binding["type"] != "random":
+                raise ValueError("独立版使用网页用户账号")
+            if binding["values"]:
+                owner = ownership.owner_for_token(self.engine.db, binding["values"][0])
+                if any(game.get("owner_id") == owner for game in self.engine.games()):
+                    raise ValueError("该用户已有交易工作区")
+            options["user_binding"] = binding
             game = self.engine.create(options)
             user, password = await self.demo.accounts.issue(game["owner_id"])
             self.demo.accounts.allow_trade(game["id"], True)

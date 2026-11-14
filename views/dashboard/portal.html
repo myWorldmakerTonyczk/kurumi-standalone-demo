@@ -31,17 +31,48 @@
     </header>
     <p id="portal-status" role="status"></p>
     <section id="portal-welcome" class="portal-card">
-      <div class="portal-welcome-art" aria-hidden="true"></div>
+      <div class="portal-welcome-art" role="img" aria-label="久留美看着手机，想着好股票"></div>
       <div class="portal-welcome-content">
-      <h2 id="portal-welcome-title">打开你的复盘</h2>
-      <p id="portal-welcome-copy">使用管理面板发放的账号和密码登录。</p>
+      <h2 id="portal-welcome-title">登录交易工作区</h2>
+      <p id="portal-welcome-copy">请使用管理员发放的账号和密码。</p>
       <form id="portal-login" method="post" action="/api/login">
         <label>账号 <input name="username" autocomplete="username" required maxlength="300"></label>
         <label>密码 <input name="password" type="password" autocomplete="current-password" required maxlength="128"></label>
-        <button type="submit">登录模拟交易面板</button>
+        <button type="submit">进入工作区</button>
       </form>
       <button id="portal-exchange" type="button" hidden>打开只读面板</button>
       </div>
+    </section>
+    <section id="first-game" class="portal-card portal-records" hidden>
+      <header class="first-game-hero">
+        <h2>设置个人资料</h2>
+        <p>设置昵称、人格和模型后开始。初始本金为 1,000 虚拟美元。</p>
+      </header>
+      <form id="first-game-form">
+        <div id="setup-profile"><label>昵称<input name="nickname" maxlength="40" autocomplete="nickname" required></label>
+        <div class="avatar-upload">
+          <img id="avatar-preview" src="/assets/user-avatar.svg" width="64" height="64" alt="头像预览">
+          <div><strong>头像（选填）</strong><small>PNG、JPEG 或 WebP，最大 5 MB</small>
+            <button id="choose-avatar" type="button">选择图片</button>
+            <button id="reset-avatar" type="button" hidden>恢复默认</button>
+            <input id="avatar-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+          </div>
+        </div>
+          <label>智能体名称<input name="agent_name" maxlength="40" placeholder="久留美"></label>
+          <label>智能体头像（选填）<input name="agent_picture" type="file" accept="image/png,image/jpeg,image/webp"></label>
+        </div>
+        <label id="setup-persona" hidden>人格设定<textarea name="persona" rows="6" maxlength="4000"></textarea></label>
+        <div id="setup-model" hidden>
+          <div class="setup-model-selectors">
+            <label>模型提供商<select id="setup-provider"></select></label>
+            <label>模型<select id="setup-model-choice"></select></label>
+          </div>
+          <label id="setup-custom-model" hidden>自定义模型 ID<input name="model" maxlength="4000" placeholder="输入该供应商的模型 ID"></label>
+          <label>API Key<input name="key" type="password" autocomplete="new-password" maxlength="4000"></label>
+          <small>可以跳过，之后在「模型与 API」中配置。</small>
+        </div>
+        <button class="first-game-submit" type="submit">下一步</button>
+      </form>
     </section>
     <section id="portal-banner" class="portal-banner" hidden>
       <p>久留美的外汇日记</p>
@@ -52,6 +83,13 @@
     <section id="portal-review" class="public-replay" hidden></section>
     <section id="portal-trading" hidden></section>
     <section id="portal-records" class="portal-records" hidden></section>
+    <dialog id="avatar-editor" aria-labelledby="avatar-editor-title">
+      <h2 id="avatar-editor-title">裁剪头像</h2>
+      <p>拖动圆形选区，也可以用方向键微调。</p>
+      <canvas id="avatar-crop" tabindex="0" aria-label="头像裁剪选区"></canvas>
+      <label>圆框大小<input id="avatar-size" type="range" min="25" max="100" value="75"></label>
+      <div class="avatar-editor-actions"><button id="cancel-avatar" type="button">取消</button><button id="apply-avatar" type="button">使用头像</button></div>
+    </dialog>
   </main>
   </div>
 </body>

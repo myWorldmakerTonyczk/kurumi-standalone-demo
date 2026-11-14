@@ -308,7 +308,7 @@ class Portal(Operations):
             result = await review(
                 self.plugin, game["id"], request.query.get("pair", ""),
                 int(request.query.get("days", 1)), int(request.query.get("end", 0)),
-                private=session["mode"] != "summary",
+                private=session["mode"] != "summary", period=request.query.get("period", ""),
             )
         if self.identity(request) != session:
             raise web.HTTPUnauthorized()

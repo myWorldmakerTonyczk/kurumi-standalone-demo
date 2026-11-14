@@ -3,3 +3,4 @@ langchain==1.2.12
 langchain-openai==1.1.11
 tzdata>=2024.1
 
+Pillow>=10.1,<14

@@ -1,0 +1,48 @@
+:root {
+  color-scheme: light;
+  font-family: "DM Sans", "Microsoft YaHei UI", system-ui, sans-serif;
+  color: #342538;
+  background: #eee5ef;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: clamp(16px, 5vw, 72px);
+  background: radial-gradient(ellipse at 18% 16%, #fbe4ed, transparent 57%), #eee5ef;
+}
+.login {
+  width: min(100%, 1080px);
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  border: 1px solid #fff;
+  border-radius: 24px;
+  overflow: hidden;
+  background: #fffafd;
+  box-shadow: 0 22px 68px #512c5326;
+}
+.login-art {
+  background: #574052 url("/assets/kurumi-earnings-quote-hd.png") center bottom / cover no-repeat;
+}
+.login-panel { padding: clamp(26px, 5vw, 62px); }
+.brand { display: flex; align-items: center; gap: 12px; color: #753456; font-weight: 650; }
+.brand img { border-radius: 12px; object-fit: cover; }
+h1 { font-size: clamp(26px, 3vw, 34px); margin: 24px 0 8px; letter-spacing: -.03em; }
+#hint { font-size: 14px; color: #695669; line-height: 1.65; margin: 0 0 24px; }
+#hint:empty, #status:empty { display: none; }
+form { display: grid; gap: 15px; margin-top: 22px; }
+label { display: grid; gap: 7px; font-size: 14px; font-weight: 600; }
+input, button { font: inherit; min-height: 46px; border-radius: 10px; }
+input { min-width: 0; padding: 9px 12px; color: inherit; border: 1px solid #dac9d7; background: #fff; }
+input:focus-visible, button:focus-visible { outline: 2px solid #a54a7b; outline-offset: 3px; }
+button { margin-top: 5px; padding: 10px 14px; border: 0; background: #873b63; color: white; cursor: pointer; font-weight: 650; }
+button:hover { background: #743052; }
+button:disabled { opacity: .68; cursor: wait; }
+#status { font-size: 14px; color: #963454; overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .login { grid-template-columns: minmax(0, 1fr); }
+  .login-art { min-height: clamp(140px, 42vw, 240px); background-position: center bottom; }
+}

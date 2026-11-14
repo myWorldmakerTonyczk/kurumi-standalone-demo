@@ -1832,7 +1832,7 @@ input[type="checkbox"]:disabled { opacity: .55; cursor: default; }
 .managed-user > .managed-user-heading { display: flex; }
 
 /* The signed-in remote workspace shares View markup and styles. */
-[data-remote-workspace] :is(.workspace-switch, #back-to-catalog, #instance-context, [data-page="setup"], [data-page="catalog"]) {
+[data-remote-workspace] :is(#back-to-catalog, #instance-context, [data-page="setup"], [data-page="catalog"]) {
   display: none !important;
 }
 [data-remote-workspace] [data-portal-prohibited="true"] { cursor: help; }
@@ -1878,3 +1878,194 @@ input[type="checkbox"]:disabled { opacity: .55; cursor: default; }
 .standalone-profile label { display: grid; gap: .25rem; }
 .standalone-profile label:has(input[type=checkbox]) { display: flex; align-items: center; }
 .standalone-messages { max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.standalone-user-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  margin-bottom: 9px;
+  padding: 14px 18px;
+  text-align: left;
+}
+.standalone-user-row strong { overflow-wrap: anywhere; }
+#new-user-dialog { width: min(460px, calc(100% - 32px)); padding: 28px; border: 1px solid #e6d5e4; border-radius: 20px; background: #fffafd; color: #342538; box-shadow: 0 24px 70px #40243e35; }
+#new-user-dialog::backdrop { background: #34253866; backdrop-filter: blur(3px); }
+.new-user-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+.new-user-heading img { border-radius: 13px; object-fit: cover; }
+.new-user-heading h2 { margin: 0; }
+#new-user-error:empty { display: none; }
+#new-user-error { color: #963454; }
+.new-user-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.user-preferences fieldset { display: grid; gap: 10px; border: 1px solid #e6d5e4; border-radius: 12px; padding: 16px; }
+.user-preferences legend { font-weight: 650; }
+
+/* Standalone admin pages */
+#catalog-heading, .settings-illustration {
+  position: relative;
+  border-radius: 22px;
+  min-height: 210px;
+  padding: clamp(24px, 4vw, 54px);
+  border: 1px solid #e2cedf;
+  background: linear-gradient(90deg, #f3e3ef 35%, #f3e3ef00 72%),
+    url("./assets/kurumi-phone-classroom-hd.png") right 42% / auto 122% no-repeat, #f3e3ef;
+  color: #482a43;
+}
+#catalog-heading { justify-content: flex-start; align-items: flex-start; flex-direction: column; gap: 20px; }
+#catalog-heading h2, .settings-illustration h2 { font-size: clamp(23px, 3vw, 36px); margin: 0; }
+#catalog-heading p, .settings-illustration p { color: #664a62; margin: 10px 0 0; max-width: 32ch; }
+.settings-illustration { min-height: 160px; margin-block: 24px 18px; }
+.settings-illustration[data-section="api"] {
+  background-image: linear-gradient(90deg, #e9e5f3 38%, #e9e5f300 78%), url("/assets/kurumi-night-smile-hd.png");
+  background-color: #e9e5f3;
+}
+.settings-illustration[data-section="portal"] {
+  background-image: linear-gradient(90deg, #f3e3ef 38%, #f3e3ef00 78%), url("./assets/kurumi-home-hd.png");
+}
+.catalog-empty {
+  padding: 26px;
+  border: 1px dashed #d9c5d8;
+  border-radius: 16px;
+  background: #ffffff80;
+  color: #695469;
+  margin: 0;
+}
+#instance-directory, #managed-users { display: grid; gap: 12px; }
+.standalone-user-row { background: #fff; border: 1px solid #e5d6e4; border-radius: 15px; margin: 0; }
+#instance-directory button.standalone-user-row:not(:disabled):hover { background: #fbf1f8; border-color: #bd8fb1; }
+.admin-settings .panel { border-radius: 18px; }
+@media (min-width: 901px) {
+  .admin-settings .settings-pages { display: none; }
+}
+@media (max-width: 680px) {
+  #catalog-heading, .settings-illustration {
+    padding-top: 148px;
+    background-size: 100% 100%, auto 170px;
+    background-position: center, right top;
+    background-blend-mode: normal;
+  }
+}
+  .first-game-hero { background-size: auto, auto 100%; }
+}
+
+.user-preferences { background: #fffafd; color: #482a43; }
+.user-preferences header { padding: 18px; margin-bottom: 18px; border-radius: 14px; background: linear-gradient(90deg,#e9e5f3 32%,#e9e5f300 84%), url("/assets/kurumi-night-smile-hd.png") right 25% / auto 170% no-repeat #e9e5f3; }
+.user-preferences fieldset { background: #fff; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.user-preferences fieldset input { accent-color: #873b63; }
+.user-preferences fieldset input:not([type=checkbox]) { width: 100%; min-width: 0; }
+@media (max-width: 540px) { .user-preferences fieldset { grid-template-columns: 1fr; } }
+[data-remote-workspace] #user-settings-actions { margin-top: 12px; }
+
+#user-settings-actions { width: fit-content; max-width: 100%; margin-bottom: 16px; }
+.inline-user-settings { width: auto; max-height: none; overflow: visible; padding: clamp(16px, 3vw, 32px); border: 1px solid #e5d6e4; border-radius: 18px; background: #fffafd; }
+.inline-user-settings header { background: none; padding: 0; }
+
+.profile-settings { background: #fff; border: 1px solid #e5d6e4; border-radius: 18px; overflow: hidden; }
+.profile-settings h3 { margin: 0 0 12px; }
+.profile-settings form, .profile-settings aside { padding: clamp(16px, 3vw, 30px); }
+.profile-settings form, .profile-settings details[open] { display: grid; gap: 12px; }
+.profile-settings label { display: grid; gap: 6px; }
+.profile-settings button { justify-self: start; }
+.profile-settings p { margin: 0; overflow-wrap: anywhere; }
+.profile-settings p:empty { display: none; }
+.persona-card > p { white-space: pre-wrap; }
+.api-settings { display: grid; grid-template-columns: minmax(170px, 1fr) minmax(0, 3fr); }
+.api-settings aside { background: #f7eff7; border-inline-end: 1px solid #e5d6e4; }
+.api-settings label:not(.check) { grid-template-columns: minmax(105px, 1fr) minmax(0, 3fr); align-items: center; }
+.api-settings label small { grid-column: 2; }
+@media (max-width: 640px) {
+  .api-settings, .api-settings label:not(.check) { grid-template-columns: 1fr; }
+  .api-settings label small { grid-column: 1; }
+}
+
+.kurumi-chat { font-family: inherit; color: #452b42; }
+.kurumi-chat [hidden] { display: none !important; }
+.chat-launch, .chat-window { position: fixed; right: 24px; bottom: 22px; z-index: 2147483000; }
+.chat-launch { display: flex; align-items: center; gap: 10px; border-radius: 99px; background: #873b63; color: white; padding: 7px 16px 7px 8px; box-shadow: 0 8px 28px #4c23483b; }
+.chat-launch img, .chat-grip img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
+.chat-window { display: flex; flex-direction: column; width: min(380px, calc(100vw - 24px)); height: min(525px, calc(100dvh - 32px)); background: #fffafd; border: 1px solid #dfcbdd; border-radius: 20px; box-shadow: 0 18px 58px #4c23483b; overflow: hidden; }
+.kurumi-chat.docked .chat-window { inset: 12px 12px 12px auto; height: auto; }
+@media (min-width: 1100px) { body:has(.kurumi-chat.docked .chat-window:not([hidden])) .workspace { margin-right: 404px; } }
+.chat-bar { display: flex; align-items: center; gap: 6px; padding: 10px; background: #f1e2ef; border-bottom: 1px solid #dfcbdd; }
+.chat-grip { display: flex; align-items: center; gap: 9px; flex: 1; font-weight: 700; cursor: grab; touch-action: none; user-select: none; }
+.docked .chat-grip { cursor: default; }
+.chat-bar button { padding: 5px 9px; }
+.chat-log { display: flex; flex: 1; flex-direction: column; gap: 8px; overflow-y: auto; padding: 14px; min-height: 0; }
+.chat-log p { margin: 0; padding: 8px 11px; border-radius: 13px; max-width: 90%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-assistant { align-self: flex-start; background: #f2e9f3; }
+.chat-user { align-self: flex-end; background: #873b63; color: #fff; }
+.chat-window form { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 8px; padding: 12px; border-top: 1px solid #ede0eb; }
+.chat-window textarea { width: 100%; resize: none; }
+.chat-window > p { margin: 0 12px 10px; font-size: .85rem; }
+.chat-window > p:empty { display: none; }
+@media (max-width: 540px) { .chat-launch, .chat-window { right: 12px; bottom: 12px; } }
+
+.chat-log .chat-message { padding: 10px 12px; border-radius: 15px; max-width: 96%; min-width: 0; overflow-wrap: anywhere; color: #452b42; animation: chat-arrive .2s ease-out both; }
+.chat-log .chat-user { color: white; white-space: pre-wrap; }
+.chat-log .chat-message :is(p,ul,ol,h3,h4,h5,h6,pre,.chat-table) { margin: 0 0 .65em; padding: 0; max-width: 100%; border-radius: 0; }
+.chat-log .chat-message > :last-child { margin-bottom: 0; }
+.chat-log .chat-message :is(ul,ol) { padding-inline-start: 1.4em; }
+.chat-message code { background: #e8dceb; border-radius: 4px; padding: .1em .25em; }
+.chat-log .chat-message pre { overflow: auto; padding: 8px; background: #e8dceb; border-radius: 8px; }
+.chat-message pre code { padding: 0; }
+.chat-table { overflow-x: auto; }
+.chat-table table { width: 100%; border-collapse: collapse; font-size: .88em; }
+.chat-table :is(th,td) { padding: 5px 7px; border: 1px solid #d9c6db; text-align: start; }
+.chat-table th { background: #e8dceb; }
+.chat-log .chat-typing { display: flex; gap: 5px; padding: 13px; }
+.chat-typing span { width: 6px; height: 6px; border-radius: 50%; background: #873b63; animation: chat-dot 1s ease-in-out infinite alternate; }
+.chat-typing span:nth-child(2) { animation-delay: .16s; }
+.chat-typing span:nth-child(3) { animation-delay: .32s; }
+@keyframes chat-arrive { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@keyframes chat-dot { from { opacity: .35; transform: translateY(1px); } to { opacity: 1; transform: translateY(-3px); } }
+@media (prefers-reduced-motion: reduce) { .chat-log .chat-message, .chat-typing span { animation: none; } }
+.chat-attachment { display: block; width: 100%; height: auto; border-radius: 8px; }
+
+.chat-speaker { display: none; }
+.kurumi-chat.full-chat .chat-window {
+  position: relative; inset: auto; width: 100%; height: clamp(440px, 76dvh, 920px);
+  z-index: auto; box-shadow: 0 10px 36px #4c234814;
+}
+.full-chat .chat-bar { padding: 14px 18px; }
+.full-chat .chat-window form {
+  width: min(100%, 880px); margin-inline: auto; padding: 14px 18px;
+}
+.full-chat .chat-log .chat-message { max-width: min(88%, 680px); line-height: 1.6; }
+.full-chat .chat-log { background: linear-gradient(180deg, #f9f1fa, #fffafd 140px); }
+.full-chat .chat-log { padding-inline: max(18px, calc((100% - 820px)/2)); }
+.full-chat .chat-speaker { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-weight: 700; }
+.chat-speaker img { width: 28px; height: 28px; object-fit: cover; border-radius: 50%; }
+.full-chat .chat-grip { cursor: default; }
+@media (max-width: 680px) { .kurumi-chat.full-chat .chat-window { height: max(340px, 70dvh); } }
+
+.conversation-view .workspace > main > :is(header,footer,#market-break-notice,#pause-notice,#notice) { display: none !important; }
+.conversation-view .full-chat .chat-bar button, .conversation-view .conversation-back { display: none !important; }
+.conversation-view .full-chat .chat-window { height: calc(100dvh - 48px); min-height: 320px; }
+.conversation-view .full-chat .chat-log { padding-inline: clamp(16px, 4vw, 72px); }
+.conversation-view .full-chat .chat-message { max-width: min(74%, 680px); }
+.community-layout { display: grid; grid-template-columns: minmax(0,2fr) minmax(240px,1fr); gap: 18px; margin-top: 18px; align-items: start; }
+.community-layout [data-feed] { max-height: 64dvh; overflow: auto; display: grid; gap: 12px; }
+.community-card h3 { margin: 0 0 8px; }
+.community-card p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.community-layout textarea { width: 100%; }
+@media (max-width: 760px) { .community-layout { grid-template-columns: 1fr; } }
+#personal-settings-nav { display: grid; gap: 8px; }
+#personal-settings-nav[hidden] { display: none; }
+.persistent-chat-tab { width: 100%; margin-top: 8px; text-align: left; }
+.profile-settings code { overflow-wrap: anywhere; white-space: normal; }
+
+[data-page="community"] .settings-illustration { min-height: 84px; padding: 16px 22px; margin: 12px 0; background-size: auto, auto 175%; }
+[data-page="community"] .settings-illustration h2 { font-size: 24px; }
+[data-page="community"] .settings-illustration p { margin-top: 4px; }
+.community-view #notice:not(.error), .community-view #market-break-notice { display: none; }
+.community-room { display: grid; grid-template-columns: minmax(155px,220px) minmax(0,1fr); gap: 12px 18px; }
+.community-room[hidden] { display: none; }
+.community-room > :is(.settings-illustration,.workspace-switch) { grid-column: 1 / -1; }
+.community-room [data-groups] { border: 1px solid #e5d6e4; background:#fffafd; border-radius: 14px; padding: 12px; }
+.community-room [data-groups] nav { display: grid; gap: 10px; }
+.community-room [data-groups] small { display: block; margin: 4px 0; }
+.community-room .community-layout { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 0; }
+.community-room [data-feed] { min-height: 250px; background: #fffafd; padding: 12px; border-radius: 14px; align-content: start; }
+.community-room form { padding: 12px; }
+.community-room form h3 { margin: 0; }
+@media(max-width: 650px) { .community-room { grid-template-columns: 1fr; } }

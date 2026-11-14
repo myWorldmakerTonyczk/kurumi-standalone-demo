@@ -160,10 +160,35 @@ class PortalAccounts:
         self.attempts.append((now, username))
         return True
 
+    async def create_web_user(self, username, password):
+        from ..users.ownership import resolve
+
+        if not isinstance(username, str) or not re.fullmatch(r"[\w.-]{1,40}", username):
+            raise ValueError("用户名须为 1～40 个文字、数字、下划线、点或连字符")
+        if not isinstance(password, str) or not 8 <= len(password) <= 128:
+            raise ValueError("密码须为 8～128 个字符")
+        if self.hash_slots.locked():
+            raise ValueError("账号服务繁忙，请稍后再试")
+        salt = secrets.token_bytes(16)
+        async with self.hash_slots:
+            verifier = await asyncio.to_thread(password_hash, password, salt)
+        with self.access.engine.transaction():
+            used = {row[0].casefold() for row in self.db.execute("SELECT username FROM portal_accounts")}
+            base = username
+            suffix = 1
+            while username.casefold() in used:
+                number = str(suffix)
+                username = base[:40-len(number)] + number
+                suffix += 1
+            owner = resolve(self.db, {"type": "random", "values": []}, username)["owner_id"]
+            self.db.execute("INSERT INTO portal_accounts(owner,username,salt,verifier) VALUES(?,?,?,?)",
+                            (owner, username, salt, verifier))
+        return owner
+
     async def login(self, username, password):
         if not isinstance(username, str) or not 1 <= len(username) <= 300:
             return None
-        if not USERNAME.fullmatch(username):
+        if not re.fullmatch(r"[\w.-]{1,40}", username):
             try:
                 normalize({"type": "umo", "values": [username]})
             except ValueError:
@@ -178,8 +203,7 @@ class PortalAccounts:
             return None
         # A reset or deletion during hashing invalidates the in-flight login.
         current = self.db.execute("SELECT username,salt,verifier FROM portal_accounts WHERE owner=?", (row["owner"],)).fetchone()
-        if (not current or tuple(current) != (username, row["salt"], row["verifier"])
-                or not self.has_games(row["owner"])):
+        if (not current or tuple(current) != (username, row["salt"], row["verifier"])):
             return None
         now = time.time()
         with self.access.engine.transaction():

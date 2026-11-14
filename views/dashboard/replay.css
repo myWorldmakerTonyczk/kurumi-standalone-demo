@@ -198,3 +198,7 @@
   .replay-layout > .replay-pairs { max-height: calc(100dvh - 8rem); overflow: auto; }
   .replay-side .replay-detail { max-height: max(14rem, calc(100dvh - 19rem)); }
 }
+
+@media (min-width: 1100px) {
+  .replay-heading > .replay-filters { margin-inline-end: clamp(24px, 6vw, 120px); }
+}

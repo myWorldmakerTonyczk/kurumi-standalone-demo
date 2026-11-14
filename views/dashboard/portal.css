@@ -146,3 +146,89 @@ body { margin: 0; }
   #portal-welcome { grid-template-columns: minmax(0,1fr); margin-top: 20px; }
   .portal-welcome-art { min-height: 190px; }
 }
+
+/* User sign-in */
+#portal-welcome .portal-welcome-art {
+  background: #f7f2fa url("/assets/portal-kurumi-hd.png") center / contain no-repeat;
+}
+#portal-welcome .portal-welcome-content { padding: clamp(24px, 4vw, 54px); }
+#portal-welcome-title {
+  margin: 0 0 10px;
+  color: #553047;
+  font-size: clamp(25px, 3vw, 34px);
+  letter-spacing: -.025em;
+}
+#portal-welcome-copy { margin: 0 0 24px; color: #695568; line-height: 1.65; }
+#portal-login { gap: 16px; }
+#portal-login label { color: #4d3649; font-size: 14px; font-weight: 650; }
+#portal-login input {
+  min-height: 46px;
+  border: 1px solid #dbc9d7;
+  border-radius: 10px;
+  background: #fff;
+}
+#portal-login button {
+  min-height: 48px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: #873b63;
+  color: white;
+  font-weight: 650;
+}
+#portal-login button:hover:not(:disabled) { background: #713052; }
+#portal-login :is(input, button):focus-visible { outline: 2px solid #a54a7b; outline-offset: 3px; }
+#first-game { max-width: 740px; margin: 24px auto; padding: 24px; }
+#first-game-form, .standalone-profile form:not([hidden]) { display: grid; gap: 12px; }
+#first-game-form label, .standalone-profile label { display: grid; gap: 5px; }
+#first-game-form label:has(input[type=checkbox]), .standalone-profile label:has(input[type=checkbox]) { display: flex; align-items: center; gap: 8px; }
+.standalone-profile { width: min(640px, 92vw); max-height: 90vh; overflow: auto; border: 1px solid #dbc9d7; border-radius: 16px; padding: 24px; }
+.standalone-profile header { display: flex; justify-content: space-between; align-items: center; }
+.standalone-profile::backdrop { background: #34253866; }
+.user-preferences fieldset { display: grid; gap: 10px; border: 1px solid #e6d5e4; border-radius: 12px; padding: 16px; }
+.user-preferences legend { font-weight: 650; }
+
+#first-game { max-width: 1000px; padding: 0; background: #fffafd; border-color: #e5d6e4; overflow: hidden; border-radius: 22px; color: #482a43; }
+.first-game-hero { padding: clamp(24px, 5vw, 52px); min-height: 180px; background: linear-gradient(90deg,#f3e3ef 38%,#f3e3ef00 82%), url("/assets/kurumi-phone-classroom-hd.png") right center / auto 145% no-repeat #f3e3ef; }
+.first-game-hero h2 { margin: 0; font-size: clamp(24px, 4vw, 36px); }
+.first-game-hero p { max-width: 23ch; margin-bottom: 0; color: #62455e; }
+#first-game-form { padding: clamp(18px, 4vw, 38px); gap: 22px; }
+#first-game-form fieldset { min-width: 0; margin: 0; padding: 16px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; border: 1px solid #e5d6e4; border-radius: 14px; }
+#first-game-form legend { padding: 0 8px; font-weight: 700; }
+#first-game-form .first-game-pairs { grid-template-columns: repeat(3,minmax(0,1fr)); }
+#first-game-form .first-game-pairs label { padding: 8px; border: 1px solid #e5d6e4; border-radius: 9px; }
+#first-game-form input { accent-color: #873b63; }
+#first-game-form input:not([type=checkbox]) { width: 100%; border-color: #dbc9d7; }
+#first-game-form .first-game-submit { justify-self: end; background: #873b63; border-color: #873b63; color: white; }
+@media (max-width: 600px) {
+  #first-game-form fieldset { grid-template-columns: 1fr; }
+  #first-game-form .first-game-pairs { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .first-game-hero { background-size: auto, auto 100%; }
+}
+
+.user-preferences { background: #fffafd; color: #482a43; }
+.user-preferences header { padding: 18px; margin-bottom: 18px; border-radius: 14px; background: linear-gradient(90deg,#e9e5f3 32%,#e9e5f300 84%), url("/assets/kurumi-night-smile-hd.png") right 25% / auto 170% no-repeat #e9e5f3; }
+.user-preferences fieldset { background: #fff; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.user-preferences fieldset input { accent-color: #873b63; }
+.user-preferences fieldset input:not([type=checkbox]) { width: 100%; min-width: 0; }
+@media (max-width: 540px) { .user-preferences fieldset { grid-template-columns: 1fr; } }
+#first-game .first-game-pairs img { width: 44px; height: 44px; object-fit: cover; border-radius: 12px; }
+#first-game .avatar-upload { grid-template-columns: auto minmax(0,1fr); align-items: center; }
+.avatar-upload img { border-radius: 14px; object-fit: cover; } .avatar-upload small { grid-column: 1 / -1; }
+
+#first-game-form { width: min(100%, 540px); margin-inline: auto; }
+#first-game .avatar-upload { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid #e5d6e4; border-radius: 14px; background: #fff; }
+#first-game .avatar-upload img { flex: none; border-radius: 50%; }
+#first-game .avatar-upload small { display: block; margin: 3px 0 8px; color: #695568; }
+#avatar-editor { width: min(540px, calc(100% - 28px)); max-height: 90vh; overflow: auto; padding: 22px; border: 1px solid #e5d6e4; border-radius: 18px; background: #fffafd; color: #482a43; }
+#avatar-editor::backdrop { background: #34253888; }
+#avatar-editor h2 { margin: 0; }
+#avatar-crop { display: block; max-width: 100%; height: auto; margin: 14px auto; touch-action: none; cursor: move; border-radius: 8px; }
+#avatar-editor label { display: grid; gap: 4px; }
+#avatar-size { width: 100%; accent-color: #873b63; }
+.avatar-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+#apply-avatar { background: #873b63; border-color: #873b63; color: #fff; }
+#setup-profile, #setup-model { display: grid; gap: 14px; } #first-game-form [hidden] { display: none !important; }
+
+.setup-model-selectors { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); gap: 12px; }
+.setup-model-selectors select { width: 100%; min-width: 0; }
+@media (max-width: 420px) { .setup-model-selectors { grid-template-columns: 1fr; } }

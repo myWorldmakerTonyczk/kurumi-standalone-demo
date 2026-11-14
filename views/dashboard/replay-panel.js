@@ -38,7 +38,8 @@ const el = (tag, text, cls) => {
 };
 
 export class ReplayPanel {
-  constructor(root, fetchReview) {
+  constructor(root, fetchReview, fetchHistory) {
+    this.fetchHistory = fetchHistory;
     this.root = root;
     this.fetchReview = fetchReview;
     this.version = 0;
@@ -47,6 +48,7 @@ export class ReplayPanel {
       <div class="replay-heading"><div><h2>AI 复盘</h2><p>从行情回到她做决定的那一刻。</p></div>
       <form class="replay-filters">
         <label>范围 <select name="days"><option value="1">最近 24 小时</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option></select></label>
+        <label>K 线周期 <select name="period"><option value="">自动</option><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option><option value="1d">日 K</option><option value="1w">周 K</option><option value="1M">月 K</option></select></label>
         <label>截至 <input type="date" name="date" aria-label="复盘截至日期"></label>
         <button type="submit">查看</button></form></div>
       <p class="replay-status" role="status"></p>
@@ -89,6 +91,7 @@ export class ReplayPanel {
     };
     window.addEventListener("scroll", trackScroll, {capture: true, passive: true});
     window.addEventListener("resize", trackScroll);
+    this.form.elements.period.onchange = () => this.load();
     this.form.onsubmit = (event) => { event.preventDefault(); this.load(); };
     root.querySelector(".replay-event-filter").onchange = () => this.timeline();
   }
@@ -208,7 +211,7 @@ export class ReplayPanel {
     const status = this.root.querySelector(".replay-status");
     status.textContent = "正在读取复盘记录…";
     try {
-      const data = await this.fetchReview(this.scope, {pair: this.requestedPair, days: Number(form.days.value), end});
+      const data = await this.fetchReview(this.scope, {pair: this.requestedPair, days: Number(form.days.value), period: form.period.value, end});
       if (request !== this.version) return;
       this.data = data;
       this.pairs = data.pairs;
@@ -338,7 +341,42 @@ export class ReplayPanel {
         this.select(hit, false);
       }
     });
-    chart.timeScale().fitContent();
+    const scale = chart.timeScale();
+    scale.fitContent();
+    if (this.fetchHistory && data.candles.length) {
+      const game = this.scope;
+      let loading = false;
+      let more = true;
+      let applying = false;
+      const initialLegend = legend.textContent;
+      scale.subscribeVisibleLogicalRangeChange(async range => {
+        if (!range || range.from >= 12 || !more || loading || applying) return;
+        loading = true;
+        legend.textContent = initialLegend + " · 正在加载更早的 K 线…";
+        try {
+          const before = data.candles[0].time;
+          const page = await this.fetchHistory(game, {pair: data.pair, period: data.period, before, limit: 200});
+          if (this.chart !== chart) return;
+          const older = page.bars.filter(bar => bar.time < before);
+          more = page.has_more && (older.length > 0 || Boolean(page.warning));
+          if (older.length) {
+            const visible = scale.getVisibleLogicalRange();
+            applying = true;
+            data.candles = [...older, ...data.candles];
+            candles.setData(data.candles);
+            for (const bar of older) times.add(bar.time);
+            if (visible) scale.setVisibleLogicalRange({from: visible.from + older.length, to: visible.to + older.length});
+          }
+          if (!more && !page.warning) scale.applyOptions({fixLeftEdge: true});
+          legend.textContent = initialLegend + (page.warning ? " · " + page.warning : more ? "" : " · 当前行情源没有返回更早的 K 线");
+        } catch (error) {
+          if (this.chart === chart) legend.textContent = initialLegend + " · " + error.message;
+        } finally {
+          loading = false;
+          applying = false;
+        }
+      });
+    }
     this.installTradeLabels(root, chart, candles, trades);
     this.highlight(this.selected);
   }

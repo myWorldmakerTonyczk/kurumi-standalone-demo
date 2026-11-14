@@ -1,3 +1,4 @@
+import { encodeAgentAvatar } from "/assets/workspace-chat.js";
 import { ReplayPanel } from "./replay-panel.js";
 import { PortalTrading } from "./portal-trading.js";
 
@@ -25,7 +26,8 @@ async function api(path, body) {
 }
 
 const replay = new ReplayPanel(byId("portal-review"), (game, options) =>
-  api("review?" + new URLSearchParams({game, ...options})));
+  api("review?" + new URLSearchParams({game, ...options})), (game, options) =>
+  api("history?" + new URLSearchParams({game, ...options, history_source: "market"})));
 const desk = new PortalTrading(byId("portal-trading"), api);
 const records = byId("portal-records");
 let recordRequest = 0;
@@ -134,6 +136,13 @@ async function start() {
     return;
   }
   byId("portal-welcome").hidden = session.authenticated;
+  byId("first-game").hidden = !(session.authenticated && session.mode === "account" && !games.length);
+  if (!byId("first-game").hidden) {
+    byId("portal-logout").hidden = false;
+    byId("portal-title").textContent = "我的交易工作区";
+    setStatus("");
+    return;
+  }
   byId("portal-logout").hidden = !session.authenticated;
   byId("portal-tabs").hidden = session.mode !== "account" || !games.length;
   byId("portal-sidebar").hidden = !games.length;
@@ -206,6 +215,153 @@ function handleShare() {
   };
   return true;
 }
+
+const avatarFile = byId("avatar-file");
+const editor = byId("avatar-editor");
+const crop = byId("avatar-crop");
+const size = byId("avatar-size");
+const context = crop.getContext("2d");
+let photo, drag, savedAvatar = "";
+let x, y, radius;
+
+function renderCrop() {
+  radius = Math.min(crop.width, crop.height) * Number(size.value) / 200;
+  x = Math.max(radius, Math.min(crop.width - radius, x));
+  y = Math.max(radius, Math.min(crop.height - radius, y));
+  context.drawImage(photo, 0, 0, crop.width, crop.height);
+  context.fillStyle = "#23152999";
+  context.beginPath();
+  context.rect(0, 0, crop.width, crop.height);
+  context.arc(x, y, radius, 0, Math.PI * 2);
+  context.fill("evenodd");
+  context.beginPath();
+  context.arc(x, y, radius, 0, Math.PI * 2);
+  context.lineWidth = 2;
+  context.strokeStyle = "#fff";
+  context.stroke();
+}
+
+function moveCrop(event) {
+  const rect = crop.getBoundingClientRect();
+  x = (event.clientX - rect.left) * crop.width / rect.width - drag.x;
+  y = (event.clientY - rect.top) * crop.height / rect.height - drag.y;
+  renderCrop();
+}
+
+crop.onpointerdown = event => {
+  const rect = crop.getBoundingClientRect();
+  const px = (event.clientX - rect.left) * crop.width / rect.width;
+  const py = (event.clientY - rect.top) * crop.height / rect.height;
+  drag = Math.hypot(px - x, py - y) <= radius ? {x: px - x, y: py - y} : {x: 0, y: 0};
+  crop.setPointerCapture(event.pointerId);
+  moveCrop(event);
+};
+crop.onpointermove = event => { if (drag) moveCrop(event); };
+crop.onlostpointercapture = () => { drag = null; };
+crop.onkeydown = event => {
+  const offset = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]}[event.key];
+  if (!offset) return;
+  event.preventDefault();
+  x += offset[0] * 3;
+  y += offset[1] * 3;
+  renderCrop();
+};
+size.oninput = renderCrop;
+byId("choose-avatar").onclick = () => avatarFile.click();
+byId("cancel-avatar").onclick = () => editor.close();
+editor.onclose = () => { photo?.close(); photo = null; drag = null; };
+function updateAvatar(value) {
+  savedAvatar = value;
+  byId("avatar-preview").src = value || "/assets/user-avatar.svg";
+  byId("reset-avatar").hidden = !value;
+}
+byId("reset-avatar").onclick = () => updateAvatar("");
+byId("apply-avatar").onclick = () => {
+  const output = document.createElement("canvas");
+  output.width = output.height = 128;
+  const draw = output.getContext("2d");
+  draw.beginPath();
+  draw.arc(64, 64, 64, 0, Math.PI * 2);
+  draw.clip();
+  const scaleX = photo.width / crop.width;
+  const scaleY = photo.height / crop.height;
+  draw.drawImage(photo, (x-radius)*scaleX, (y-radius)*scaleY, 2*radius*scaleX, 2*radius*scaleY, 0, 0, 128, 128);
+  updateAvatar(output.toDataURL("image/webp", .76));
+  editor.close();
+};
+avatarFile.onchange = async () => {
+  const file = avatarFile.files[0];
+  avatarFile.value = "";
+  if (!file) return;
+  try {
+    if (file.size > 5 * 1024 * 1024 || !["image/png", "image/jpeg", "image/webp"].includes(file.type))
+      throw Error("请选择不超过 5 MB 的 PNG、JPEG 或 WebP 图片。");
+    photo = await createImageBitmap(file);
+    const scale = Math.min(480 / photo.width, 350 / photo.height);
+    crop.width = Math.max(1, Math.round(photo.width * scale));
+    crop.height = Math.max(1, Math.round(photo.height * scale));
+    x = crop.width / 2;
+    y = crop.height / 2;
+    size.value = 75;
+    renderCrop();
+    setStatus("");
+    editor.showModal();
+  } catch (error) { setStatus(error.message || "无法读取图片", true); }
+};
+
+let setupStep = 0;
+let presets = [];
+const providerChoice = byId("setup-provider");
+const modelChoice = byId("setup-model-choice");
+const customModel = byId("setup-custom-model");
+providerChoice.onchange = () => {
+  const preset = presets[Number(providerChoice.value)];
+  modelChoice.replaceChildren(new Option(preset.model, preset.model), new Option("自定义", "custom"));
+  modelChoice.onchange();
+};
+modelChoice.onchange = () => { customModel.hidden = modelChoice.value !== "custom"; };
+byId("first-game-form").onsubmit = async event => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const form = byId("first-game-form");
+    if (setupStep === 0) {
+      const config = await api("model-presets");
+      presets = config.presets;
+      form.elements.persona.value = config.persona;
+      providerChoice.replaceChildren(...presets.map((preset, index) => new Option(preset.name, index)));
+      providerChoice.onchange();
+    }
+    if (setupStep < 2) {
+      setupStep++;
+      ["setup-profile", "setup-persona", "setup-model"].forEach((id, index) => {
+        byId(id).hidden = index !== setupStep;
+      });
+      byId("first-game").querySelector("h2").textContent = setupStep === 1 ? "设置久留美的人格" : "配置模型 API";
+      button.textContent = setupStep === 1 ? "下一步" : "进入交易工作区";
+      (setupStep === 1 ? form.elements.persona : form.elements.key).focus();
+      setStatus("");
+      return;
+    }
+    const payload = Object.fromEntries(new FormData(form));
+    const preset = presets[Number(providerChoice.value)];
+    const model = modelChoice.value === "custom" ? payload.model.trim() : modelChoice.value;
+    if (payload.key.trim() && !model) {
+      const input = customModel.querySelector("input");
+      input.focus();
+      throw Error("请输入自定义模型 ID。");
+    }
+    delete payload.model;
+    if (payload.key.trim()) Object.assign(payload, {url: preset.url, model});
+    payload.avatar = savedAvatar;
+    payload.agent_avatar = await encodeAgentAvatar(form.elements.agent_picture.files[0]);
+    delete payload.agent_picture;
+    await api("onboarding", payload);
+    location.replace("/workspace/");
+  } catch (error) { setStatus(error.message, true); }
+  finally { button.disabled = false; }
+};
 
 window.addEventListener("hashchange", handleShare);
 if (!handleShare()) start().catch(error => setStatus(error.message, true));

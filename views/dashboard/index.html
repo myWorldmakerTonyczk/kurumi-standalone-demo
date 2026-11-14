@@ -26,10 +26,10 @@
           ><button data-tab="journal">交易日志</button
           ><button data-tab="memory">计划与经验</button>
         </nav>
+        <nav id="personal-settings-nav" aria-label="个人设置分类" hidden></nav>
         <nav id="settings-nav" aria-label="设置导航" hidden>
           <button data-settings-anchor="users">用户与权限</button>
-          <button data-settings-anchor="api">API与行情连接</button>
-          <button data-settings-anchor="diary">每日日记</button>
+          <button data-settings-anchor="api">行情连接</button>
           <button data-settings-anchor="portal">用户面板</button>
         </nav>
         <div class="aside-note">
@@ -58,10 +58,10 @@
                 aria-pressed="true"
                 class="active"
               >
-                交易实例
+                用户列表
               </button>
             </div>
-            <button type="button" id="back-to-catalog">所有交易实例</button>
+            <button type="button" id="back-to-catalog">返回用户列表</button>
             <button id="refresh">刷新</button>
           </div>
         </header>
@@ -95,11 +95,11 @@
         <section data-page="catalog" id="instance-catalog">
           <div class="catalog-heading" id="catalog-heading">
             <div>
-              <h2>选择一个交易实例</h2>
-              <p>按用户展开，每一盘都有自己的账户、日志和经验。</p>
+              <h2>大家的交易工作区</h2>
+              <p>点击用户打开交易工作区。</p>
             </div>
             <button type="button" data-new-instance class="primary">
-              新建实例
+              新建用户
             </button>
           </div>
           <div id="empty" class="welcome">
@@ -459,19 +459,24 @@
             <button type="button" disabled>总经验（暂未启用）</button>
           </section>
         </section>
-        <section data-page="setup" hidden>
-          <div class="section-head settings-heading"><div><h2>设置</h2>
-            <p>分别管理用户权限、API连接和每日日记。每局游戏规则在新建实例时设置。</p></div></div>
+        <section data-page="conversation" hidden></section>
+        <section data-page="community" hidden></section>
+        <section data-page="user-settings" hidden>
+          <div class="settings-illustration" data-section="api"><div><h2>个人设置</h2><p>管理人格、模型和自动看盘偏好。</p></div></div>
+          <div id="user-settings-actions" class="workspace-switch"></div>
+        </section>
+        <section data-page="setup" class="admin-settings" hidden>
+          <div class="settings-illustration">
+            <div><h2 id="settings-section-title">账号管理</h2><p id="settings-section-description">管理用户登录账号。</p></div>
+          </div>
           <nav class="settings-pages" aria-label="设置分页">
             <button type="button" data-settings-tab="users">用户与权限</button>
-            <button type="button" data-settings-tab="api">API与行情连接</button>
-            <button type="button" data-settings-tab="diary" disabled title="独立版暂未接入自动日记">每日日记</button>
+            <button type="button" data-settings-tab="api">行情连接</button>
             <button type="button" data-settings-tab="portal">用户面板</button>
           </nav>
           <div data-settings-page="users">
             <section class="panel" id="access-scaffold">
-              <h3>用户与权限</h3>
-              <form id="workspace-mode-settings">
+              <form id="workspace-mode-settings" hidden>
                 <label class="check"><input name="multiplayer" type="checkbox">开启多人模式</label>
                 <label id="workspace-main-picker">主用户<select name="main_user_id"></select></label>
                 <p class="caption">单人模式只显示主用户的设置和实例。切换模式会保留所有用户与交易记录。聊天工具按用户归属隔离。</p>
@@ -479,11 +484,11 @@
               <div id="workspace-primary-user"></div>
               <div id="workspace-role-settings"></div>
               <div id="managed-users"></div>
-              <div class="connection-actions"><button type="submit" form="workspace-mode-settings">保存设置</button><span id="workspace-save-status" role="status"></span></div>
+              <div class="connection-actions" hidden><button type="submit" form="workspace-mode-settings">保存设置</button><span id="workspace-save-status" role="status"></span></div>
             </section>
           </div>
           <div data-settings-page="api" hidden>
-            <section class="panel">
+            <section class="panel" hidden>
               <h3>LLM 调用接口</h3><p>每位用户在自己的面板中配置人格、模型和 API Key，网页聊天和定时看盘共用该配置。</p>
               <form id="llm-settings" hidden>
                 <label>调用方式<select name="mode"><option value="platform">平台已配置的模型（默认）</option><option value="custom">自定义OpenAI兼容接口</option></select></label>
@@ -500,9 +505,9 @@
                 <p class="caption">默认关闭；开启后输出看盘和日记的系统提示词、上下文与任务正文，插件不截断。不输出接口密钥和请求头。</p>
               </form>
             </section>
-              <section class="panel">
+              <section class="panel" hidden>
               <h3>看盘频率与风险事件</h3>
-              <form id="decision-settings">
+              <form id="decision-settings" hidden>
                 <label class="check"><input type="checkbox" name="weekend_pause" checked>休市时段停止自动看盘（默认开启）</label>
                 <p class="caption">默认按纽约时间周五 16:59 至周日 17:05，自动跟随夏令时。仅停止自动看盘，手动看盘和日记可继续。</p>
                 <label>休息时区<input name="weekend_zone" value="America/New_York" required></label>
@@ -589,6 +594,7 @@
                       placeholder="留空保留已保存令牌"
                   /></label>
                   <div class="connection-actions">
+                    <button type="button" id="download-history">预下载 K 线</button>
                     <button type="button" id="test-connection">
                       测试连通性</button
                     ><button type="button" id="reset-market-url">
@@ -928,6 +934,21 @@
       <p>将删除此用户的绑定信息，以及全部所属实例、交易日志、计划、日记和待发通知。其他用户不受影响，此操作不可恢复。</p>
       <div class="delete-dialog-actions"><button type="button" data-close-dialog="delete-user-dialog">取消</button>
         <button type="button" id="confirm-delete-user" class="danger-button">确认删除用户及其全部实例</button></div>
+    </dialog>
+    <dialog id="new-user-dialog" aria-labelledby="new-user-title">
+      <header class="new-user-heading">
+        <img src="/assets/avatar.png" alt="" width="48" height="48">
+        <h2 id="new-user-title">新建用户</h2>
+      </header>
+      <form id="new-user-form">
+        <label>用户名<input name="username" autocomplete="off" maxlength="40" required></label>
+        <label>密码<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
+        <p id="new-user-error" role="alert"></p>
+        <div class="new-user-actions">
+          <button type="button" id="cancel-new-user">取消</button>
+          <button class="primary" type="submit">创建用户</button>
+        </div>
+      </form>
     </dialog>
     <script src="./vendor/lightweight-charts.js"></script>
     <script type="module" src="./app.js"></script>

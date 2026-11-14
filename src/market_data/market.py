@@ -50,6 +50,11 @@ def validate_url(url):
             raise ValueError("行情地址不能为本机或内网地址")
 
 
+# A local DNS proxy may map built-in HTTPS feeds to its benchmark-range Fake-IP.
+BUILTIN_FEED_HOSTS = {urlsplit(url).hostname for url in (*DEFAULT_URLS.values(), *ENDPOINTS.values())}
+FAKE_IP_RANGE = ipaddress.ip_network("198.18.0.0/15")
+
+
 class PublicResolver(aiohttp.abc.AbstractResolver):
     def __init__(self):
         self.delegate = aiohttp.resolver.DefaultResolver()
@@ -57,7 +62,8 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
     async def resolve(self, host, port=0, family=socket.AF_INET):
         addresses = await self.delegate.resolve(host, port, family)
         if not addresses or any(
-            not ipaddress.ip_address(a["host"]).is_global for a in addresses
+            not address.is_global and not (host.lower() in BUILTIN_FEED_HOSTS and address in FAKE_IP_RANGE)
+            for address in (ipaddress.ip_address(item["host"]) for item in addresses)
         ):
             raise OSError("非公网地址")
         return addresses
@@ -141,6 +147,10 @@ def market_error(exc):
     if isinstance(exc, aiohttp.ClientConnectorError):
         return "行情域名解析或网络连接失败，请检查服务器DNS及出口网络。"
     return "行情响应读取失败，请测试连接并检查接口返回格式。"
+
+
+class NoQuotes(ValueError):
+    pass
 
 
 class Market:
@@ -252,7 +262,7 @@ class Market:
                         "OANDA Practice",
                     )
         if not updates:
-            raise ValueError(
+            raise NoQuotes(
                 "连接已返回响应，但未取得支持品种的有效行情；请核对接口格式"
             )
         self.engine.quotes.clear()
@@ -267,7 +277,15 @@ async def probe(settings):
 
     started = time.monotonic()
     market = Market(SimpleNamespace(quotes={}))
-    updates = await market.refresh(settings)
+    try:
+        updates = await market.refresh(settings)
+    except (NoQuotes, json.JSONDecodeError, UnicodeDecodeError):
+        return dict(ok=True, source=source(settings),
+                    latency_ms=round((time.monotonic() - started) * 1000),
+                    pairs=[], fresh_count=0,
+                    message="接口已响应，暂无可识别报价。可能处于休市时段，也可能是响应格式不匹配。")
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise ValueError("未能连接行情接口：" + market_error(exc)) from exc
     fresh = sum(q["tradeable"] for q in updates.values())
     return dict(
         ok=True,

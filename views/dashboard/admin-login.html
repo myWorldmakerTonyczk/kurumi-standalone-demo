@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>久留美 · 管理员登录</title>
+<link rel="stylesheet" href="/admin-login.css">
+<script src="/admin-login.js" type="module"></script>
+</head>
+<body>
+<main class="login">
+<section class="login-art" role="img" aria-label="久留美说：老实赚钱，很枯燥吧"></section>
+<section class="login-panel">
+<div class="brand"><img src="/assets/avatar.png" alt="" width="42" height="42">久留美模拟器</div>
+<h1>管理员登录</h1>
+<p id="hint"></p>
+<form id="portal-login" hidden>
+<label id="setup-token" hidden>初始 Token<input name="token" type="password" autocomplete="off"></label>
+<label>账号<input name="username" autocomplete="username" maxlength="80" required></label>
+<label>密码<input name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+<button type="submit">登录</button>
+</form>
+<p id="status" role="status"></p>
+</section>
+</main>
+</body>
+</html>

@@ -1,3 +1,6 @@
+import { mountCommunity } from "/assets/community.js";
+import { mountChat } from "/assets/workspace-chat.js";
+import { mountPreferences } from "/assets/user-preferences.js";
 import { JournalPanel } from "./journal-panel.js";
 import { renderNotebookText } from "./notebook.js";
 import { refreshRequired } from "./required-fields.js";
@@ -9,7 +12,7 @@ import { PortalSettings } from "./portal-settings.js";
 import { ReplayPanel } from "./replay-panel.js";
 import { HistoryChart } from "./history-chart.js";
 import { TradingNotices } from "./notifications.js";
-import { instanceGroups, renderInstanceDirectory } from "./instance-catalog.js";
+import { instanceGroups } from "./instance-catalog.js";
 import { createPortalBridge } from "./portal-bridge.js";
 import { createAdminBridge } from "./standalone-bridge.js";
 import { mountProfile } from "./standalone-profile.js";
@@ -18,7 +21,8 @@ const bridge = remote ? createPortalBridge(() => gid) : createAdminBridge();
 const tradingNotices = new TradingNotices(bridge);
 const diaryPanel = new DiaryPanel(bridge);
 const replayPanel = new ReplayPanel(document.getElementById("replay"), (game, options) =>
-  bridge.apiGet("review", {game, ...options}));
+  bridge.apiGet("review", {game, ...options}), (game, options) =>
+  bridge.apiGet("history", {game, ...options, history_source: "market"}));
 const userManager = new UserManager(post, (user) => {
   deletingUser=user;
   $("delete-user-description").textContent=`删除「${user.name}」及其 ${user.instances?.length||0} 个交易实例？`;
@@ -31,6 +35,16 @@ let settingsPage = "users";
 function showSettings(page) {
   if (page !== settingsPage && !confirmLeavingApiSettings()) return;
   settingsPage = page;
+  const copy = {
+    users: ["账号管理", "管理用户登录账号。"],
+    api: ["行情连接", "这里保存的报价与历史数据来源供所有工作区使用。"],
+    portal: ["用户面板", "配置用户访问工作区的对外地址。"],
+  }[page];
+  if (copy) {
+    $("settings-section-title").textContent = copy[0];
+    $("settings-section-description").textContent = copy[1];
+    document.querySelector(".settings-illustration").dataset.section = page;
+  }
   for (const section of document.querySelectorAll("[data-settings-page]")) section.hidden=section.dataset.settingsPage!==page;
   for (const button of document.querySelectorAll("[data-settings-tab],[data-settings-anchor]")) {
     const active=(button.dataset.settingsTab||button.dataset.settingsAnchor)===page;
@@ -93,6 +107,7 @@ const labels = {
 const journalPanel = new JournalPanel(bridge, labels, pairLabel);
 function message(text, error = false) {
   $("notice").textContent = text;
+  $("notice").hidden = !error && text === "账户已同步 · 所有金额均为虚拟资金" && (workspaceMode === "settings" || !gid);
   $("notice").classList.toggle("error", error);
 }
 function node(tag, text, cls) {
@@ -114,8 +129,14 @@ function options(el, items, value) {
   );
   if (value !== undefined) el.value = value;
 }
+let activeChat;
 function workspace(mode) {
+  if (mode !== "instances" || instancePage !== "conversation") activeChat?.leaveFull();
   workspaceMode = mode;
+  document.body.classList.toggle("community-view", mode === "community");
+  document.body.classList.toggle("conversation-view", mode === "instances" && instancePage === "conversation");
+  $("back-to-catalog").hidden = mode === "settings" || !gid;
+  if (mode === "settings" || !gid) $("market-break-notice").hidden = true;
   const inInstance = mode === "instances" && !!gid,
     catalog = mode === "instances" && !gid;
   for (const button of document.querySelectorAll("[data-workspace]")) {
@@ -124,22 +145,23 @@ function workspace(mode) {
     button.setAttribute("aria-pressed", String(active));
   }
   $("instance-nav").hidden = !inInstance;
-  $("settings-nav").hidden = mode !== "settings";
+  $("personal-settings-nav").hidden = !remote || mode !== "settings";
+  $("settings-nav").hidden = remote || mode !== "settings";
   document.querySelector(".workspace>aside").hidden = catalog;
   document
     .querySelector(".workspace")
     .classList.toggle("catalog-mode", catalog);
   $("instance-context").hidden = !inInstance;
-  document.querySelector(".character-banner").hidden = !inInstance;
-  const page = mode === "settings" ? "setup" : gid ? instancePage : "catalog";
+  document.querySelector(".character-banner").hidden = !inInstance || instancePage === "conversation";
+  const page = mode === "community" ? "community" : mode === "settings" ? (remote ? "user-settings" : "setup") : gid ? instancePage : "catalog";
   for (const section of document.querySelectorAll("[data-page]"))
     section.hidden = section.dataset.page !== page;
   const current = state?.current?.game.id === gid ? state.current : null;
   $("title").textContent =
-    mode === "settings"
+    mode === "community" ? "社区" : mode === "settings"
       ? "久留美 · 设置"
       : catalog
-        ? "交易实例"
+        ? "用户列表"
         : current?.game.name || "正在打开交易实例…";
   $("instance-loading").hidden = !inInstance || !!current;
   for (const button of document.querySelectorAll("[data-tab]"))
@@ -192,36 +214,28 @@ function selectInstance(instance) {
   load();
 }
 function workspaceUsers() {
-  const users = state?.workspace?.users || [];
-  const mode = state?.workspace?.mode || {multiplayer: false, main_user_id: users[0]?.id || ""};
-  if (modeSettingsDirty) {
-    return {users, ...mode, multiplayer: modeForm.elements.multiplayer.checked, main_user_id: modeForm.elements.main_user_id.value};
-  }
-  return {users, ...mode};
+  return {users: state?.workspace?.users || [], multiplayer: true, main_user_id: ""};
 }
 function renderCatalog() {
-  const {users, multiplayer, main_user_id} = workspaceUsers();
-  const games = multiplayer ? state.games : state.games.filter(game => main_user_id && game.owner_id === main_user_id);
-  const visibleUsers = multiplayer ? users : users.filter(user => user.id === main_user_id);
-  const groups = instanceGroups(games, visibleUsers);
-  const hasInstances = games.length > 0;
-  $("empty").hidden = hasInstances;
-  $("catalog-heading").hidden = !hasInstances;
-  $("instance-directory").hidden = !hasInstances && !visibleUsers.length;
-  renderInstanceDirectory(
-    $("instance-directory"),
-    groups,
-    gid,
-    selectInstance,
-    openDeleteInstance,
-    openCreateInstance,
-    main_user_id,
-  );
-  const owner = groups.find((g) => g.instances.some((i) => i.id === gid));
-  const instance = owner?.instances.find((i) => i.id === gid);
-  $("instance-breadcrumb").textContent = instance
-    ? `${owner.name} / ${instance.name}`
-    : "";
+  const users = state.workspace.users;
+  const groups = instanceGroups(state.games, users).filter(group => group.id !== "unassigned");
+  $("empty").hidden = true;
+  $("catalog-heading").hidden = false;
+  $("instance-directory").hidden = false;
+  const rows = groups.map(group => {
+    const row = node("button", "", "standalone-user-row");
+    row.type = "button";
+    const avatar = node("span", Array.from(group.name)[0] || "?", "user-avatar");
+    const game = group.instances[0];
+    row.append(avatar, node("strong", group.name),
+      node("span", game ? "打开工作区 ›" : "尚未建立工作区", "caption"));
+    row.disabled = !game;
+    if (game) row.onclick = () => selectInstance(game.id);
+    return row;
+  });
+  $("instance-directory").replaceChildren(...(rows.length ? rows : [node("p", "还没有用户。创建账号后，用户就可以登录并开始模拟交易。", "catalog-empty")]));
+  $("instance-breadcrumb").textContent = groups.find(group =>
+    group.instances.some(instance => instance.id === gid))?.name || "";
 }
 for (const el of document.querySelectorAll("[data-tab],[data-go]"))
   el.onclick = () => tab(el.dataset.tab || el.dataset.go);
@@ -240,8 +254,7 @@ async function load() {
       return load();
     }
     state = nextState;
-    const mode = workspaceUsers();
-    if (!remote && (state.missing_instance || (gid && !mode.multiplayer && state.current?.game.owner_id !== mode.main_user_id))) {
+    if (!remote && (state.missing_instance)) {
       gid = "";
       state.current = null;
       workspace("instances");
@@ -346,7 +359,7 @@ function journal(container, logs) {
   }
 }
 function render() {
-  $("market-break-notice").hidden = !state.market_closed && !state.automatic_break;
+  $("market-break-notice").hidden = workspaceMode === "settings" || !gid || (!state.market_closed && !state.automatic_break);
   $("market-break-notice").textContent = state.market_closed
     ? "外汇周末休市 · 行情可能停止更新" + (state.automatic_break ? " · 自动看盘正在休息" : "")
     : "当前处于自定义休息时段 · 已暂停自动看盘";
@@ -824,6 +837,22 @@ $("reset-market-url").onclick = () => {
   connectionDirty = true;
   $("connection-status").textContent = "已恢复默认地址，保存后生效。";
 };
+$("download-history").onclick = async event => {
+  const button = event.currentTarget;
+  const status = $("connection-status");
+  button.disabled = true;
+  status.classList.remove("error");
+  status.textContent = "正在按已保存的行情源预下载六个品种，供所有用户共用，请稍候…";
+  try {
+    const result = await bridge.apiPost("download-history", {});
+    status.textContent = result.message;
+  } catch (error) {
+    status.classList.add("error");
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
 $("test-connection").onclick = async () => {
   const target = $("connection-status");
   target.classList.remove("error");
@@ -1060,40 +1089,21 @@ $("confirm-delete-instance").onclick = async () => {
 };
 let deletingUser = null;
 let modeSettingsDirty = false;
-const modeForm = $("workspace-mode-settings");
-modeForm.addEventListener("change", () => {
-  modeSettingsDirty = true;
-  $("workspace-save-status").textContent = "有未保存的设置";
-  renderManagedUsers();
-  renderCatalog();
-});
-submit("workspace-mode-settings", async fields => {
-  await userManager.save();
-  await post("command", {
-    action: "workspace_mode",
-    multiplayer: modeForm.elements.multiplayer.checked,
-    main_user_id: fields.main_user_id || "",
-    ...(userManager.roleDirty ? {role_settings: userManager.roleValues()} : {}),
-  });
-  modeSettingsDirty = false;
-  userManager.roleDirty = false;
-  await load();
-  $("workspace-save-status").textContent = "已保存";
-});
 function renderManagedUsers() {
-  const {users, multiplayer, main_user_id} = workspaceUsers();
-  if (!modeSettingsDirty) {
-    modeForm.elements.multiplayer.checked = multiplayer;
-    options(modeForm.elements.main_user_id, users.length ? users : [{id: "", name: "新建实例后自动设为主用户"}], main_user_id);
-  }
-  $("workspace-main-picker").hidden = !multiplayer;
-  const cards = $("managed-users");
-  const roles = $("workspace-role-settings");
-  const primary = $("workspace-primary-user");
-  if (multiplayer && roles.nextElementSibling !== cards) roles.after(cards);
-  if (!multiplayer && cards.parentElement !== primary) primary.append(cards);
-  userManager.renderRoles(workspaceUsers(), users);
-  userManager.render(multiplayer ? users : users.filter(user => user.id === main_user_id), main_user_id, multiplayer);
+  const rows = (state.workspace.users || []).map(user => {
+    const row = node("div", "", "standalone-user-row");
+    const remove = node("button", "删除用户");
+    remove.type = "button";
+    remove.onclick = () => {
+      deletingUser = user;
+      $("delete-user-description").textContent = "删除「" + user.name + "」及其交易记录？";
+      $("delete-user-dialog").showModal();
+    };
+    row.append(node("span", Array.from(user.name)[0] || "?", "user-avatar"),
+      node("strong", user.portal_username || user.name), remove);
+    return row;
+  });
+  $("managed-users").replaceChildren(...(rows.length ? rows : [node("p", "还没有可管理的账号。", "catalog-empty")]));
 }
 let createOwnerBinding = null;
 function openCreateInstance(group = null, quick = false) {
@@ -1137,7 +1147,7 @@ function nextQuickSetup() {
   const step = quickSetupQueue.shift();
   if (!step) {
     if (quickSetup.open) quickSetup.close();
-    openCreateInstance(null, true);
+    newUserDialog.showModal();
     return;
   }
   const form = step === "model" ? modelSettings.form : $("connection");
@@ -1221,8 +1231,24 @@ $("quick-create-next").onclick = () => {
   showQuickCreateStep("details");
   $("create-user-fields").hidden = !!createOwnerBinding;
 };
+const newUserDialog = $("new-user-dialog");
+$("new-user-form").onsubmit = async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    const result = await post("create-user", Object.fromEntries(new FormData(form)));
+    if (result.username !== form.elements.username.value) window.alert("实际登录用户名：" + result.username);
+    form.reset();
+    newUserDialog.close();
+    await load();
+  } catch (error) { $("new-user-error").textContent = error.message; }
+};
+$("cancel-new-user").onclick = () => newUserDialog.close();
 for (const button of document.querySelectorAll("[data-new-instance]"))
-  button.onclick = () => openCreateInstance();
+  button.onclick = () => {
+    $("new-user-error").textContent = "";
+    newUserDialog.showModal();
+  };
 for (const button of document.querySelectorAll("[data-close-dialog]"))
   button.onclick = () => $(button.dataset.closeDialog).close();
 for (const id of [
@@ -1266,15 +1292,99 @@ if (bridge) {
     const games = session.games || [];
     options(picker, games);
     gid = picker.value;
+
     picker.onchange = () => {
       gid = picker.value;
+
       workspace("instances");
       load();
     };
+    if (session.mode === "account" && gid) {
+      const chatTab = node("button", "对话");
+      chatTab.type = "button";
+      chatTab.dataset.tab = "conversation";
+      chatTab.hidden = false;
+      $("instance-nav").after(chatTab);
+      chatTab.classList.add("persistent-chat-tab");
+      const chat = mountChat(() => gid, {
+        onExpand: () => { chatTab.hidden = false; tab("conversation"); },
+        onCollapse: () => { chat.setFull(false); tab("replay"); },
+      });
+      chatTab.onclick = () => chat.setFull(true);
+      const communityNav = node("button", "社区");
+      communityNav.type = "button";
+      communityNav.onclick = () => document.querySelector('[data-workspace="community"]').click();
+      $("instance-nav").append(communityNav);
+      activeChat = {leaveFull: () => {
+        if (document.querySelector(".kurumi-chat.full-chat")) chat.setFull(false);
+      }};
+      window.addEventListener("kurumi-chat-name", event => { chatTab.textContent = event.detail + "对话"; });
+    }
     const logout = node("button", "退出面板");
     logout.type = "button";
     logout.onclick = () => bridge.logout().catch(error => message(error.message, true));
-    document.querySelector(".header-actions").prepend(picker, mountProfile(() => gid), logout);
+    const actions = $("user-settings-actions");
+    const panels = Array.from({length: 7}, () => node("div"));
+    const buttons = [mountProfile(() => gid, {container: panels[0]}),
+      mountProfile(() => gid, {container: panels[1], api: true}),
+      ...["root", "rest", "notices", "diary"].map((group, i) =>
+        mountPreferences(() => gid, {container: panels[i + 2], group}))];
+    const general = mountProfile(() => gid, {container: panels[6], general: true});
+    buttons.push(general);
+    actions.after(...panels);
+    const openSettings = buttons.map(button => button.onclick);
+    const categories = [["Agent 设置", [0, 1]], ["外汇相关设置", [2, 3, 4, 5]], ["通用", [6]]];
+    const nav = $("personal-settings-nav");
+    const visited = new Set();
+    function selectPanel(index) {
+      panels.forEach((panel, i) => { panel.hidden = i !== index; });
+      buttons.forEach((button, i) => {
+        button.classList.toggle("active", i === index);
+        button.setAttribute("aria-pressed", String(i === index));
+      });
+      if (!visited.has(index)) {
+        visited.add(index);
+        openSettings[index]();
+      }
+    }
+    buttons.forEach((button, index) => { button.onclick = () => selectPanel(index); });
+    categories.forEach(([title, indices]) => {
+      const button = node("button", title);
+      button.type = "button";
+      button.onclick = () => {
+        for (const item of nav.children) {
+          item.classList.toggle("selected", item === button);
+          item.setAttribute("aria-pressed", String(item === button));
+        }
+        actions.replaceChildren(...indices.map(index => buttons[index]));
+        selectPanel(indices[0]);
+      };
+      nav.append(button);
+    });
+    nav.firstElementChild.click();
+    const switcher = document.querySelector(".workspace-switch");
+    if (session.mode === "account") {
+      const community = mountCommunity(document.querySelector('[data-page="community"]'));
+      const communityTab = node("button", "社区");
+      communityTab.type = "button";
+      communityTab.dataset.workspace = "community";
+      communityTab.onclick = () => { workspace("community"); community.open(); };
+      switcher.append(communityTab);
+    }
+    switcher.querySelector('[data-workspace="instances"]').textContent = "交易工作区";
+    document.querySelector(".header-actions").append(logout);
+    const back = node("button", "返回交易工作区");
+    back.type = "button";
+    back.className = "conversation-back";
+    back.onclick = () => tab("replay");
+    document.querySelector('[data-page="conversation"]').prepend(back);
+    fetch("/api/state?" + new URLSearchParams({game: gid})).then(response => response.json()).then(profile => {
+      if (profile.avatar?.startsWith("data:image/webp;base64,"))
+        document.querySelector(".brand-avatar").src = profile.avatar;
+      else if (["avatar.png", "neutral.png", "laugh.png"].includes(profile.avatar))
+        document.querySelector(".brand-avatar").src = "/assets/" + profile.avatar;
+    }).catch(() => {});
+
   }
 }
 await load();
