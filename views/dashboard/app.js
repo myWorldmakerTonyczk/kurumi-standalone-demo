@@ -1,3 +1,4 @@
+import { mountAgentMode } from "/assets/agent-mode.js";
 import { mountCommunity } from "/assets/community.js";
 import { mountChat } from "/assets/workspace-chat.js";
 import { mountPreferences } from "/assets/user-preferences.js";
@@ -1324,16 +1325,25 @@ if (bridge) {
     logout.type = "button";
     logout.onclick = () => bridge.logout().catch(error => message(error.message, true));
     const actions = $("user-settings-actions");
-    const panels = Array.from({length: 7}, () => node("div"));
+    const panels = Array.from({length: 8}, () => node("div"));
     const buttons = [mountProfile(() => gid, {container: panels[0]}),
       mountProfile(() => gid, {container: panels[1], api: true}),
       ...["root", "rest", "notices", "diary"].map((group, i) =>
         mountPreferences(() => gid, {container: panels[i + 2], group}))];
     const general = mountProfile(() => gid, {container: panels[6], general: true});
-    buttons.push(general);
+    buttons.push(general, mountAgentMode(panels[7], (config, mode) => {
+      const background = panels[7].querySelector("form");
+      const show = mode !== "external" || background.elements.auto.checked || background.elements.diary.checked;
+      for (const [index, label] of [[0, "人格设定"], [1, "模型与 API"]]) {
+        buttons[index].hidden = !show;
+        buttons[index].textContent = mode === "external" ? "后台" + label : label;
+      }
+      if (config) document.body.classList.toggle("external-agent-mode", config.mode === "external");
+    }));
+    panels[7].addEventListener("change", () => panels[7].querySelector("select").onchange());
     actions.after(...panels);
     const openSettings = buttons.map(button => button.onclick);
-    const categories = [["Agent 设置", [0, 1]], ["外汇相关设置", [2, 3, 4, 5]], ["通用", [6]]];
+    const categories = [["Agent 设置", [7, 0, 1]], ["外汇相关设置", [2, 3, 4, 5]], ["通用", [6]]];
     const nav = $("personal-settings-nav");
     const visited = new Set();
     function selectPanel(index) {
@@ -1388,6 +1398,10 @@ if (bridge) {
   }
 }
 await load();
+if (remote && location.hash === "#agent-settings") {
+  history.replaceState(null, "", location.pathname);
+  workspace("settings");
+}
 setInterval(() => {
   if (!document.hidden && !posting) load();
 }, 10000);

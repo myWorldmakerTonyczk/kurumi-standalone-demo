@@ -25,6 +25,7 @@ from src.portal.accounts import PortalAccounts, password_hash
 from dashboard_api import Dashboard
 from src.agent.tool import workspace_tools
 from src.portal.community import Community
+from src.external_agent.api import ExternalAgent
 from src.agent.decision_settings import settings as rest_settings
 from src.core.availability import automatic_break
 from src.diary.settings import settings as diary_settings, bounds, due_before
@@ -46,6 +47,7 @@ class Demo:
         self.engine = Engine(path)
         self.db = self.engine.db
         self.community = Community(self.db)
+        self.external = ExternalAgent(self)
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS demo_profiles(owner TEXT PRIMARY KEY, data TEXT);
         CREATE TABLE IF NOT EXISTS demo_chat(id INTEGER PRIMARY KEY, game TEXT, role TEXT, content TEXT);
@@ -99,6 +101,9 @@ class Demo:
 
     def preferences(self, owner, game=None):
         values = self.profile(owner).get("preferences", {})
+        mode = self.external.settings(owner)
+        if mode["mode"] == "external":
+            values = values | {"auto": mode["auto"], "diary": (values.get("diary") or {}) | {"enabled": mode["diary"]}}
         return dict(interval=values.get("interval", (game or {}).get("interval", 3600)),
                     auto=values.get("auto", bool((game or {}).get("auto"))),
                     rest=rest_settings(values.get("rest")),
@@ -397,6 +402,17 @@ class Demo:
                 "agent_avatar": self.avatar_value(body.get("agent_avatar") or random.choice(("avatar.png", "neutral.png", "laugh.png"))),
                 "split_reply": body.get("split_reply") is not False}
 
+    def mode_values(self, body, profile):
+        mode = body.get("mode", "platform")
+        if mode not in ("platform", "external"):
+            raise ValueError("Agent 模式无效")
+        auto, diary = body.get("auto", False), body.get("diary", False)
+        if type(auto) is not bool or type(diary) is not bool:
+            raise ValueError("定时选项无效")
+        if mode == "external" and (auto or diary) and not (profile.get("key") and profile.get("model")):
+            raise ValueError("请先保存后台模型和 API Key")
+        return dict(agent_mode=mode, external_auto=auto, external_diary=diary)
+
     def app(self, admin):
         @web.middleware
         async def errors(request, handler):
@@ -444,7 +460,7 @@ class Demo:
 
         async def asset(request):
             name = request.match_info["file"]
-            path = (VIEWS / ASSETS.get(name, name if name in {"standalone-profile.js", "user-preferences.js", "workspace-chat.js", "community.js"} else "assets/" + name)).resolve()
+            path = (VIEWS / ASSETS.get(name, name if name in {"standalone-profile.js", "user-preferences.js", "workspace-chat.js", "community.js", "agent-mode.js"} else "assets/" + name)).resolve()
             if not path.is_relative_to(VIEWS.resolve()) or not path.is_file():
                 raise web.HTTPNotFound()
             return web.FileResponse(path, headers={**SECURITY_HEADERS,
@@ -507,10 +523,37 @@ class Demo:
                 response.set_cookie("kurumi_session", token, httponly=True, samesite="Strict",
                                     secure=self.public_url().startswith("https://"), max_age=28800)
                 return response
+            if action == "external-tools" and request.method == "POST":
+                return web.json_response(await self.external.call(request, body))
             session = self.accounts.access.session(request.cookies.get("kurumi_session", ""))
             if not session:
                 raise web.HTTPUnauthorized()
             owner = session["owner"]
+            if action in {"agent-mode", "external-token"}:
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                config = self.external.settings(owner)
+                if action == "external-token":
+                    if request.method != "POST" or config["mode"] != "external":
+                        raise web.HTTPForbidden()
+                    if body.get("action") == "revoke":
+                        self.external.revoke(owner)
+                        return web.json_response({"ok": True})
+                    if body.get("action") != "issue":
+                        raise ValueError("无效的令牌操作")
+                    return web.json_response(self.external.issue(owner))
+                if request.method == "POST":
+                    current = self.profile(owner)
+                    settings = self.mode_values(body, current)
+                    self.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)",
+                                    (owner, dump(current | settings)))
+                    config = self.external.settings(owner)
+                    if config["mode"] == "platform":
+                        self.external.revoke(owner)
+                expiry = self.db.execute("SELECT expires FROM external_tokens WHERE owner=?", (owner,)).fetchone()
+                return web.json_response(config | {"username": self.accounts.username(owner),
+                    "endpoint": self.public_url().rstrip("/") + "/api/external-tools",
+                    "expires": expiry[0] if expiry and expiry[0] > time.time() else None})
             if action == "groups":
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()
@@ -540,6 +583,7 @@ class Demo:
                 if any(len(value) > 4000 for value in setup.values()):
                     raise ValueError("配置内容过长")
                 setup["persona"] = setup["persona"] or DEFAULT_PERSONA
+                setup.update(self.mode_values(body, setup))
                 if setup["key"]:
                     self.model_url(setup["url"])
                     if not setup["model"]:
@@ -590,9 +634,14 @@ class Demo:
                     settings["key"] = ""
                 elif "key" in settings and not settings["key"]:
                     settings.pop("key")
+                mode = self.external.settings(owner)
+                if mode["mode"] == "external" and (mode["auto"] or mode["diary"]):
+                    self.mode_values(mode, current | settings)
                 self.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)", (owner, dump(current | settings)))
                 return web.json_response({"ok": True})
             if action == "chat" and request.method == "POST":
+                if self.external.settings(owner)["mode"] == "external":
+                    raise web.HTTPForbidden(reason="当前由外部 Agent 负责对话")
                 if not game:
                     raise ValueError("请先创建模拟交易")
                 message = str(body.get("message", "")).strip()
@@ -606,7 +655,7 @@ class Demo:
                                        (game["id"],)).fetchall() if game else []
                 return web.json_response(dict(avatar=current.get("avatar", "user-avatar.svg"),
                     nickname=self.db.execute("SELECT nickname FROM sim_users WHERE id=?", (owner,)).fetchone()[0],
-                    split_reply=current.get("split_reply", True), agent_name=current.get("agent_name", "久留美"), agent_avatar=current.get("agent_avatar", "avatar.png"), state=public_snapshot(self, game["id"], 20) if game else None,
+                    agent_mode=current.get("agent_mode", "platform"), split_reply=current.get("split_reply", True), agent_name=current.get("agent_name", "久留美"), agent_avatar=current.get("agent_avatar", "avatar.png"), state=public_snapshot(self, game["id"], 20) if game else None,
                     chat=[dict(row, attachments=json.loads(row["attachments"])) for row in reversed(rows)], profile={k: current.get(k, "")
                     for k in ("persona", "url", "model")}, has_key=bool(current.get("key")), demo=self.demo))
             raise web.HTTPNotFound()

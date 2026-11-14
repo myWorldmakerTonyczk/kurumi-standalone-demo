@@ -2069,3 +2069,7 @@ input[type="checkbox"]:disabled { opacity: .55; cursor: default; }
 .community-room form { padding: 12px; }
 .community-room form h3 { margin: 0; }
 @media(max-width: 650px) { .community-room { grid-template-columns: 1fr; } }
+.external-agent-mode .kurumi-chat, .external-agent-mode .persistent-chat-tab { display: none !important; }
+.external-connection { margin-top: 16px; }
+.external-connection input { width: 100%; }
+.external-connection[hidden], #user-settings-actions [hidden] { display: none !important; }
