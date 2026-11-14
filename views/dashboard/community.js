@@ -1,407 +1,150 @@
-import { insertMention } from "./workspace-chat.js";
+/* Community workspace shell: forum / group chat / AI assistant behind one tab bar.
+   Entry point kept as `mountCommunity(root, ctx)` so app.js keeps its import. */
+import {h, clear} from "/assets/ui/dom.js";
+import {loadProfile, cachedProfile} from "/assets/ui/session.js";
+import {createForum} from "/assets/community/forum.js";
+import {createGroups} from "/assets/community/groups.js";
+import {createAi} from "/assets/community/ai.js";
 
-export function mountCommunity(root, sidebar, openPage) {
-  root.innerHTML = `
-    <div class="settings-illustration" data-section="api"><h2>社区</h2><p>交流模拟交易心得，或者去群聊打个招呼。</p></div>
-    <nav class="workspace-switch" aria-label="社区"><button type="button" data-view="forum">论坛</button><button type="button" data-view="group-chat">群聊</button></nav>
-    <div class="community-groups" data-groups hidden></div>
-    <dialog data-create-group class="panel"><form>
-      <h3>创建群聊</h3><label>群名<input name="name" maxlength="40" required></label>
-      <label>加入方式<select name="visibility"><option value="public">公开 · 直接加入</option><option value="private">私有 · 群主审核</option></select></label>
-      <button type="button" data-cancel>取消</button><button class="primary">创建</button>
-      <p role="status"></p>
-    </form></dialog><div class="community-layout">
-      <div class="group-window-bar" hidden>
-        <strong data-room-title>公共大厅</strong>
-        <div>
-        <button type="button" data-float aria-pressed="false">取消固定</button>
-        <button type="button" data-full aria-pressed="false">全屏</button><button type="button" data-close-group aria-label="关闭群聊">×</button></div>
-      </div><div data-feed></div><form class="panel">
-      <h3></h3><div data-agents></div><label data-title>标题<input name="title" maxlength="100"></label>
-      <label>正文<textarea name="body" rows="4" maxlength="6000" required></textarea></label>
-      <button class="primary" type="submit">发布</button><p role="status"></p>
-    </form></div>`;
-  const feed = root.querySelector("[data-feed]");
-  const form = root.querySelector(".community-layout form");
-  const dialog = root.querySelector("[data-create-group]");
-  const status = form.querySelector("[role=status]");
-  let room = "";
-  const groups = root.querySelector("[data-groups]");
-  const layout = root.querySelector(".community-layout");
-  const bar = root.querySelector(".group-window-bar");
-  const title = bar.querySelector("[data-room-title]");
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = "community-sidebar-toggle";
-  toggle.hidden = true;
-  toggle.setAttribute("aria-controls", "community-group-list");
-  sidebar.after(toggle);
-  const float = bar.querySelector("[data-float]");
-  const full = bar.querySelector("[data-full]");
-  groups.id = "community-group-list";
-  sidebar.append(groups);
-  const overlay = document.createElement("div");
-  overlay.className = "community-room community-overlay";
-  overlay.hidden = true;
-  overlay.innerHTML = `<section class="floating-group-list" aria-label="群聊列表">
-    <header><strong>群聊列表</strong><button type="button" aria-label="关闭群聊列表">×</button></header>
-  </section>`;
-  document.body.append(overlay);
-  const picker = overlay.firstElementChild;
-  const pickerBar = picker.querySelector("header");
-  const close = bar.querySelector("[data-close-group]");
-  let shortcut = false;
-  let pickerOpen = false, chatClosed = false;
+const TABS = [["forum", "论坛"], ["groups", "群聊"], ["ai", "AI 助手"]];
 
-  let visible = false, collapsed = false, mode = "docked", drag;
+export function mountCommunity(root, ctx = {}) {
+  const me = () => cachedProfile()?.nickname || "";
+  const base = {game: ctx.game || (() => ""), pairs: ctx.pairs || (() => []), me};
+  let current = "forum", unread = 0, tabBadge, demoNote;
 
-  function renderWindow() {
-    const chatting = !shortcut && visible && view === "group-chat";
-    overlay.hidden = !shortcut;
-    picker.hidden = !pickerOpen;
-    layout.hidden = shortcut ? pickerOpen : chatClosed;
-    close.hidden = mode === "docked";
-    groups.hidden = shortcut ? !pickerOpen : !chatting || collapsed || mode === "full";
-    bar.hidden = view !== "group-chat";
-    document.body.classList.toggle("community-groups-active", chatting);
-    document.body.classList.toggle("community-groups-collapsed", chatting && (collapsed || mode === "full"));
-    layout.classList.toggle("group-window-floating", mode === "floating");
-    layout.classList.toggle("group-window-full", mode === "full");
-    toggle.hidden = !chatting || mode === "full";
-    toggle.title = collapsed ? "展开群列表" : "收起群列表";
-    toggle.setAttribute("aria-label", toggle.title);
-    toggle.setAttribute("aria-expanded", String(chatting && !groups.hidden));
-    float.hidden = mode === "full";
-    float.textContent = mode === "floating" ? "固定" : "取消固定";
-    float.setAttribute("aria-pressed", String(mode === "floating"));
-    full.textContent = mode === "full" ? "退出全屏" : "全屏";
-    full.setAttribute("aria-pressed", String(mode === "full"));
-  }
+  const forum = createForum(base);
+  const groups = createGroups({...base, onSelect: () => { if (!floating.hidden) showFloating(false); }, onUnread: total => {
+    unread = total;
+    renderBadge();
+    ctx.onUnread?.(total);
+  }});
+  const ai = createAi({...base,
+    openPost: id => { show("forum"); forum.openPost(id); },
+    onPublished: () => forum.refresh()});
+  const views = {forum, groups, ai};
 
-  function setMode(next) {
-    mode = next;
-    drag = undefined;
-    layout.removeAttribute("style");
-    renderWindow();
+  const buttons = {};
+  const panels = {};
+  const bar = h("div", {class: "cm-tabs", role: "tablist", "aria-label": "社区板块"});
+  for (const [key, label] of TABS) {
+    const badge = key === "groups" ? (tabBadge = h("span", {class: "ui-count", hidden: true})) : null;
+    buttons[key] = h("button", {type: "button", role: "tab", id: "cm-tab-" + key, "aria-controls": "cm-panel-" + key, class: "cm-tab", onClick: () => show(key, {fromTab: true})}, label, badge);
+    panels[key] = h("div", {role: "tabpanel", id: "cm-panel-" + key, "aria-labelledby": "cm-tab-" + key, class: "cm-panel-wrap", hidden: true}, views[key].el);
+    bar.append(buttons[key]);
   }
-
-  toggle.onclick = () => { collapsed = !collapsed; renderWindow(); };
-  float.onclick = () => {
-    if (shortcut) {
-      const selectedRoom = room;
-      restorePage();
-      openPage();
-      select("group-chat", "", selectedRoom);
-    } else setMode(mode === "floating" ? "docked" : "floating");
-  };
-  close.onclick = () => {
-    if (shortcut) {
-      pickerOpen = true;
-      setMode("floating");
-      loadGroups().catch(showListError);
-      pickerBar.querySelector("button").focus();
-    } else {
-      chatClosed = true;
-      setMode("docked");
-    }
-  };
-  pickerBar.querySelector("button").onclick = () => restorePage();
-  full.onclick = () => setMode(mode === "full" ? (shortcut ? "floating" : "docked") : "full");
-  function position(panel, left, top) {
-    const bounds = panel.getBoundingClientRect();
-    panel.style.left = Math.max(0, Math.min(left, innerWidth - bounds.width)) + "px";
-    panel.style.top = Math.max(0, Math.min(top, innerHeight - bounds.height)) + "px";
-  }
-  function draggable(handle, panel, canDrag) {
-    handle.onpointerdown = event => {
-      if (!canDrag() || event.button !== 0 || event.target.closest("button")) return;
-      const rect = panel.getBoundingClientRect();
-      drag = {id: event.pointerId, x: event.clientX - rect.left, y: event.clientY - rect.top};
-      position(panel, rect.left, rect.top);
-      handle.setPointerCapture(event.pointerId);
-    };
-    handle.onpointermove = event => {
-      if (drag?.id === event.pointerId) position(panel, event.clientX - drag.x, event.clientY - drag.y);
-    };
-    handle.onlostpointercapture = () => { drag = undefined; };
-  }
-  draggable(bar, layout, () => mode === "floating");
-  draggable(pickerBar, picker, () => pickerOpen);
-  window.addEventListener("resize", () => {
-        const panel = shortcut && pickerOpen ? picker : layout;
-    if (panel === layout && ((!visible && !shortcut) || mode !== "floating")) return;
-    const {left, top} = panel.getBoundingClientRect();
-    position(panel, left, top);
-  });
-  document.addEventListener("keydown", event => {
-    if ((visible || shortcut) && mode === "full" && event.key === "Escape" && !dialog.open)
-      setMode(shortcut ? "floating" : "docked");
-  });
-  let view = "forum", thread = "", generation = 0, latest = "", groupSignature = "";
-  const node = (tag, value) => Object.assign(document.createElement(tag), {textContent: value});
-  async function request(route, post, body) {
-    const response = await fetch("/api/" + route + "?" + new URLSearchParams(post ? {[route === "groups" ? "room" : "post"]: post} : {}), body ? {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
-    } : {});
-    const data = await response.json();
-    if (!response.ok) throw Error(data.error || "社区请求失败");
-    return data;
-  }
-  function card(entry, title) {
-    const item = document.createElement("article");
-    item.className = "panel community-card";
-    if (title) item.append(node("h3", title));
-    const byline = node("div", "");
-    byline.className = "community-byline";
-    if (entry.avatar) {
-      const image = new Image();
-      image.alt = "";
-      image.src = entry.avatar.startsWith("data:image/webp;base64,") ? entry.avatar : "/assets/" + encodeURIComponent(entry.avatar);
-      byline.append(image);
-    }
-    byline.append(node("strong", entry.nickname));
-    if (entry.leader || entry.is_agent) byline.append(node("span", entry.leader ? "群主" : "智能体"));
-    byline.append(node("small", new Date(entry.created * 1000).toLocaleString("zh-CN")));
-    item.append(byline, node("p", entry.body));
-    return item;
-  }
-  function showListError(error) {
-    if (shortcut && pickerOpen) { groupSignature = ""; groups.replaceChildren(node("p", error.message)); }
-    else status.textContent = error.message;
-  }
-  function openRoom(id = "") {
-    if (shortcut) {
-      pickerOpen = false;
-      setMode("floating");
-    }
-    select("group-chat", "", id);
-  }
-  function restorePage() {
-    shortcut = false;
-    pickerOpen = false;
-    ++generation;
-    sidebar.append(groups);
-    root.append(dialog, layout);
-    setMode("docked");
-    if (visible) select(pageView, pageThread, pageRoom);
-  }
-  let pageView = "forum", pageThread = "", pageRoom = "";
-
-  async function loadGroups() {
-    const {groups: entries} = await request("groups", "");
-    if ((!visible && !shortcut) || view !== "group-chat") return;
-    title.textContent = room ? entries.find(entry => String(entry.id) === room)?.name || "群聊" : "公共大厅";
-    const signature = JSON.stringify([room, entries]);
-    if (groupSignature === signature) return;
-    groupSignature = signature;
-    const list = document.createElement("nav");
-    const create = node("button", "＋ 创建群聊");
-    create.onclick = () => { dialog.querySelector("[role=status]").textContent = ""; dialog.showModal(); };
-    list.append(create);
-    const lobby = node("button", "公共大厅");
-    lobby.onclick = () => openRoom();
-    list.append(lobby);
-    for (const entry of entries) {
-      const id = String(entry.id);
-      const row = document.createElement("div");
-      const open = node("button", entry.name + (entry.joined ? "" : entry.pending ? " · 待审核" : entry.private ? " · 申请加入" : " · 加入"));
-      open.classList.toggle("primary", room === id);
-      open.disabled = Boolean(entry.pending);
-      open.onclick = async () => {
-        try {
-          if (!entry.joined && (await request("groups", id, {action:"join"})).pending) {
-            status.textContent = "申请已提交，等待群主审核";
-            await loadGroups();
-            return;
-          }
-          openRoom(id);
-        } catch (error) { status.textContent = error.message; }
-      };
-      row.append(open, node("small", (entry.private ? "私有群" : "公开群") + " · 群主 " + entry.leader));
-      const isOwner = entry.mine === true;
-      if (isOwner && entry.private) {
-        const review = node("button", "审核申请");
-        const queue = node("div", "");
-        review.onclick = async () => {
-          try {
-            const {requests} = await request("groups", id, {action:"requests"});
-            queue.replaceChildren();
-            if (!requests.length) queue.append(node("small", "暂无待审核申请"));
-            for (const applicant of requests) {
-              const item = node("div", "");
-              item.append(node("span", applicant.nickname));
-              for (const [action, caption] of [["approve", "同意"], ["reject", "拒绝"]]) {
-                const button = node("button", caption);
-                button.onclick = async () => {
-                  try {
-                    await request("groups", id, {action, applicant: applicant.id});
-                    await review.onclick();
-                  } catch (error) { status.textContent = error.message; }
-                };
-                item.append(button);
-              }
-              queue.append(item);
-            }
-          } catch (error) { status.textContent = error.message; }
-        };
-        row.append(review, queue);
-      }
-      if (entry.joined && room === id) {
-        const agent = node("button", entry.agent_joined ? "移出我的智能体" : "邀请我的智能体");
-        agent.onclick = async () => {
-          agent.disabled = true;
-          try {
-            await request("groups", id, {action: entry.agent_joined ? "remove-agent" : "invite-agent"});
-            await Promise.all([loadGroups(), load()]);
-          } catch (error) { status.textContent = error.message; }
-          finally { agent.disabled = false; }
-        };
-        row.append(agent);
-        const action = isOwner ? "delete" : "leave";
-        const leave = node("button", isOwner ? "解散" : "退出");
-        leave.onclick = async () => {
-          if (!window.confirm(leave.textContent + "这个群聊？")) return;
-          try {
-            await request("groups", id, {action});
-            select("group-chat");
-          } catch (error) { status.textContent = error.message; }
-        };
-        row.append(leave);
-      }
-      list.append(row);
-    }
-    groups.replaceChildren(list);
-  }
-  dialog.querySelector("[data-cancel]").onclick = () => dialog.close();
-  dialog.querySelector("form").onsubmit = async event => {
+  bar.addEventListener("keydown", event => {
+    const at = TABS.findIndex(([key]) => key === current);
+    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
     event.preventDefault();
-    const button = event.submitter;
-    button.disabled = true;
-    try {
-      const {name, visibility} = Object.fromEntries(new FormData(event.target));
-      const result = await request("groups", "", {name, private: visibility === "private"});
-      event.target.reset();
-      dialog.close();
-      openRoom(String(result.id));
-    } catch (error) { dialog.querySelector("[role=status]").textContent = error.message; }
-    finally { button.disabled = false; }
-  };
-  async function load() {
-    const sequence = ++generation;
-    try {
-      const result = await request(room ? "groups" : view, room || thread);
-      if (sequence !== generation) return;
-      const signature = JSON.stringify(result);
-      if (latest === signature) return;
-      latest = signature;
-      const agents = form.querySelector("[data-agents]");
-      agents.replaceChildren();
-      for (const name of result.agents || []) {
-        const button = node("button", "@" + name);
-        button.type = "button";
-        button.onclick = () => insertMention(form.elements.body, name);
-        agents.append(button);
-      }
-      const cards = [];
-      if (thread) {
-        const back = node("button", "返回帖子列表");
-        back.onclick = () => select("forum");
-        cards.push(back, card(result.post, result.post.title));
-      }
-      const entries = view === "group-chat" || thread ? [...result.entries].reverse() : result.entries;
-      for (const entry of entries) {
-        const listing = view === "forum" && !thread;
-        const item = card(entry, listing ? entry.title : "");
-        if (listing) {
-          const open = node("button", "查看讨论 · " + entry.comments + " 条评论");
-          open.disabled = Boolean(entry.pending);
-      open.onclick = () => select("forum", String(entry.id));
-          item.append(open);
-        }
-        if (view === "group-chat") {
-          item.classList.add("community-message");
-          item.classList.toggle("mine", Boolean(entry.mine));
-          const mention = node("button", "@" + entry.nickname);
-          mention.type = "button";
-          mention.className = "chat-mention";
-          mention.onclick = () => insertMention(form.elements.body, entry.nickname);
-          item.append(mention);
-        }
-        cards.push(item);
-      }
-      if (!entries.length) cards.push(node("p", thread ? "暂无评论" : view === "forum" ? "还没有帖子" : "还没有群聊消息"));
-      const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
-      feed.replaceChildren(...cards);
-      if (view === "group-chat" && atBottom) feed.scrollTop = feed.scrollHeight;
-    } catch (error) { if (sequence === generation) status.textContent = error.message; }
+    const next = TABS[(at + step + TABS.length) % TABS.length][0];
+    show(next); buttons[next].focus();
+  });
+
+  demoNote = h("span", {class: "ui-badge ui-badge-muted", hidden: true, title: "当前为离线演示数据，不连接真实行情"}, "离线演示");
+  root.replaceChildren(h("section", {class: "cm-shell"},
+    h("div", {class: "cm-header"}, h("div", {}, h("h2", {}, "社区"), h("p", {}, "论坛沉淀观点，群聊实时交流，AI 助手只生成草稿与摘要。")), demoNote),
+    bar, ...Object.values(panels)));
+
+  function renderBadge() {
+    tabBadge.hidden = unread <= 0;
+    tabBadge.textContent = unread > 99 ? "99+" : String(unread);
+    tabBadge.setAttribute("aria-label", `${unread} 条未读消息`);
   }
-  function select(route, post = "", nextRoom = "") {
-    room = nextRoom;
-    chatClosed = false;
-    view = route;
-    if (!shortcut) [pageView, pageThread, pageRoom] = [route, post, nextRoom];
-    root.classList.toggle("community-room", route === "group-chat");
-    if (route !== "group-chat") setMode("docked");
-    else renderWindow();
-    thread = post;
-    latest = "";
-    const posting = view === "forum" && !thread;
-    root.querySelector("[data-title]").hidden = !posting;
-    form.elements.title.required = posting;
-    form.elements.title.disabled = !posting;
-    form.elements.body.maxLength = posting ? 6000 : 1500;
-    form.querySelector("h3").textContent = posting ? "发布帖子" : thread ? "发表评论" : "发送群聊消息";
-    for (const button of root.querySelectorAll("[data-view]")) {
-      button.classList.toggle("active", button.dataset.view === view);
-      button.setAttribute("aria-pressed", String(button.dataset.view === view));
+
+  const floating = h("div", {class: "cm-floating", hidden: true});
+  const title = h("strong", {}, "群聊列表");
+  const close = h("button", {type: "button", class: "ui-btn ui-btn-sm", "aria-label": "关闭群聊窗口", onClick: () => {
+    floating.hidden = true;
+    syncList();
+  }}, "×");
+  const pin = h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: () => {
+    floating.hidden = true;
+    ctx.dock?.();
+    show("groups");
+  }}, "固定");
+  const fullscreen = h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: () => {
+    floating.classList.toggle("is-full");
+    fullscreen.textContent = floating.classList.contains("is-full") ? "退出全屏" : "全屏";
+  }}, "全屏");
+  const header = h("header", {}, title, pin, fullscreen, close);
+  floating.append(header);
+  document.body.append(floating);
+  let collapsed = false;
+  const toggle = h("button", {type: "button", class: "community-sidebar-toggle", hidden: true,
+    "aria-label": "展开或收起群聊列表", onClick: () => { collapsed = !collapsed; syncList(); }});
+  ctx.sidebar?.after(toggle);
+  header.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || event.target.closest("button") || floating.classList.contains("is-full")) return;
+    const rect = floating.getBoundingClientRect();
+    header.setPointerCapture(event.pointerId);
+    const move = e => {
+      floating.style.left = Math.max(0, Math.min(innerWidth - rect.width, rect.left + e.clientX - event.clientX)) + "px";
+      floating.style.top = Math.max(0, Math.min(innerHeight - header.offsetHeight, rect.top + e.clientY - event.clientY)) + "px";
+      floating.style.right = floating.style.bottom = "auto";
+    };
+    header.addEventListener("pointermove", move);
+    header.addEventListener("lostpointercapture", () => header.removeEventListener("pointermove", move), {once: true});
+  });
+  function syncList() {
+    const sidebar = floating.hidden && current === "groups" && !root.hidden && ctx.sidebar;
+    document.body.classList.toggle("community-groups-active", Boolean(sidebar));
+    document.body.classList.toggle("community-groups-collapsed", Boolean(sidebar && collapsed));
+    toggle.hidden = !sidebar;
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    (sidebar || groups.el).prepend(groups.listPanel);
+    groups.el.classList.toggle("external-list", Boolean(sidebar));
+    if (floating.hidden) panels.groups.append(groups.el);
+  }
+  function showFloating(list) {
+    floating.hidden = false;
+    floating.classList.toggle("is-picker", list);
+    title.textContent = list ? "群聊列表" : "群聊";
+    pin.hidden = fullscreen.hidden = list;
+    floating.append(groups.el);
+    syncList();
+    groups.activate();
+  }
+
+  function show(key, {fromTab = false} = {}) {
+    const reselected = fromTab && key === current && !panels[key].hidden;
+    current = key;
+    for (const [name] of TABS) {
+      const on = name === key;
+      buttons[name].setAttribute("aria-selected", String(on));
+      buttons[name].tabIndex = on ? 0 : -1;
+      buttons[name].classList.toggle("is-active", on);
+      panels[name].hidden = !on;
     }
-    form.reset();
-    form.querySelector("[data-agents]").replaceChildren();
-    status.textContent = "";
-    feed.replaceChildren();
-    if (view === "group-chat") loadGroups().catch(showListError);
-    load();
+    if (reselected) views[key].home?.();
+    syncList();
+    views[key].activate();
   }
-  form.onsubmit = async event => {
-    event.preventDefault();
-    const button = event.submitter;
-    button.disabled = true;
-    try {
-      await request(room ? "groups" : view, room || thread, Object.fromEntries(new FormData(form)));
-      form.reset();
-      status.textContent = "";
-      await load();
-    } catch (error) { status.textContent = error.message; }
-    finally { button.disabled = false; }
-  };
-  root.querySelectorAll("[data-view]").forEach(button => { button.onclick = () => select(button.dataset.view); });
-  setInterval(() => {
-    if ((!shortcut && root.hidden) || document.hidden) return;
-    if (view === "group-chat") loadGroups().catch(() => {});
-    if (!layout.hidden && (view === "group-chat" || thread)) load();
-  }, 4000);
+
+  // Keep the unread badge fresh while the community page is closed.
+  let warmed = false;
+  const poll = () => { if (warmed && !document.hidden && root.hidden) groups.refresh(); };
+  setInterval(poll, 45000);
+
   return {
-    open() {
-      if (shortcut) restorePage();
-      else select(pageView, pageThread, pageRoom);
+    openFloating() { showFloating(true); },
+    setVisible() { syncList(); },
+    async open(tab = current) {
+      floating.hidden = true;
+      try {
+        const profile = await loadProfile();
+        demoNote.hidden = !profile.demo;
+      } catch { /* nickname only improves "mine" markers; the pages still work */ }
+      show(tab);
     },
-    openFloating() {
-      if (shortcut && pickerOpen) { restorePage(); return; }
-      shortcut = true;
-      pickerOpen = true;
-      ++generation;
-      view = "group-chat";
-      picker.append(groups);
-      overlay.append(dialog, layout);
-      groupSignature = "";
-      setMode("floating");
-      loadGroups().catch(showListError);
-      pickerBar.querySelector("button").focus();
+    async openDraft(values, origin, review) {
+      try { await loadProfile(); } catch { /* optional */ }
+      show("ai");
+      ai.gotoDraft(values, origin, review);
     },
-    setVisible(value) {
-      visible = value;
-      if (!visible && !shortcut && mode !== "docked") setMode("docked");
-      else renderWindow();
-    },
+    openPost(id) { show("forum"); return forum.openPost(id); },
+    warm() { warmed = true; return groups.refresh(); },
+    unread: () => unread,
   };
 }
