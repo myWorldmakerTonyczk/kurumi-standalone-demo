@@ -15,6 +15,10 @@ from src.core.trading import execute, public_snapshot, lock_for
 from src.market_data.market import Market
 from src.portal.access import PortalAccess
 from src.portal.accounts import PortalAccounts
+from dashboard_api import Dashboard
+from src.portal.server import ASSETS, SECURITY_HEADERS
+
+VIEWS = Path(__file__).with_name("views") / "dashboard"
 
 
 class Demo:
@@ -31,6 +35,31 @@ class Demo:
         self.instance_locks = {}
         self.admin = secrets.token_urlsafe(32)
         self.demo = os.getenv("KURUMI_LIVE") != "1"
+        self.dashboard = Dashboard(self)
+        self.history = self.dashboard
+        self.diary = self.dashboard.diary
+
+    def settings(self):
+        return self.dashboard.get("market", {"history_source": "market"})
+
+    def public_url(self):
+        return os.getenv("KURUMI_PUBLIC_URL") or self.dashboard.get("portal", {}).get("origin") or "http://127.0.0.1:8791"
+
+    async def run_decision(self, game):
+        now = time.time()
+        cursor = self.db.execute(
+            "INSERT INTO decision_jobs(game,trigger,events,state,created,updated) VALUES(?,?,?,?,?,?)",
+            (game["id"], "scheduled", "[]", "running", now, now),
+        )
+        try:
+            reply = await self.agent(game)
+        except BaseException:
+            self.db.execute("UPDATE decision_jobs SET state='failed',updated=?,error=? WHERE id=?",
+                            (time.time(), "看盘任务未完成", cursor.lastrowid))
+            raise
+        self.db.execute("UPDATE decision_jobs SET state='success',updated=?,result=? WHERE id=?",
+                        (time.time(), dump({"summary": reply}), cursor.lastrowid))
+        return reply
 
     def profile(self, owner):
         row = self.db.execute("SELECT data FROM demo_profiles WHERE owner=?", (owner,)).fetchone()
@@ -106,7 +135,8 @@ class Demo:
             self.engine.quotes["EUR/USD"] = dict(bid="1.1000", ask="1.1002",
                                                   timestamp=time.time(), tradeable=True)
         else:
-            await self.market.refresh({})
+            await self.market.refresh(self.settings())
+        self.dashboard.history.record(self.settings())
 
     @staticmethod
     def model_url(value):
@@ -140,7 +170,7 @@ class Demo:
                 self.db.execute("INSERT OR REPLACE INTO demo_schedule VALUES(?,?)",
                                 (gid, now + (30 if self.demo else 3600)))
                 try:
-                    await self.agent(game)
+                    await self.run_decision(game)
                 except Exception as exc:
                     print("定时任务失败", gid, type(exc).__name__, flush=True)
             await asyncio.sleep(2)
@@ -151,11 +181,20 @@ class Demo:
             try:
                 if request.method == "POST" and request.content_type != "application/json":
                     raise web.HTTPUnsupportedMediaType()
-                return await handler(request)
+                origin = request.headers.get("Origin")
+                expected = f"{request.scheme}://{request.host}"
+                if request.method == "POST" and origin and origin != expected:
+                    if admin or origin != self.public_url():
+                        raise web.HTTPForbidden(reason="请求来源无效")
+                response = await handler(request)
+                response.headers.update(SECURITY_HEADERS)
+                return response
             except ValueError as exc:
                 return web.json_response({"error": str(exc)}, status=400)
-            except web.HTTPException:
-                raise
+            except web.HTTPException as exc:
+                if exc.status < 400:
+                    raise
+                return web.json_response({"error": exc.reason}, status=exc.status)
             except Exception as exc:
                 print(type(exc).__name__, flush=True)
                 return web.json_response({"error": "处理失败，请检查服务器和模型配置"}, status=502)
@@ -163,8 +202,21 @@ class Demo:
         app = web.Application(middlewares=[errors], client_max_size=32768)
 
         async def page(request):
-            return web.FileResponse(Path(__file__).with_name("admin.html" if admin else "portal.html"),
-                                    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+            return web.FileResponse(VIEWS / ("index.html" if admin else "portal.html"))
+
+        async def asset(request):
+            name = request.match_info["file"]
+            path = (VIEWS / ASSETS.get(name, "assets/" + name)).resolve()
+            if not path.is_relative_to(VIEWS.resolve()) or not path.is_file():
+                raise web.HTTPNotFound()
+            return web.FileResponse(path, headers={**SECURITY_HEADERS,
+                "Content-Type": "text/javascript"} if path.suffix == ".js" else SECURITY_HEADERS)
+
+        async def dashboard_asset(request):
+            path = VIEWS / request.match_info["file"]
+            if not path.is_file():
+                raise web.HTTPNotFound()
+            return web.FileResponse(path, headers={"Content-Type": "text/javascript"} if path.suffix == ".js" else {})
 
         async def api(request):
             action = request.match_info["action"]
@@ -177,13 +229,28 @@ class Demo:
                         user_nickname=str(body.get("nickname", "")), user_binding={"type": "random", "values": []},
                         _issue_user_token=False, auto=body.get("auto") is True))
                     username, password = await self.accounts.issue(game["owner_id"])
+                    self.accounts.allow_trade(game["id"], True)
                     return web.json_response(dict(username=username,password=password))
                 if request.method == "GET" and action == "state":
                     return web.json_response(dict(demo=self.demo, portal=os.getenv("KURUMI_PUBLIC_URL",
                         "http://127.0.0.1:8791"), games=[dict(id=g["id"], name=g["name"],
                         owner=g["owner_name"], username=self.accounts.username(g["owner_id"]), auto=g["auto"])
                         for g in self.engine.games()]))
-                raise web.HTTPNotFound()
+                return web.json_response(await self.dashboard.admin(request, action, body))
+            portal = self.dashboard.portal
+            if action == "health" and request.method == "GET":
+                response = web.json_response({"service": "kurumi-user-portal", "ok": True})
+                if origin := request.headers.get("Origin"):
+                    if origin == "http://127.0.0.1:8790":
+                        response.headers["Access-Control-Allow-Origin"] = origin
+                return response
+            portal_routes = {"session": portal.session, "workspace": portal.workspace_state,
+                             "review": portal.review, "history": portal.history, "journal": portal.journal,
+                             "notebook": portal.notebook, "diaries": portal.diaries, "account": portal.account_state}
+            if request.method == "GET" and action in portal_routes:
+                return await portal_routes[action](request)
+            if request.method == "POST" and action in {"logout", "action"}:
+                return await (portal.logout if action == "logout" else portal.action)(request)
             if action == "login" and request.method == "POST":
                 username = str(body.get("username", ""))[:300]
                 if not self.accounts.rate_limit(username):
@@ -193,7 +260,7 @@ class Demo:
                     raise web.HTTPUnauthorized()
                 response = web.json_response({"ok": True})
                 response.set_cookie("kurumi_session", token, httponly=True, samesite="Strict",
-                                    secure=os.getenv("KURUMI_PUBLIC_URL", "").startswith("https://"), max_age=28800)
+                                    secure=self.public_url().startswith("https://"), max_age=28800)
                 return response
             session = self.accounts.access.session(request.cookies.get("kurumi_session", ""))
             if not session:
@@ -202,7 +269,7 @@ class Demo:
             games = [g for g in self.engine.games() if g.get("owner_id") == owner]
             if not games:
                 raise web.HTTPNotFound()
-            game = games[0]
+            game = portal.game(request, session) if request.query.get("game") else games[0]
             current = self.profile(owner)
             if action == "profile" and request.method == "POST":
                 settings = {k: str(body.get(k, ""))[:4000].strip() for k in ("persona", "url", "model", "key")}
@@ -226,6 +293,14 @@ class Demo:
 
         app.router.add_get("/", page)
         app.router.add_route("*", "/api/{action}", api)
+        app.router.add_get("/assets/{file:.+}", asset)
+        if admin:
+            app.router.add_static("/vendor", VIEWS / "vendor")
+            app.router.add_get("/{file:[a-zA-Z0-9_.-]+\\.(?:js|css)}",
+                               dashboard_asset)
+        else:
+            app.router.add_get("/workspace/", self.dashboard.portal.workspace)
+            app.router.add_get("/workspace/{file:.+}", self.dashboard.portal.workspace_asset)
         return app
 
 
