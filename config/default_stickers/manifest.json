@@ -1,0 +1,208 @@
+[
+  {
+    "id": "banter",
+    "label": "日常吐槽",
+    "description": "闲聊打趣、互相调侃，或吐槽认真做事有点枯燥时。",
+    "items": [
+      {
+        "file": "06.webp",
+        "label": "老实赚钱很枯燥吧"
+      },
+      {
+        "file": "12.webp",
+        "label": "我才不要"
+      },
+      {
+        "file": "18.webp",
+        "label": "坏笑"
+      },
+      {
+        "file": "20.webp",
+        "label": "先摸鱼五分钟"
+      }
+    ]
+  },
+  {
+    "id": "excited",
+    "label": "开心上头",
+    "description": "聊到兴奋处、遇到惊喜或开玩笑说自己过度乐观时。",
+    "items": [
+      {
+        "file": "03.webp",
+        "label": "疯狂乐观"
+      },
+      {
+        "file": "13.webp",
+        "label": "笑出声"
+      },
+      {
+        "file": "14.webp",
+        "label": "名场面来了"
+      }
+    ]
+  },
+  {
+    "id": "market",
+    "label": "看盘与得意",
+    "description": "聊起行情、判断猜中、小得意，或自嘲关心盈亏时。",
+    "items": [
+      {
+        "file": "05.webp",
+        "label": "这波稳了"
+      },
+      {
+        "file": "07.webp",
+        "label": "杠杆梗"
+      },
+      {
+        "file": "08.webp",
+        "label": "认真盯盘"
+      },
+      {
+        "file": "10.webp",
+        "label": "盈利呢"
+      },
+      {
+        "file": "15.webp",
+        "label": "想到盈利"
+      }
+    ]
+  },
+  {
+    "id": "oops",
+    "label": "震惊与翻车",
+    "description": "看到意外结果、判断失误或者自嘲翻车时。",
+    "items": [
+      {
+        "file": "01.webp",
+        "label": "紧张盯屏"
+      },
+      {
+        "file": "02.webp",
+        "label": "当场晕倒"
+      },
+      {
+        "file": "04.webp",
+        "label": "爆仓后强颜欢笑"
+      },
+      {
+        "file": "19.webp",
+        "label": "翻车后的眼神"
+      }
+    ]
+  },
+  {
+    "id": "sad",
+    "label": "委屈与失落",
+    "description": "遇到遗憾、觉得委屈或轻声表达失落时。对方认真倾诉时先用文字回应。",
+    "items": [
+      {
+        "file": "sad-1.webp",
+        "label": "有点委屈"
+      },
+      {
+        "file": "sad-2.webp",
+        "label": "咬牙忍住"
+      },
+      {
+        "file": "sad-3.webp",
+        "label": "有点难受"
+      }
+    ]
+  },
+  {
+    "id": "confused",
+    "label": "困惑与卡壳",
+    "description": "看不懂、听到离谱解释，或需要对方说清楚一点时。",
+    "items": [
+      {
+        "file": "confused-1.webp",
+        "label": "等下，让我想想"
+      },
+      {
+        "file": "confused-2.webp",
+        "label": "已经看不懂了"
+      },
+      {
+        "file": "confused-3.webp",
+        "label": "等等，真的吗"
+      }
+    ]
+  },
+  {
+    "id": "working",
+    "label": "在忙与用功",
+    "description": "开始干活、核对资料，或低头认真看消息的时候。",
+    "items": [
+      {
+        "file": "working-1.webp",
+        "label": "正在认真看"
+      },
+      {
+        "file": "working-2.webp",
+        "label": "我会把两千万拿回来"
+      },
+      {
+        "file": "working-3.webp",
+        "label": "先记进小本本"
+      }
+    ]
+  },
+  {
+    "id": "like",
+    "label": "喜欢与夸夸",
+    "description": "收到好消息、表示喜欢、谢谢或夸对方时。",
+    "items": [
+      {
+        "file": "like-1.webp",
+        "label": "这个我喜欢"
+      },
+      {
+        "file": "like-2.webp",
+        "label": "眨眼点赞"
+      },
+      {
+        "file": "like-3.webp",
+        "label": "笑得停不下来"
+      }
+    ]
+  },
+  {
+    "id": "greeting",
+    "label": "早安与打招呼",
+    "description": "开启聊天、打招呼或欢迎对方回来时。",
+    "items": [
+      {
+        "file": "greeting-1.webp",
+        "label": "嗨，来啦"
+      },
+      {
+        "file": "greeting-2.webp",
+        "label": "在这里"
+      },
+      {
+        "file": "greeting-3.webp",
+        "label": "探头打招呼"
+      }
+    ]
+  },
+  {
+    "id": "goodnight",
+    "label": "晚安与休息",
+    "description": "聊到休息、道晚安或结束今天的聊天时。",
+    "items": [
+      {
+        "file": "goodnight-1.webp",
+        "label": "今天就到这吧"
+      },
+      {
+        "file": "goodnight-2.webp",
+        "label": "躺下了"
+      },
+      {
+        "file": "goodnight-3.webp",
+        "label": "放空一下"
+      }
+    ]
+  }
+]

@@ -1,3 +1,10 @@
+export function insertMention(field, name) {
+  const start = field.selectionStart;
+  const prefix = start && !/\s$/.test(field.value.slice(0, start)) ? " " : "";
+  field.setRangeText(prefix + "@" + name + " ", start, field.selectionEnd, "end");
+  field.focus();
+}
+
 export async function encodeAgentAvatar(file) {
   if (!file || !file.size) return "";
   if (file.size > 5 * 1024 * 1024 || !["image/png","image/jpeg","image/webp"].includes(file.type))
@@ -109,7 +116,14 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     const img = document.createElement("img");
     img.alt = "";
     img.src = user ? avatar(identity.avatar, "user-avatar.svg") : avatar(identity.agent_avatar, "avatar.png");
-    speaker.append(img, user ? identity.nickname : identity.agent_name);
+    const name = user ? identity.nickname : identity.agent_name;
+    const mention = document.createElement("button");
+    mention.type = "button";
+    mention.className = "chat-mention";
+    mention.textContent = name;
+    mention.title = "提及 " + name;
+    mention.onclick = () => insertMention(form.elements.message, name);
+    speaker.append(img, mention);
     row.prepend(speaker);
   }
   let floatingPosition, drag, loadedGame, busy = false;
@@ -135,6 +149,18 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
         image.src = attachment.src;
         image.alt = attachment.label;
         row.append(image);
+      } else if (attachment.kind === "sticker" && attachment.src.startsWith("data:image/webp;base64,")) {
+        const image = document.createElement("img");
+        image.className = "chat-sticker";
+        image.src = attachment.src;
+        image.alt = attachment.label;
+        row.append(image);
+      } else if (attachment.kind === "audio" && attachment.src.startsWith("data:audio/mpeg;base64,")) {
+        const audio = document.createElement("audio");
+        audio.src = attachment.src;
+        audio.controls = true;
+        audio.preload = "none";
+        row.append(audio);
       } else if (attachment.kind === "panel") {
         const link = document.createElement("a");
         link.href = "/workspace/";
@@ -196,18 +222,30 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
       updateIdentity(data);
       const {chat} = data;
       log.replaceChildren();
-      chat.forEach(message => {
-        const parts = message.role === "assistant" ? splitReply(message.content) : [message.content];
+      for (const message of chat) {
+        const parts = message.role === "assistant" ? await splitReply(message.content) : [message.content];
         parts.forEach((part, i) => add(message.role, part, i === 0 ? message.attachments : []));
-      });
+      }
       loadedGame = gid;
       status.textContent = "";
     } catch (error) { status.textContent = error.message; }
     finally { busy = false; form.querySelector("button").disabled = false; }
   };
-  function splitReply(reply) {
+  async function splitReply(reply) {
     if (identity.split_reply === false || /(^|\n)\s*(?:[#|>]|[-*+]\s|\d+[.)]\s)/.test(reply) || reply.includes("```"))
       return [reply];
+    if (identity.split_pattern) {
+      return new Promise(resolve => {
+        let worker;
+        try { worker = new Worker("/assets/split-reply.js"); }
+        catch { resolve([reply]); return; }
+        const finish = parts => { clearTimeout(timer); worker.terminate(); resolve(parts?.length ? parts : [reply]); };
+        const timer = setTimeout(() => finish(null), 500);
+        worker.onmessage = event => finish(event.data);
+        worker.onerror = () => finish(null);
+        worker.postMessage({reply, pattern: identity.split_pattern});
+      });
+    }
     const parts = reply.split(/\n+|(?<=[。！？!?])\s*|(?<=[.;])\s+|[ \t]{2,}/)
       .map(part => part.trim()).filter(Boolean);
     return parts.length ? parts : [reply];
@@ -242,13 +280,22 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     const sent = add("user", message);
     const pending = add("assistant", "");
     pending.classList.add("chat-typing");
-    pending.setAttribute("aria-label", "久留美正在回复");
+    pending.setAttribute("aria-label", identity.agent_name + "正在回复");
     pending.append(...Array.from({length: 3}, () => document.createElement("span")));
     status.textContent = "";
     try {
       const {reply, attachments} = await request("chat", gameId(), {message});
-      pending.remove();
-      for (const [index, part] of splitReply(reply).entries()) add("assistant", part, index === 0 ? attachments : []);
+      const parts = await splitReply(reply);
+      const minimum = identity.split_delay_min ?? 1;
+      const maximum = identity.split_delay_max ?? 1.5;
+      for (const [index, part] of parts.entries()) {
+        if (parts.length > 1 && maximum > 0) {
+          const seconds = minimum + Math.random() * (maximum - minimum);
+          await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+        }
+        if (index === 0) pending.remove();
+        add("assistant", part, index === 0 ? attachments : []);
+      }
       status.textContent = "";
     } catch (error) {
       sent.remove();

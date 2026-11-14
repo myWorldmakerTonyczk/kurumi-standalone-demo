@@ -16,7 +16,7 @@ import { TradingNotices } from "./notifications.js";
 import { instanceGroups } from "./instance-catalog.js";
 import { createPortalBridge } from "./portal-bridge.js";
 import { createAdminBridge } from "./standalone-bridge.js";
-import { mountProfile } from "./standalone-profile.js";
+import { mountAdvanced, mountModels, mountProfile, mountUserSettings, mountSocialSettings } from "./standalone-profile.js";
 const remote = document.body.hasAttribute("data-remote-workspace");
 const bridge = remote ? createPortalBridge(() => gid) : createAdminBridge();
 const tradingNotices = new TradingNotices(bridge);
@@ -1325,9 +1325,10 @@ if (bridge) {
     logout.type = "button";
     logout.onclick = () => bridge.logout().catch(error => message(error.message, true));
     const actions = $("user-settings-actions");
-    const panels = Array.from({length: 8}, () => node("div"));
+    const panels = Array.from({length: 12}, () => node("div"));
+    const {usageTab, providerTab} = mountModels(panels[1], panels[8]);
     const buttons = [mountProfile(() => gid, {container: panels[0]}),
-      mountProfile(() => gid, {container: panels[1], api: true}),
+      usageTab,
       ...["root", "rest", "notices", "diary"].map((group, i) =>
         mountPreferences(() => gid, {container: panels[i + 2], group}))];
     const general = mountProfile(() => gid, {container: panels[6], general: true});
@@ -1338,12 +1339,24 @@ if (bridge) {
         buttons[index].hidden = !show;
         buttons[index].textContent = mode === "external" ? "后台" + label : label;
       }
-      if (config) document.body.classList.toggle("external-agent-mode", config.mode === "external");
+      if (config) {
+        const external = config.mode === "external";
+        document.body.classList.toggle("external-agent-mode", external);
+        document.body.classList.toggle("external-no-watch", external && !config.auto);
+        buttons[2].hidden = buttons[3].hidden = external && !config.auto;
+        buttons[5].hidden = external && !config.diary;
+        buttons[6].hidden = external;
+        buttons[11].hidden = external || session.mode !== "account";
+        if (external && instancePage === "conversation") tab("replay");
+      }
     }));
+    buttons.push(providerTab, mountAdvanced(panels[9]), mountUserSettings(panels[10]), mountSocialSettings(panels[11]));
     panels[7].addEventListener("change", () => panels[7].querySelector("select").onchange());
     actions.after(...panels);
     const openSettings = buttons.map(button => button.onclick);
-    const categories = [["Agent 设置", [7, 0, 1]], ["外汇相关设置", [2, 3, 4, 5]], ["通用", [6]]];
+    buttons[11].hidden = session.mode !== "account";
+    const categories = [["Agent 设置", [7, 0, 1, 8, 6, 11, 9]], ["外汇相关设置", [2, 3, 4, 5]]];
+    if (session.mode === "account") categories.push(["用户设置", [10]]);
     const nav = $("personal-settings-nav");
     const visited = new Set();
     function selectPanel(index) {
@@ -1352,7 +1365,7 @@ if (bridge) {
         button.classList.toggle("active", i === index);
         button.setAttribute("aria-pressed", String(i === index));
       });
-      if (!visited.has(index)) {
+      if (!visited.has(index) || [1, 8, 9].includes(index)) {
         visited.add(index);
         openSettings[index]();
       }
@@ -1367,7 +1380,7 @@ if (bridge) {
           item.setAttribute("aria-pressed", String(item === button));
         }
         actions.replaceChildren(...indices.map(index => buttons[index]));
-        selectPanel(indices[0]);
+        selectPanel(indices.find(index => !buttons[index].hidden) ?? indices[0]);
       };
       nav.append(button);
     });
