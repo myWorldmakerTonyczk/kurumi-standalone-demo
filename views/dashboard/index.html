@@ -6,6 +6,9 @@
     <title>久留美模拟器</title>
     <link rel="stylesheet" href="./style.css" />
     <link rel="stylesheet" href="./replay.css" />
+    <link rel="stylesheet" href="/assets/ui/ui.css" />
+    <link rel="stylesheet" href="/assets/community/community.css" />
+    <link rel="stylesheet" href="/assets/home/home.css" />
   </head>
   <body>
     <div class="workspace">
@@ -21,7 +24,8 @@
           <h1>久留美<span>模拟器</span></h1>
         </div>
         <nav id="instance-nav" aria-label="交易实例导航">
-          <button data-tab="replay" class="selected">AI 复盘</button
+          <button data-tab="home" id="nav-home" hidden>首页</button
+          ><button data-tab="replay" class="selected">AI 复盘</button
           ><button data-tab="overview">交易工作台</button
           ><button data-tab="journal">交易日志</button
           ><button data-tab="memory">计划与经验</button>
@@ -31,6 +35,7 @@
           <button data-settings-anchor="users">用户与权限</button>
           <button data-settings-anchor="api">行情连接</button>
           <button data-settings-anchor="portal">用户面板</button>
+          <button data-settings-anchor="community">社区审核</button>
         </nav>
         <div class="aside-note">
           真实行情<br />虚拟资金<br /><strong>让她自己试试看。</strong>
@@ -118,6 +123,7 @@
           </div>
           <div id="instance-directory" class="central-directory"></div>
         </section>
+        <section data-page="home" id="home" hidden aria-label="首页"></section>
         <section data-page="overview">
           <p id="instance-loading" hidden>正在打开交易实例…</p>
           <div id="desk" hidden>
@@ -473,6 +479,7 @@
             <button type="button" data-settings-tab="users">用户与权限</button>
             <button type="button" data-settings-tab="api">行情连接</button>
             <button type="button" data-settings-tab="portal">用户面板</button>
+            <button type="button" data-settings-tab="community">社区审核</button>
           </nav>
           <div data-settings-page="users">
             <section class="panel" id="access-scaffold">
@@ -634,6 +641,9 @@
               </div>
               <p id="portal-link-status" class="caption" role="status">保存 HTTPS 地址后可检查浏览器到远程面板的连接。</p>
             </section>
+          </div>
+          <div data-settings-page="community" hidden>
+            <div id="community-moderation"></div>
           </div>
           <div data-settings-page="diary" hidden>
               <section class="panel" id="diary-settings-panel">

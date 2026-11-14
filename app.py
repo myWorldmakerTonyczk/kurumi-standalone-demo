@@ -27,6 +27,7 @@ from src.agent.tool import workspace_tools
 from src.portal.community import Community
 from src.agent.decision_settings import settings as rest_settings
 from src.core.availability import automatic_break
+from src.core.replay import review
 from src.diary.settings import settings as diary_settings, bounds, due_before
 from src.notifications.settings import validate as notice_settings, delivery_time
 from src.portal.server import ASSETS, SECURITY_HEADERS
@@ -104,6 +105,100 @@ class Demo:
                     rest=rest_settings(values.get("rest")),
                     diary=diary_settings(values.get("diary")),
                     notices=notice_settings(values.get("notices") or (game or {}).get("notifications")))
+
+    async def generate_trade_review(self, game, *, days=1, pair="", end=0):
+        """Build a safe, publishable review; model text is optional in offline mode."""
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            raise ValueError("复盘周期无效")
+        data = await review(self, game["id"], pair, days, int(end or 0), private=True, include_candles=False)
+        stats = next((item for item in data["pair_stats"] if item["pair"] == data["pair"]), {})
+        events = [item for item in data["events"] if item.get("action") == "close" and item.get("status") == "success"]
+        wins = sum(1 for item in events if float(item.get("position", {}).get("pnl") or 0) > 0)
+        net = float(stats.get("net") or 0)
+        fills = int(stats.get("fills") or 0)
+        drawdown = max((float(mark.get("drawdown") or 0) for mark in data.get("marks", [])), default=0)
+        win_rate = round(wins / len(events), 4) if events else 0
+        risk_points = []
+        if drawdown > 0:
+            risk_points.append(f"最大回撤约 {drawdown:.2f}%")
+        if fills == 0:
+            risk_points.append("周期内没有完成成交，样本不足")
+        if net < 0:
+            risk_points.append("周期净结果为负，下一周期应降低仓位并复核止损")
+        if not risk_points:
+            risk_points.append("继续控制单笔风险，避免仅凭短期收益扩大仓位")
+        summary = (f"本次复盘覆盖 {data['day']} 前 {days} 天的 {data['pair']}。"
+                   f"共完成 {fills} 次成交，胜率 {win_rate:.0%}，净结果 {net:.2f}。"
+                   f"当前数据来自模拟账本，不能代表真实收益。")
+        publishable = summary + "\n风险提示：" + "；".join(risk_points) + "。"
+        if self.profile(game["owner_id"]).get("key") and self.profile(game["owner_id"]).get("model"):
+            prompt = ("请把下面这份模拟交易复盘改写成简洁中文社区摘要，只能使用给出的统计，"
+                      "不得添加不存在的交易或账户隐私。\n" + publishable)
+            try:
+                model_text = await self.agent(game, diary_prompt=prompt)
+                if model_text and not model_text.startswith("离线演示日记："):
+                    publishable = model_text[:6000]
+                    summary = model_text[:1200]
+            except Exception:
+                pass
+        return dict(title=f"{data['pair']} {days}日交易复盘", summary=summary,
+                    risk_points=risk_points, stats=dict(pair=data["pair"], fills=fills,
+                    wins=wins, win_rate=win_rate, net=round(net, 6), max_drawdown=round(drawdown, 6),
+                    start=data["start"], end=data["end"]), publishable_body=publishable,
+                    review=data)
+
+    async def summarize_group(self, game, owner, room, *, limit=80):
+        data = self.community.group_messages_for_summary(owner, int(room), limit)
+        messages = data["messages"]
+        text = "；".join(item["body"] for item in messages[-20:])
+        topics = []
+        for pair in PAIRS:
+            if pair in text:
+                topics.append(pair)
+        if self.profile(owner).get("key") and self.profile(owner).get("model") and game:
+            try:
+                generated = await self.agent(game, diary_prompt=("请总结以下公开群聊，输出主要观点、风险提醒、争议点和待验证事项，"
+                    "不要暴露账户或私聊信息。\n" + text[:6000]))
+                if generated and not generated.startswith("离线演示日记："):
+                    return dict(room=int(room), name=data["name"], messages=len(messages), summary=generated[:6000],
+                                topics=topics, risk_points=["AI 摘要仍需人工核对原消息"])
+            except Exception:
+                pass
+        summary = "群聊暂无足够消息。" if not messages else f"群聊共整理 {len(messages)} 条公开消息，最近讨论集中在：{text[-180:]}。"
+        return dict(room=int(room), name=data["name"], messages=len(messages), summary=summary,
+                    topics=topics, risk_points=["群聊观点仅供讨论，交易前请自行核验行情和风险"])
+
+    async def draft_forum_post(self, game, owner, body):
+        body = body or {}
+        topic = str(body.get("topic") or "").strip()[:200]
+        source = str(body.get("source") or "").strip()[:5000]
+        if not topic and not source:
+            raise ValueError("请提供主题或素材")
+        title = topic or "社区交易观察草稿"
+        draft = source or f"围绕“{topic}”整理一条社区讨论，建议补充数据来源、时间范围和风险假设。"
+        review_ref = None
+        if game and body.get("trade_review") is True:
+            review_end = int(time.time())
+            review_data = await self.generate_trade_review(game, days=int(body.get("days", 1)),
+                                                           pair=body.get("pair", ""), end=review_end)
+            title, draft = review_data["title"], review_data["publishable_body"]
+            review_ref = dict(days=int(body.get("days", 1)), pair=review_data["stats"]["pair"],
+                              end=review_data["stats"]["end"])
+        return dict(title=title[:100], body=draft[:6000], tags=body.get("tags") or ["行情观察"],
+                    requires_confirmation=True, review=review_ref)
+
+    async def community_daily_summary(self, owner):
+        snapshot = self.community.daily_snapshot(owner)
+        posts = snapshot["posts"]
+        groups = snapshot["groups"]
+        hot = [item["title"] for item in posts[:5]]
+        return dict(date=time.strftime("%Y-%m-%d"), headline="今日社区行情摘要",
+                    hot_posts=hot, active_groups=[item["name"] for item in groups[:5]],
+                    market_views=[item["body"] for item in posts[:3]],
+                    risk_points=["社区内容是模拟讨论，发布前请核对时间、品种和数据来源"],
+                    needs_verification=["行情源是否最新", "观点是否有明确止损和仓位假设"])
 
     async def write_diary(self, game, preferences, now):
         config = preferences["diary"]
@@ -457,8 +552,12 @@ class Demo:
             return web.FileResponse(path, headers={"Content-Type": "text/javascript"} if path.suffix == ".js" else {})
 
         async def api(request):
-            action = request.match_info["action"]
-            body = await request.json() if request.method == "POST" else {}
+            action = request.match_info.get("action")
+            if not action and request.match_info.get("subaction"):
+                action = "ai-" + request.match_info["subaction"]
+            if not action and request.match_info.get("subroute"):
+                action = "forum-" + request.match_info["subroute"]
+            body = await request.json() if request.method in {"POST", "DELETE"} and request.content_type == "application/json" else {}
             if admin:
                 if request.method == "GET" and action == "login-mode":
                     return web.json_response({"setup": self.admin_config is None})
@@ -511,20 +610,54 @@ class Demo:
             if not session:
                 raise web.HTTPUnauthorized()
             owner = session["owner"]
+            if self.demo and session["mode"] == "account":
+                self.community.seed_demo(owner)
+            if action == "community-summary" and request.method == "GET":
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                return web.json_response(self.community.summary(owner))
             if action == "groups":
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()
-                return web.json_response(self.community.groups(owner, request.method, request.query.get("room", ""), body))
+                return web.json_response(self.community.groups(owner, request.method, request.query.get("room", ""), body, request.query))
             if action in {"forum", "group-chat"}:
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()
                 post = request.query.get("post", "") if action == "forum" else None
-                result = self.community.handle(owner, request.method, post, body)
+                result = self.community.handle(owner, request.method, post, body, request.query)
                 if post and request.method == "GET":
                     result["post"] = self.community.thread(post)
                 return web.json_response(result)
             games = [g for g in self.engine.games() if g.get("owner_id") == owner]
             game = portal.game(request, session) if request.query.get("game") else next(iter(games), None)
+            if action == "ai" or action.startswith("ai-"):
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                ai_action = action[3:] if action.startswith("ai-") else body.get("action", "")
+                if ai_action != "community-daily-summary" and not game:
+                    raise ValueError("请先创建模拟交易")
+                if ai_action == "trade-review":
+                    return web.json_response(await self.generate_trade_review(game, days=body.get("days", 1),
+                        pair=body.get("pair", ""), end=body.get("end", 0)))
+                if ai_action == "group-summary":
+                    return web.json_response(await self.summarize_group(game, owner, body.get("room"), limit=body.get("limit", 80)))
+                if ai_action == "forum-draft":
+                    return web.json_response(await self.draft_forum_post(game, owner, body))
+                if ai_action == "community-daily-summary":
+                    return web.json_response(await self.community_daily_summary(owner))
+                raise web.HTTPNotFound()
+            if action == "forum-share-review" and request.method == "POST":
+                if session["mode"] != "account" or not game:
+                    raise web.HTTPForbidden()
+                generated = await self.generate_trade_review(game, days=body.get("days", 1), pair=body.get("pair", ""), end=body.get("end", 0))
+                result = self.community.share_review(owner, generated, body.get("title", ""), body.get("body", ""), body.get("tags"), body.get("pair", ""))
+                return web.json_response({"ok": True, "post": result, "review": generated})
+            if action == "trading-summary" and request.method == "GET":
+                if not game:
+                    raise ValueError("请先创建模拟交易")
+                return web.json_response(await self.generate_trade_review(game,
+                    days=request.query.get("days", 1), pair=request.query.get("pair", ""),
+                    end=request.query.get("end", 0)))
             if action == "model-presets" and request.method == "GET":
                 return web.json_response(dict(presets=MODEL_PRESETS, persona=DEFAULT_PERSONA))
             if action == "onboarding" and request.method == "POST":
@@ -617,6 +750,8 @@ class Demo:
                 return web.FileResponse(VIEWS / "index.html")
             app.router.add_get("/dashboard", admin_workspace)
         app.router.add_route("*", "/api/{action}", api)
+        app.router.add_route("*", "/api/ai/{subaction}", api)
+        app.router.add_route("*", "/api/forum/{subroute}", api)
         app.router.add_get("/assets/{file:.+}", asset)
         if admin:
             app.router.add_static("/vendor", VIEWS / "vendor")

@@ -149,6 +149,8 @@ class Dashboard:
         if request.method == "GET":
             if action == "dashboard":
                 return self.admin_state(request)
+            if action == "community-moderation":
+                return self.demo.community.moderation("admin", query=request.query)
             if action in {"review", "history", "journal", "notebook", "diaries", "alerts"}:
                 gid = request.query.get("game")
                 if not gid and action in {"alerts", "history"}:
@@ -170,6 +172,8 @@ class Dashboard:
                     raise ValueError("独立版用户面板固定监听 127.0.0.1:8791")
                 self.put("portal", config)
                 return {"ok": True}
+            if action == "community-moderation":
+                return self.demo.community.moderation("admin", body)
             if action == "decision":
                 return {"message": await self.demo.run_decision(self.engine.get(body.get("game")))}
             if action == "command":
