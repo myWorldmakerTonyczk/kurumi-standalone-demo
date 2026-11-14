@@ -1,0 +1,209 @@
+"""Password credentials and per-instance trade grants for the user portal."""
+
+import asyncio
+import hashlib
+import hmac
+import re
+import secrets
+import time
+from collections import deque
+
+from ..users.ownership import normalize
+
+ACCOUNT_TTL = 8 * 3600
+USERNAME = re.compile(r"krm-user-[0-9a-f]{12}")
+
+
+def password_hash(password, salt):
+    return hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
+
+
+class PortalAccounts:
+    def __init__(self, access):
+        self.access = access
+        self.db = access.db
+        self.hash_slots = asyncio.Semaphore(2)
+        self.attempts = deque()
+        self.db.executescript("""
+        CREATE TABLE IF NOT EXISTS portal_accounts(
+          owner TEXT PRIMARY KEY REFERENCES sim_users(id) ON DELETE CASCADE,
+          username TEXT UNIQUE NOT NULL, salt BLOB NOT NULL, verifier BLOB NOT NULL,
+          admin_password TEXT);
+        CREATE TABLE IF NOT EXISTS portal_trade(
+          game TEXT PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+          owner TEXT NOT NULL REFERENCES sim_users(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS portal_chat(
+          umo TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES sim_users(id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS portal_chat_owner ON portal_chat(owner);
+        """)
+
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(portal_accounts)")}
+        if "admin_password" not in columns:
+            self.db.execute("ALTER TABLE portal_accounts ADD COLUMN admin_password TEXT")
+
+        with self.access.engine.transaction():
+            owners = self.db.execute("SELECT owner FROM portal_accounts").fetchall()
+            for row in owners:
+                umo = self.bound_umo(row["owner"])
+                if umo:
+                    self.sync_username(row["owner"], umo)
+
+    def owner_for_umo(self, umo):
+        row = self.db.execute("SELECT owner FROM portal_chat WHERE umo=?", (umo,)).fetchone()
+        return row[0] if row else None
+
+    def chat_umos(self, owner):
+        return [row[0] for row in self.db.execute("SELECT umo FROM portal_chat WHERE owner=? ORDER BY umo", (owner,))]
+
+    def bind_chat(self, gid, umos):
+        game = self.access.engine.get(gid)
+        owner = game.get("owner_id")
+        if not owner:
+            raise ValueError("请先绑定实例用户")
+        if not isinstance(umos, list):
+            raise ValueError("私聊 UMO 须为列表")
+        values = normalize({"type": "umo", "values": umos})["values"] if umos else []
+        if sorted(values) == self.chat_umos(owner):
+            return
+        with self.access.engine.transaction():
+            for umo in values:
+                existing = self.owner_for_umo(umo)
+                alias = self.db.execute("SELECT user_id FROM sim_user_aliases WHERE alias=?", ("umo:" + umo,)).fetchone()
+                if (existing and existing != owner) or (alias and alias[0] != owner):
+                    raise ValueError("所填 UMO 已绑定到其他用户")
+            self.db.execute("DELETE FROM portal_chat WHERE owner=?", (owner,))
+            self.db.executemany("INSERT INTO portal_chat VALUES(?,?)", ((umo, owner) for umo in values))
+            self.db.execute("DELETE FROM portal_grants WHERE owner=?", (owner,))
+            self.db.execute("DELETE FROM portal_sessions WHERE owner=?", (owner,))
+            self.db.execute("DELETE FROM portal_accounts WHERE owner=?", (owner,))
+
+    def username(self, owner):
+        row = self.db.execute("SELECT username FROM portal_accounts WHERE owner=?", (owner,)).fetchone()
+        return row[0] if row else ""
+
+    def admin_password(self, owner):
+        row = self.db.execute("SELECT admin_password FROM portal_accounts WHERE owner=?", (owner,)).fetchone()
+        return row[0] if row else None
+
+    def has_games(self, owner):
+        return bool(self.db.execute(
+            "SELECT 1 FROM games WHERE json_extract(data,'$.owner_id')=? LIMIT 1", (owner,)
+        ).fetchone())
+
+    def bound_umo(self, owner):
+        row = self.db.execute(
+            "SELECT substr(alias,5) FROM sim_user_aliases WHERE user_id=? AND alias LIKE 'umo:%' ORDER BY alias LIMIT 1",
+            (owner,),
+        ).fetchone()
+        return row[0] if row else ""
+
+    async def set_password(self, owner, password):
+        username = self.bound_umo(owner)
+        if not username:
+            raise ValueError("请先为用户绑定私聊 UMO")
+        if not isinstance(password, str) or not 8 <= len(password) <= 128:
+            raise ValueError("远程面板密码须为 8～128 个字符")
+        if self.hash_slots.locked():
+            raise ValueError("账号服务繁忙，请稍后再试")
+        salt = secrets.token_bytes(16)
+        async with self.hash_slots:
+            verifier = await asyncio.to_thread(password_hash, password, salt)
+        with self.access.engine.transaction():
+            if self.bound_umo(owner) != username:
+                raise ValueError("用户绑定已变更，请刷新后重试")
+            self.db.execute(
+                "INSERT INTO portal_accounts(owner,username,salt,verifier,admin_password) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(owner) DO UPDATE SET username=excluded.username,salt=excluded.salt,"
+                "verifier=excluded.verifier,admin_password=excluded.admin_password",
+                (owner, username, salt, verifier, password),
+            )
+            self.db.execute("DELETE FROM portal_sessions WHERE owner=? AND mode='account'", (owner,))
+        return username
+
+    def sync_username(self, owner, username):
+        changed = self.db.execute(
+            "UPDATE portal_accounts SET username=? WHERE owner=? AND username<>?",
+            (username, owner, username),
+        ).rowcount
+        if changed:
+            self.db.execute("DELETE FROM portal_sessions WHERE owner=? AND mode='account'", (owner,))
+
+    async def issue(self, owner):
+        if not self.has_games(owner):
+            raise ValueError("当前用户还没有交易实例")
+        existing = self.username(owner)
+        if existing:
+            return existing, ""
+        if self.hash_slots.locked():
+            raise ValueError("账号服务繁忙，请稍后再试")
+        bound = self.bound_umo(owner)
+        username = bound or "krm-user-" + secrets.token_hex(6)
+        password = secrets.token_urlsafe(18)
+        salt = secrets.token_bytes(16)
+        async with self.hash_slots:
+            verifier = await asyncio.to_thread(password_hash, password, salt)
+        if not self.has_games(owner) or self.bound_umo(owner) != bound:
+            raise ValueError("当前用户的绑定或实例访问已变更")
+        inserted = self.db.execute(
+            "INSERT INTO portal_accounts(owner,username,salt,verifier,admin_password) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(owner) DO NOTHING",
+            (owner, username, salt, verifier, password),
+        ).rowcount
+        return (username, password) if inserted else (self.username(owner), "")
+
+    def rate_limit(self, username):
+        now = time.monotonic()
+        while self.attempts and now - self.attempts[0][0] >= 60:
+            self.attempts.popleft()
+        if len(self.attempts) >= 30 or sum(name == username for _, name in self.attempts) >= 5:
+            return False
+        self.attempts.append((now, username))
+        return True
+
+    async def login(self, username, password):
+        if not isinstance(username, str) or not 1 <= len(username) <= 300:
+            return None
+        if not USERNAME.fullmatch(username):
+            try:
+                normalize({"type": "umo", "values": [username]})
+            except ValueError:
+                return None
+        if not isinstance(password, str) or not 1 <= len(password) <= 128:
+            return None
+        row = self.db.execute("SELECT * FROM portal_accounts WHERE username=?", (username,)).fetchone()
+        salt = row["salt"] if row else bytes(16)
+        async with self.hash_slots:
+            verifier = await asyncio.to_thread(password_hash, password, salt)
+        if not row or not hmac.compare_digest(verifier, row["verifier"]):
+            return None
+        # A reset or deletion during hashing invalidates the in-flight login.
+        current = self.db.execute("SELECT username,salt,verifier FROM portal_accounts WHERE owner=?", (row["owner"],)).fetchone()
+        if (not current or tuple(current) != (username, row["salt"], row["verifier"])
+                or not self.has_games(row["owner"])):
+            return None
+        now = time.time()
+        with self.access.engine.transaction():
+            self.access.cleanup(now)
+            return self.access.session_token(row["owner"], None, "account", now, ACCOUNT_TTL)
+
+    def reset(self, owner):
+        with self.access.engine.transaction():
+            self.db.execute("DELETE FROM portal_accounts WHERE owner=?", (owner,))
+            self.db.execute("DELETE FROM portal_sessions WHERE owner=? AND mode='account'", (owner,))
+
+    def trade_allowed(self, game):
+        return bool(self.db.execute(
+            "SELECT 1 FROM portal_trade WHERE game=? AND owner=?", (game["id"], game.get("owner_id"))
+        ).fetchone())
+
+    def allow_trade(self, gid, allowed):
+        if type(allowed) is not bool:
+            raise ValueError("交易权限须为布尔值")
+        game = self.access.engine.get(gid)
+        if not game.get("owner_id"):
+            raise ValueError("请先绑定实例用户")
+        with self.access.engine.transaction():
+            if allowed:
+                self.db.execute("INSERT OR REPLACE INTO portal_trade VALUES(?,?)", (gid, game["owner_id"]))
+            else:
+                self.db.execute("DELETE FROM portal_trade WHERE game=?", (gid,))
