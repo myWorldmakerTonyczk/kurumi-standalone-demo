@@ -193,6 +193,8 @@ nav button .ui-count, .workspace-switch button .ui-count { margin-left: 8px; ver
 .gr-layout.external-list { grid-template-columns: minmax(0, 1fr) minmax(170px, 260px); }
 .workspace > aside > .gr-list-panel { margin-top: 18px; max-height: 68vh; overflow: auto; }
 .gr-message-avatar { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; }
+.gr-avatar[role="button"], .gr-message-avatar[role="button"] { cursor: pointer; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+.gr-avatar:focus-visible, .gr-message-avatar:focus-visible { outline: 3px solid #ac9bdc; outline-offset: 2px; }
 .cm-floating { position: fixed; z-index: 1200; inset: auto 18px 76px auto; width: min(600px, 96vw); height: min(680px, 82dvh); min-width: min(300px, 96vw); min-height: 220px; max-width: 100vw; max-height: 100dvh; resize: both; overflow: auto; background: #fcf8fb; border: 1px solid #e3d2e1; border-radius: 18px; box-shadow: 0 20px 60px #37203538; padding: 12px; }
 .cm-floating[hidden], .cm-floating [hidden] { display: none; }
 .cm-floating > header { display: flex; align-items: center; gap: 8px; padding: 8px; cursor: move; touch-action: none; background: #efe3ee; border-radius: 10px; }

@@ -155,10 +155,47 @@ export function createGroups(ctx) {
     R.view = h("div", {class: "gr-room"}, h("div", {class: "gr-head"}, h("div", {class: "gr-head-text"}, R.title, R.meta), R.actions), R.unread, R.summary, R.log, R.form);
   }
 
+  /* Long-press an avatar to insert "@nickname " into the composer. */
+  const MENTION_HOLD_MS = 500;
+  function insertMention(name) {
+    const field = R.input;
+    if (!field || !name) return;
+    const start = field.selectionStart ?? field.value.length;
+    const prefix = start && !/\s$/.test(field.value.slice(0, start)) ? " " : "";
+    const text = prefix + "@" + name + " ";
+    field.setRangeText(text, start, field.selectionEnd ?? start, "end");
+    field.focus();
+    field.dispatchEvent(new Event("input", {bubbles: true}));
+  }
+  function longPressMention(el, name) {
+    let timer = null, origin = null;
+    const cancel = () => { clearTimeout(timer); timer = null; origin = null; };
+    el.addEventListener("pointerdown", event => {
+      if (event.button !== 0) return;
+      origin = [event.clientX, event.clientY];
+      timer = setTimeout(() => { timer = null; insertMention(name); }, MENTION_HOLD_MS);
+    });
+    el.addEventListener("pointermove", event => {
+      if (timer && origin && Math.hypot(event.clientX - origin[0], event.clientY - origin[1]) > 10) cancel();
+    });
+    for (const type of ["pointerup", "pointercancel", "pointerleave"]) el.addEventListener(type, cancel);
+    el.addEventListener("contextmenu", event => event.preventDefault());
+    el.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); insertMention(name); }
+    });
+    el.setAttribute("role", "button");
+    el.setAttribute("tabindex", "0");
+    el.setAttribute("aria-label", "长按提及 " + name);
+    el.title = "长按 @" + name;
+    return el;
+  }
+
   function messageRow(message) {
     const mine = Boolean(message.mine);
+    const avatar = h("img", {class: "gr-message-avatar", src: message.avatar?.startsWith("data:image/webp;base64,") ? message.avatar : "/assets/" + (message.avatar || "user-avatar.svg"), alt: "", draggable: "false"});
+    if (!mine) longPressMention(avatar, message.nickname);
     return h("article", {class: "gr-msg" + (mine ? " is-mine" : "")},
-      h("div", {class: "gr-msg-head"}, h("img", {class: "gr-message-avatar", src: message.avatar?.startsWith("data:image/webp;base64,") ? message.avatar : "/assets/" + (message.avatar || "user-avatar.svg"), alt: ""}),
+      h("div", {class: "gr-msg-head"}, avatar,
         h("strong", {}, mine ? "我" : message.nickname),
         message.is_agent ? h("span", {class: "ui-badge"}, "智能体") : null,
         h("time", {datetime: new Date(message.created * 1000).toISOString(), title: formatTime(message.created)}, clockTime(message.created))),
@@ -389,8 +426,11 @@ export function createGroups(ctx) {
       const spoke = lastSpoke.get(member.nickname) || 0;
       const state = self ? "self" : now - spoke < ACTIVE_SECONDS ? "active" : "quiet";
       const label = self ? "当前在线" : state === "active" ? "刚刚发言" : spoke ? "发言于 " + relativeTime(spoke) : "近期无发言";
+      const avatar = h("span", {class: "gr-avatar"}, Array.from(member.nickname)[0] || "?");
+      if (self) avatar.setAttribute("aria-hidden", "true");
+      else longPressMention(avatar, member.nickname);
       return h("li", {class: "gr-member"},
-        h("span", {class: "gr-avatar", "aria-hidden": "true"}, Array.from(member.nickname)[0] || "?"),
+        avatar,
         h("span", {class: "gr-member-text"},
           h("span", {class: "gr-member-name"}, member.nickname, self ? h("span", {class: "ui-muted"}, " （我）") : null),
           h("span", {class: "gr-member-sub"}, h("span", {class: "ui-presence", "data-state": state, "aria-hidden": "true"}), label)),
