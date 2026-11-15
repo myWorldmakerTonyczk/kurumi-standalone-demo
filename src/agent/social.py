@@ -193,6 +193,8 @@ class Social:
                 if not rows:
                     return
                 context = [{"name": self.identity(row["owner"]) if row["is_agent"] else row["nickname"],
+                            "subject": ("agent:" + row["owner"] if row["is_agent"] else
+                                        "self" if row["owner"] == owner else "user:" + row["owner"]),
                             "message": row["body"]} for row in reversed(rows)]
                 has_images = False
                 for entry, row in zip(context, reversed(rows)):
@@ -204,6 +206,13 @@ class Social:
                 speaker = rows[0]["owner"]
                 model = model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "group_chat"))
                 prompt = (profile.get("persona") or self.app.default_persona) + "\n你的名字是 " + self.identity(owner) + "\n" + task_prompt
+                portrait = []
+                if profile.get("chat_memory", {}).get("enabled", True):
+                    subjects = ["self" if row["owner"] == owner else "user:" + row["owner"]
+                                for row in rows if not row["is_agent"]]
+                    portrait = self.app.memory.profiles.context(owner, f"group:{room}", subjects)
+                    if portrait:
+                        prompt += "\n" + workflow("private_memory_context")
                 attachment = json.loads(rows[0]["attachment"] or "null")
                 if attachment and attachment["kind"] == "image":
                     from .vision import describe_image
@@ -213,7 +222,8 @@ class Social:
                         audit=self.app.call_logs.callback(owner, "vision")
                     )
                     prompt += "\n" + workflow("vision_context")
-                human = HumanMessage(content=dump({"history": context[:-1], "new_message": context[-1]}))
+                human = HumanMessage(content=dump({"history": context[:-1], "new_message": context[-1],
+                                                   "profiles": portrait}))
                 attachments = []
                 tools = []
                 if has_images:

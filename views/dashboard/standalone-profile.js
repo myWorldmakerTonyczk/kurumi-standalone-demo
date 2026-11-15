@@ -635,7 +635,7 @@ function mountMemory(container) {
     ["对象画像", section.querySelector("[data-profiles]")],
     ["设置", section.querySelector("[data-memory-options]")],
   ]);
-  let editing, entries = [], subjects = {}, userId = "";
+  let editing, entries = [], portraits = [], subjects = {}, userId = "";
   const subjectUserId = id => id === "self" ? userId : id.split(":")[1] || "";
   subject.onchange = renderEntries;
   search.oninput = renderEntries;
@@ -652,6 +652,7 @@ function mountMemory(container) {
   function renderData(data) {
     const selected = subject.value || "all";
     subjects = {...data.subjects};
+    portraits = data.profiles || [];
     userId = data.user_id || "";
     entries = data.entries;
     for (const entry of entries) subjects[entry.subject] ??= "已移除的对象";
@@ -699,7 +700,8 @@ function mountMemory(container) {
     profiles.replaceChildren();
     for (const [id, label] of Object.entries(subjects)) {
       const matching = entries.filter(entry => entry.subject === id);
-      if (!matching.length && id !== "self") continue;
+      const summaries = portraits.filter(entry => entry.subject === id);
+      if (!matching.length && !summaries.length && id !== "self") continue;
       const card = document.createElement("button");
       card.type = "button";
       const initial = document.createElement("span");
@@ -718,7 +720,24 @@ function mountMemory(container) {
         show(1);
         subject.focus();
       };
-      profiles.append(card);
+      const panel = document.createElement("div");
+      panel.className = "memory-portrait";
+      panel.append(card);
+      const dimensions = {preference: "偏好", habit: "习惯", requirement: "长期要求",
+        relationship: "关系", project: "项目", attribute: "长期资料"};
+      for (const entry of summaries) {
+        const details = document.createElement("details");
+        const label = document.createElement("summary");
+        label.textContent = dimensions[entry.dimension] + " · " + entry.text;
+        const evidence = document.createElement("small");
+        const scope = {private: "私聊", group: "群聊", forum: "论坛"}[entry.stream.split(":")[0]];
+        const dates = [...new Set(entry.evidence.map(item => item.date))];
+        evidence.textContent = [entry.basis === "declared" ? "用户明确表达" : "多日观察",
+          scope, dates.join("、")].join(" · ");
+        details.append(label, evidence);
+        panel.append(details);
+      }
+      profiles.append(panel);
     }
   }
 

@@ -11,6 +11,7 @@ from aiohttp import web
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .workflow import workflow
+from .memory_profiles import MemoryProfiles
 from .model_registry import model_client
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class Memory:
     def __init__(self, db, call_logs=None):
         self.db = db
         self.call_logs = call_logs
+        self.profiles = MemoryProfiles(db, call_logs)
         self.tasks = {}
         self.last_seen = {}
         self.results = {}
@@ -250,7 +252,7 @@ class Memory:
         key = (owner, stream)
         if key in self.tasks or time.monotonic() - self.results.get(key, float("-inf")) < 60:
             return
-        if self.ready(stream, self.batch(key)):
+        if self.ready(stream, self.batch(key)) or self.profiles.pending(owner, stream):
             self.tasks[key] = asyncio.create_task(self.drain(key, model, validate_url))
         else:
             self.last_seen.pop(key, None)
@@ -261,7 +263,12 @@ class Memory:
             while True:
                 rows = self.batch(key)
                 if not self.ready(key[1], rows):
-                    return
+                    async with self.slots:
+                        await self.profiles.consolidate(*key, model, validate_url)
+                    self.results.pop(key, None)
+                    if not self.ready(key[1], self.batch(key)):
+                        return
+                    continue
                 remaining = QUIET_SECONDS - (loop.time() - self.last_seen.get(key, 0))
                 if remaining > 0 and len(rows) < MAX_BATCH:
                     await asyncio.sleep(remaining)

@@ -359,8 +359,12 @@ class Demo:
                     instructions += "\n" + workflow("private_sticker")
                 if message is not None and memory.get("enabled", True):
                     recalled = self.memory.recall(owner, message, recent=recent_user_messages)
-                    if recalled:
-                        instructions += "\n" + workflow("private_memory_context") + dump(recalled)
+                    portrait = self.memory.profiles.context(owner, f"private:{gid}", ["self"])
+                    if portrait or recalled:
+                        seen = {entry["text"] for entry in portrait}
+                        instructions += "\n" + workflow("private_memory_context") + dump({
+                            "profiles": portrait, "memories": [item for item in recalled if item["text"] not in seen],
+                        })
                 image_refs = []
                 if message is not None and attachments is not None:
                     instructions += "\n" + workflow("image_library")
@@ -992,9 +996,10 @@ class Demo:
                         for owned_game in games:
                             self.memory.include_private_history(owner, owned_game["id"])
                         for stream, in self.db.execute("""SELECT stream FROM agent_memory_events
-                            WHERE owner=? AND done=0 GROUP BY stream""", (owner,)).fetchall():
+                            WHERE owner=? GROUP BY stream""", (owner,)).fetchall():
                             self.memory.start(owner, stream, chosen, self.model_url)
                 return web.json_response(dict(config=config, entries=self.memory.list(owner), subjects=subjects,
+                                              profiles=self.memory.profiles.list(owner),
                                               user_id=owner, progress=self.memory.progress(owner),
                                               agent=current.get("agent_name", "久留美"), days=MEMORY_DAYS,
                                               models=[{key: item[key] for key in ("id", "label")} for item in models]))
