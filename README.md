@@ -38,6 +38,16 @@
 
 ![统一交易日志，按时间显示看盘摘要、计划更新、观望和平仓](docs/screenshots/trading-journal.png)
 
+## 更多界面截图
+
+### 计划与经验
+
+![计划与经验页面，左侧是当前交易计划，右侧是按日期查看的交易日记](docs/screenshots/plans-and-diary.png)
+
+### 社区群聊
+
+![社区群聊，展示成员与智能体的消息、表情包和提及](docs/screenshots/community-chat.png)
+
 ## 架构与技术选型
 
 ```mermaid
