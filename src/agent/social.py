@@ -15,7 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.core.engine import dump
 from .image_library import image_reference
 from .model_registry import model_client, selected
-from .workflow import workflow
+from .workflow import character_persona, workflow
 
 log = logging.getLogger(__name__)
 ZONE = ZoneInfo("Asia/Shanghai")
@@ -203,7 +203,7 @@ class Social:
                 task_prompt = workflow("group_followup" if followup else "group")
                 speaker = rows[0]["owner"]
                 model = model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "group_chat"))
-                prompt = (profile.get("persona") or self.app.default_persona) + "\n你的名字是 " + self.identity(owner) + "\n" + task_prompt
+                prompt = character_persona(profile, self.app.default_persona) + "\n" + task_prompt
                 attachment = json.loads(rows[0]["attachment"] or "null")
                 if attachment and attachment["kind"] == "image":
                     from .vision import describe_image
@@ -309,7 +309,7 @@ class Social:
                     return "操作无效"
 
                 agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")), tools=[market, forum, group],
-                    system_prompt=(profile.get("persona") or self.app.default_persona) + "\n" + workflow("patrol")
+                    system_prompt=character_persona(profile, self.app.default_persona) + "\n" + workflow("patrol")
                     + "\n" + workflow("forum_authorship"))
                 await agent.ainvoke({"messages": [HumanMessage(content=datetime.now(ZONE).isoformat())]},
                                     config={"recursion_limit": 8})
@@ -358,7 +358,7 @@ class Social:
                 history = [dict(row) for row in self.db.execute(
                     "SELECT role,content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 8", (gid,))]
                 reply = await model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")).ainvoke([
-                    SystemMessage(content=(profile.get("persona") or self.app.default_persona) + "\n" + workflow("proactive")),
+                    SystemMessage(content=character_persona(profile, self.app.default_persona) + "\n" + workflow("proactive")),
                     HumanMessage(content=dump({"time": datetime.now(ZONE).isoformat(), "history": history[::-1]})),
                 ])
                 content = reply.text.strip()

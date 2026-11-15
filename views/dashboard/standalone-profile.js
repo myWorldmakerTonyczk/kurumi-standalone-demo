@@ -72,7 +72,8 @@ export function mountProfile(gameId, {container, general = false}) {
       form.elements.split_pattern.value = data.split_pattern || form.elements.split_pattern.placeholder;
     } else {
       section.querySelector("[data-persona-title]").textContent = data.agent_name + "的人格";
-      section.querySelector("[data-summary]").textContent = profile.persona || "你是久留美，使用中文交流。";
+      section.querySelector("[data-summary]").textContent = "我是" + data.agent_name + "。" +
+        (profile.persona ? "\n\n" + profile.persona : " 使用默认人格。");
     }
     save.disabled = false;
   }

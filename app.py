@@ -27,7 +27,7 @@ from src.portal.accounts import PortalAccounts, password_hash
 from dashboard_api import Dashboard
 from src.agent.image_library import ImageLibrary
 from src.agent.tool import workspace_tools
-from src.agent.workflow import workflow
+from src.agent.workflow import character_persona, persona_body, workflow
 from src.agent.social import Social, social_config
 from src.agent.call_logs import CallLogs
 from src.agent.stickers import Stickers
@@ -283,7 +283,7 @@ class Demo:
         lock = lock_for(self, gid)
         async with lock:
             settings = self.profile(owner)
-            persona = (settings.get("persona") or DEFAULT_PERSONA) + "\n你的显示名称是：" + settings.get("agent_name", "久留美")
+            persona = character_persona(settings, self.default_persona)
             if received_at is not None:
                 local_time = datetime.fromtimestamp(received_at, ZoneInfo("Asia/Shanghai"))
                 persona += "\n本轮消息接收时间（北京时间）：" + local_time.isoformat(sep=" ", timespec="seconds")
@@ -896,7 +896,7 @@ class Demo:
                     days=request.query.get("days", 1), pair=request.query.get("pair", ""),
                     end=request.query.get("end", 0)))
             if action == "model-presets" and request.method == "GET":
-                return web.json_response(dict(presets=MODEL_PRESETS, persona=DEFAULT_PERSONA))
+                return web.json_response(dict(presets=MODEL_PRESETS, persona=DEFAULT_PERSONA, agent_name="久留美"))
             if action == "onboarding" and request.method == "POST":
                 if games:
                     return web.json_response({"id": games[0]["id"]})
@@ -909,7 +909,9 @@ class Demo:
                 setup = {key: str(body.get(key, "")).strip() for key in ("persona", "url", "model", "key")}
                 if any(len(value) > 4000 for value in setup.values()):
                     raise ValueError("配置内容过长")
-                setup["persona"] = setup["persona"] or DEFAULT_PERSONA
+                setup["persona"] = persona_body(setup["persona"])
+                if setup["persona"] == DEFAULT_PERSONA:
+                    setup["persona"] = ""
                 setup.update(self.mode_values(body, setup))
                 if setup["key"]:
                     self.model_url(setup["url"])
@@ -1121,7 +1123,8 @@ class Demo:
                     split_delay_max=current.get("split_delay_max", 3),
                     agent_mode=current.get("agent_mode", "platform"), split_pattern=current.get("split_pattern", ""), split_reply=current.get("split_reply", True), agent_name=current.get("agent_name", "久留美"), agent_avatar=current.get("agent_avatar", "avatar.png"), state=public_snapshot(self, game["id"], 20) if game else None,
                     chat=[dict(row, attachments=json.loads(row["attachments"])) for row in reversed(rows)], profile={k: current.get(k, "")
-                    for k in ("persona", "url", "model")}, has_key=bool(selected(current).get("key")), demo=self.demo))
+                    for k in ("persona", "url", "model")} | {"persona": persona_body(current.get("persona") or "")},
+                    has_key=bool(selected(current).get("key")), demo=self.demo))
             raise web.HTTPNotFound()
 
         app.router.add_get("/", page)

@@ -232,3 +232,12 @@ body { margin: 0; }
 .setup-model-selectors { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); gap: 12px; }
 .setup-model-selectors select { width: 100%; min-width: 0; }
 @media (max-width: 420px) { .setup-model-selectors { grid-template-columns: 1fr; } }
+
+#setup-persona .setup-persona-name {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+#setup-persona .setup-persona-name input {
+  width: min(12rem, 65%);
+}

@@ -342,22 +342,22 @@ byId("first-game-form").onsubmit = async event => {
     }
     const external = form.elements.mode.value === "external";
     const background = external && (form.elements.auto.checked || form.elements.diary.checked);
-    if (setupStep === 0 && external && !background) setupStep = 2;
     if (setupStep === 0) {
       const config = await api("model-presets");
       presets = config.presets;
+      form.elements.agent_name.value = config.agent_name;
       form.elements.persona.value = config.persona;
       providerChoice.replaceChildren(...presets.map((preset, index) => new Option(preset.name, index)));
       providerChoice.onchange();
     }
-    if (setupStep < 2) {
+    if (setupStep === 0 || (setupStep === 1 && (!external || background))) {
       setupStep++;
       ["setup-profile", "setup-persona", "setup-model"].forEach((id, index) => {
         byId(id).hidden = index !== setupStep;
       });
-      byId("first-game").querySelector("h2").textContent = setupStep === 1 ? "设置久留美的人格" : "配置模型 API";
-      button.textContent = setupStep === 1 ? "下一步" : "进入交易工作区";
-      (setupStep === 1 ? form.elements.persona : form.elements.key).focus();
+      byId("first-game").querySelector("h2").textContent = setupStep === 1 ? "设置智能体人格" : "配置模型 API";
+      button.textContent = setupStep === 1 && (!external || background) ? "下一步" : "进入交易工作区";
+      (setupStep === 1 ? form.elements.agent_name : form.elements.key).focus();
       setStatus("");
       return;
     }
