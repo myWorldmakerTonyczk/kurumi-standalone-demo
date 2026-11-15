@@ -31,7 +31,7 @@ def cap_context(state: AgentState, runtime: Runtime):
 
 
 
-async def manage_history(history, policy, summary, validate_url):
+async def manage_history(history, policy, summary, validate_url, *, audit=None):
     from langchain_core.messages import HumanMessage, SystemMessage
     from .model_registry import model_client
 
@@ -48,7 +48,7 @@ async def manage_history(history, policy, summary, validate_url):
         source = trim_messages(history[:cutoff], max_tokens=12000, token_counter=count_tokens_cjk,
                                strategy="last", start_on="human")
         try:
-            result = await model_client(summary, validate_url).ainvoke([
+            result = await model_client(summary, validate_url, audit=audit).ainvoke([
                 SystemMessage(content=policy.get("prompt") or workflow("summary")),
                 HumanMessage(content="\n".join(f"{item.type}: {item.content}" for item in source)),
             ])

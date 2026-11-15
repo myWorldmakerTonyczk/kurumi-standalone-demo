@@ -1,4 +1,5 @@
 """Account-owned model connections and feature assignments."""
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from openai import APIConnectionError, APIStatusError
@@ -13,7 +14,21 @@ def connections(profile):
     return []
 
 
+def supports_vision(model):
+    return model.get("kind") == "vision" or (
+        model.get("kind", "chat") == "chat"
+        and urlsplit(model.get("url") or "").hostname == "api.deepseek.com"
+        and model["model"].lower() in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"}
+    )
+
+
 def selected(profile, role="chat", *, default=True):
+    if role == "vision":
+        if not profile.get("model_policy", {}).get("vision_enabled", True):
+            return {}
+        choices = [item for item in connections(profile) if item.get("key") and supports_vision(item)]
+        model_id = profile.get("model_roles", {}).get("vision")
+        return next((item for item in choices if item["id"] == model_id), choices[0] if default and choices else {})
     kind = "speech" if role == "speech" else "chat"
     models = [item for item in connections(profile) if item.get("kind", "chat") == kind]
     model_id = profile.get("model_roles", {}).get(role)
@@ -22,7 +37,7 @@ def selected(profile, role="chat", *, default=True):
 
 def public_models(profile):
     return [{field: model[field] for field in ("id", "label", "url", "model")}
-            | {"has_key": bool(model["key"]), "kind": model.get("kind", "chat")} for model in connections(profile)]
+            | {"has_key": bool(model["key"]), "kind": model.get("kind", "chat"), "vision": supports_vision(model)} for model in connections(profile)]
 
 
 def update(profile, body, validate_url):
@@ -44,7 +59,7 @@ def update(profile, body, validate_url):
         if existing and url != old_url and old_key and not key:
             raise ValueError("更换接口地址时请填写新的 API Key")
         kind = body.get("kind", "chat")
-        if kind not in ("chat", "speech"):
+        if kind not in ("chat", "speech", "vision"):
             raise ValueError("模型类型无效")
         if existing and existing.get("kind", "chat") != kind:
             roles = {role: value for role, value in roles.items() if value != model_id}
@@ -65,10 +80,12 @@ def update(profile, body, validate_url):
             models.remove(existing)
             roles = {role: value for role, value in roles.items() if value != model_id}
     elif operation == "roles":
-        for role in ("chat", "fallback", "summary", "speech", "emotion"):
-            value = body.get(role, "")
+        for role in ("chat", "fallback", "summary", "speech", "emotion", "vision"):
+            value = body.get(role, roles.get(role, "") if role == "vision" else "")
             kind = "speech" if role == "speech" else "chat"
-            if value and not any(item["id"] == value and item.get("kind", "chat") == kind for item in models):
+            matches = [item for item in models if item["id"] == value]
+            if value and not any(supports_vision(item) if role == "vision" else item.get("kind", "chat") == kind
+                                 for item in matches):
                 raise ValueError("请选择已配置的模型")
             roles[role] = value
         try:
@@ -86,6 +103,7 @@ def update(profile, body, validate_url):
         profile = profile | {"model_policy": dict(retries=retries, rounds=rounds, discard=discard,
                               keep=keep, strategy=strategy, voice_probability=voice_probability,
                               voice_enabled=body.get("voice_enabled") is True,
+                              vision_enabled=body.get("vision_enabled", profile.get("model_policy", {}).get("vision_enabled", True)) is True,
                               voice=str(body.get("voice") or "alloy").strip()[:80], prompt=str(body.get("prompt") or "")[:4000])}
     else:
         raise ValueError("未知模型操作")
@@ -94,7 +112,7 @@ def update(profile, body, validate_url):
     }
 
 
-def model_client(config, validate_url, *, thinking=False):
+def model_client(config, validate_url, *, thinking=False, audit=None):
     from langchain_openai import ChatOpenAI
     from yarl import URL
     from .deepseek_chat import DeepSeekChat
@@ -107,7 +125,7 @@ def model_client(config, validate_url, *, thinking=False):
         options = dict(use_responses_api=False, disable_streaming=True,
                        extra_body={"thinking": {"type": "enabled"}})
     return cls(model=config["model"], api_key=config["key"], base_url=endpoint,
-               timeout=45, max_retries=0, **options)
+               timeout=45, max_retries=0, callbacks=[audit] if audit else None, **options)
 
 
 def retryable(error):

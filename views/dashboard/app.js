@@ -1,4 +1,6 @@
 import { mountAgentMode } from "/assets/agent-mode.js";
+import {h, relativeTime} from "/assets/ui/dom.js";
+import {api} from "/assets/ui/api.js";
 import { mountCommunity } from "/assets/community.js";
 import { createHome } from "/assets/home/home.js";
 import { mountChat } from "/assets/workspace-chat.js";
@@ -15,7 +17,7 @@ import { ReplayPanel } from "./replay-panel.js";
 import { HistoryChart } from "./history-chart.js";
 import { TradingNotices } from "./notifications.js";
 import { instanceGroups } from "./instance-catalog.js";
-import { createPortalBridge } from "./portal-bridge.js";
+import { createPortalBridge, PORTAL_SESSION_EVENT } from "./portal-bridge.js";
 import { createAdminBridge } from "./standalone-bridge.js";
 import { mountAdvanced, mountModels, mountProfile, mountUserSettings, mountSocialSettings } from "./standalone-profile.js";
 const remote = document.body.hasAttribute("data-remote-workspace");
@@ -135,13 +137,128 @@ function options(el, items, value) {
   );
   if (value !== undefined) el.value = value;
 }
+function mountInbox(shortcuts, openEntry) {
+  const count = h("span", {class: "ui-count", hidden: true});
+  const launcher = h("button", {type: "button", class: "inbox-launch", "aria-expanded": "false",
+    "aria-controls": "workspace-inbox"}, "邮箱", count);
+  const list = h("div", {class: "inbox-list"});
+  const status = h("p", {role: "status", class: "ui-muted", hidden: true});
+  const panel = h("section", {id: "workspace-inbox", class: "workspace-inbox", hidden: true, "aria-label": "消息邮箱"},
+    h("header", {}, h("strong", {}, "消息邮箱"),
+      h("button", {type: "button", "aria-label": "关闭邮箱", onClick: () => toggle(false)}, "×")), status, list);
+  let signature = "", loadingInbox = false;
+  const types = {group: "群聊 @", forum: "论坛评论", private: "私聊消息"};
+  const sections = new Map(Object.entries(types).map(([kind, title]) => {
+    const label = h("span");
+    const items = h("div", {class: "inbox-items"});
+    const section = h("details", {class: "inbox-section", hidden: true},
+      h("summary", {}, h("strong", {}, title), label), items);
+    return [kind, {section, label, items}];
+  }));
+  const empty = h("p", {class: "ui-muted", hidden: true}, "暂无未读消息");
+  list.append(...[...sections.values()].map(({section}) => section), empty);
+
+  function toggle(open) {
+    panel.hidden = !open;
+    launcher.setAttribute("aria-expanded", String(open));
+    if (open) refresh();
+    else launcher.focus({preventScroll: true});
+  }
+
+  async function refresh() {
+    if (loadingInbox) return;
+    loadingInbox = true;
+    try {
+      const {entries} = await api("inbox", {query: {unread: 1}});
+      const unread = entries.length;
+      count.hidden = unread === 0;
+      count.textContent = String(unread);
+      const next = JSON.stringify(entries.map(({kind, id, unread}) => [kind, id, unread]));
+      status.hidden = true;
+      if (next === signature) return;
+      signature = next;
+      empty.hidden = entries.length > 0;
+      for (const [kind, {section, label, items}] of sections) {
+        const group = entries.filter(entry => entry.kind === kind);
+        section.hidden = !group.length;
+        label.textContent = group.length + " 条未读";
+        const privateThrough = kind === "private" ? Math.max(0, ...group.map(entry => entry.id)) : null;
+        items.replaceChildren(...group.map(entry => {
+          const button = h("button", {type: "button", class: "inbox-entry is-unread",
+            onClick: async () => {
+              button.disabled = true;
+              try {
+                await openEntry(entry);
+                panel.hidden = true;
+                launcher.setAttribute("aria-expanded", "false");
+                await api("inbox", {method: "POST", body: {kind: entry.kind, id: privateThrough ?? entry.id}});
+                await refresh();
+              } catch (error) {
+                panel.hidden = false;
+                launcher.setAttribute("aria-expanded", "true");
+                status.hidden = false; status.textContent = error.message;
+              } finally { button.disabled = false; }
+            }},
+            h("span", {class: "inbox-entry-header"}, h("strong", {}, entry.nickname),
+              entry.created ? h("small", {}, relativeTime(entry.created)) : null),
+            entry.label ? h("small", {class: "inbox-entry-topic"}, entry.label) : null,
+            h("span", {class: "inbox-preview"}, entry.body || "附件消息"));
+          return button;
+        }));
+      }
+    } catch (error) {
+      status.hidden = false; status.textContent = error.message;
+    } finally { loadingInbox = false; }
+  }
+
+  launcher.onclick = () => toggle(panel.hidden);
+  panel.addEventListener("keydown", event => { if (event.key === "Escape") toggle(false); });
+  document.body.append(panel);
+  shortcuts.append(launcher);
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, 15000);
+}
+
 let activeChat;
-function workspace(mode) {
+const workspaceHistory = [];
+let backAction;
+const floatingBack = h("button", {type: "button", class: "workspace-back", hidden: true,
+  onClick: () => backAction?.()});
+document.body.append(floatingBack);
+
+function updateBack() {
+  let label = "";
+  backAction = null;
+  if (workspaceMode === "community" && communityView?.canGoBack()) {
+    label = "返回列表"; backAction = () => communityView.back();
+  } else if (workspaceMode !== "instances") {
+    label = "返回"; backAction = () => {
+      if (!confirmLeavingApiSettings()) return;
+      const destination = workspaceHistory.pop() || "instances";
+      workspace(destination, {remember: false});
+      if (destination === "community") communityView?.open();
+    };
+  } else if (gid && instancePage !== defaultPage && (remote || instancePage !== "replay")) {
+    label = "返回工作区"; backAction = () => tab(defaultPage);
+  } else if (gid && !remote) {
+    label = "返回用户列表"; backAction = returnToCatalog;
+  }
+  floatingBack.hidden = !backAction;
+  floatingBack.textContent = "←";
+  floatingBack.title = label;
+  floatingBack.setAttribute("aria-label", label);
+}
+
+function workspace(mode, {remember = true} = {}) {
+  if (remember && mode !== workspaceMode) {
+    if (mode === "instances") workspaceHistory.length = 0;
+    else workspaceHistory.push(workspaceMode);
+  }
   if (mode !== "instances" || instancePage !== "conversation") activeChat?.leaveFull();
   workspaceMode = mode;
   document.body.classList.toggle("community-view", mode === "community");
   document.body.classList.toggle("conversation-view", mode === "instances" && instancePage === "conversation");
-  $("back-to-catalog").hidden = mode === "settings" || !gid;
+  $("back-to-catalog").hidden = true;
   if (mode === "settings" || !gid) $("market-break-notice").hidden = true;
   const inInstance = mode === "instances" && !!gid,
     catalog = mode === "instances" && !gid;
@@ -193,6 +310,7 @@ function workspace(mode) {
   );
   if (page === "replay" && current) replayPanel.open(gid, current.game.pairs);
   else if (replayPanel.scope) replayPanel.close();
+  updateBack();
   if (inInstance && instancePage === "overview")
     requestAnimationFrame(renderChart);
 }
@@ -254,8 +372,29 @@ function renderCatalog() {
 }
 for (const el of document.querySelectorAll("[data-tab],[data-go]"))
   el.onclick = () => tab(el.dataset.tab || el.dataset.go);
+let workspaceAccount, staleWorkspace = false;
+
+async function checkWorkspaceAccount() {
+  if (!workspaceAccount || staleWorkspace) return staleWorkspace;
+  const session = await bridge.ready();
+  if (session.authenticated && session.mode === "account" && session.account_id === workspaceAccount) return false;
+  if (staleWorkspace) return true;
+  staleWorkspace = true;
+  const dialog = node("dialog", "", "stale-workspace-dialog");
+  dialog.setAttribute("aria-labelledby", "stale-workspace-title");
+  const title = node("h2", session.authenticated ? "当前登录账号已切换" : "当前账号已退出");
+  title.id = "stale-workspace-title";
+  const link = node("a", session.authenticated ? "打开当前账号工作区" : "返回登录");
+  link.href = session.authenticated && session.mode === "account" && session.games?.length ? "/workspace/" : "/";
+  dialog.append(title, node("p", "此标签页还停留在之前打开的工作区。"), link);
+  dialog.addEventListener("cancel", event => event.preventDefault());
+  document.body.append(dialog);
+  dialog.showModal();
+  return true;
+}
+
 async function load() {
-  if (loading) return;
+  if (loading || staleWorkspace) return;
   loading = true;
   try {
     if (!bridge) throw Error("请打开启动终端打印的完整管理员链接。");
@@ -283,6 +422,7 @@ async function load() {
       !!(state.market_error || state.runtime_error),
     );
   } catch (e) {
+    if (remote && e.status === 403 && await checkWorkspaceAccount().catch(() => false)) return;
     message(e.message || "读取失败", true);
   } finally {
     loading = false;
@@ -1297,6 +1437,14 @@ $("confirm-delete-user").onclick=async()=>{
 if (bridge) {
   const session = await bridge.ready();
   if (remote) {
+    workspaceAccount = session.account_id;
+    const verifyAccount = () => checkWorkspaceAccount().catch(() => {});
+    window.addEventListener("storage", event => {
+      if (event.key === PORTAL_SESSION_EVENT) verifyAccount();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) verifyAccount();
+    });
     document.addEventListener("click", event => {
       if (!event.target.closest('[data-portal-prohibited="true"]')) return;
       event.preventDefault();
@@ -1336,7 +1484,7 @@ if (bridge) {
         onCollapse: () => { chat.setFull(false); tab(defaultPage); },
       });
       chatTab.onclick = () => chat.setFull(true);
-      activeChat = {leaveFull: () => {
+      activeChat = {launcher: chat.launcher, openMessage: chat.openMessage, leaveFull: () => {
         if (document.querySelector(".kurumi-chat.full-chat")) chat.setFull(false);
       }};
       window.addEventListener("kurumi-chat-name", event => { chatTab.textContent = event.detail + "对话"; });
@@ -1413,6 +1561,7 @@ if (bridge) {
         onUnread: setUnread,
         sidebar: document.querySelector(".workspace > aside"),
         dock: () => workspace("community"),
+        onNavigate: updateBack,
       });
       const communityTab = node("button", "社区");
       communityTab.type = "button";
@@ -1425,7 +1574,22 @@ if (bridge) {
       shortcut.className = "community-shortcut";
       shortcut.onclick = () => communityView.openFloating();
       shortcut.append(" ", badge());
-      document.body.append(shortcut);
+      const chatShortcuts = h("div", {class: "workspace-shortcuts"}, activeChat?.launcher, shortcut);
+      document.body.append(chatShortcuts);
+      mountInbox(chatShortcuts, async entry => {
+        if (entry.kind === "private") {
+          if (!activeChat) throw Error("当前工作区没有私聊窗口");
+          if (gid !== entry.target) {
+            gid = entry.target;
+            await load();
+          }
+          await activeChat.openMessage(entry.id);
+          return;
+        }
+        workspace("community");
+        if (entry.kind === "group") await communityView.openGroup(entry.target, entry.id);
+        else await communityView.openPost(entry.target, entry.id);
+      });
       communityView.warm();
       defaultPage = "home";
       instancePage = "home";
@@ -1447,17 +1611,18 @@ if (bridge) {
     }
     switcher.querySelector('[data-workspace="instances"]').textContent = "交易工作区";
     document.querySelector(".header-actions").append(logout);
-    const back = node("button", "返回交易工作区");
-    back.type = "button";
-    back.className = "conversation-back";
-    back.onclick = () => tab(defaultPage);
-    document.querySelector('[data-page="conversation"]').prepend(back);
-    fetch("/api/state?" + new URLSearchParams({game: gid})).then(response => response.json()).then(profile => {
-      if (profile.avatar?.startsWith("data:image/webp;base64,"))
-        document.querySelector(".brand-avatar").src = profile.avatar;
-      else if (["avatar.png", "neutral.png", "laugh.png"].includes(profile.avatar))
-        document.querySelector(".brand-avatar").src = "/assets/" + profile.avatar;
-    }).catch(() => {});
+    const sidebarAvatar = document.querySelector(".brand-avatar");
+    sidebarAvatar.src = "/assets/user-avatar.svg";
+    sidebarAvatar.alt = "用户头像";
+    const refreshSidebarAvatar = () => fetch("/api/state?" + new URLSearchParams({game: gid}))
+      .then(response => response.ok ? response.json() : null).then(profile => {
+        if (!profile) return;
+        const avatar = profile.avatar;
+        sidebarAvatar.src = avatar?.startsWith("data:image/webp;base64,") ? avatar
+          : "/assets/" + (["avatar.png", "neutral.png", "laugh.png"].includes(avatar) ? avatar : "user-avatar.svg");
+      }).catch(() => {});
+    refreshSidebarAvatar();
+    window.addEventListener("kurumi-identity", refreshSidebarAvatar);
 
   }
 }

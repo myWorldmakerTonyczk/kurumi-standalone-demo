@@ -2,25 +2,49 @@
 from aiohttp import web
 
 from src.core.engine import dump
+from src.agent.image_library import image_reference
 
 
 def build_tools(app, gid):
     owner = app.engine.get(gid)["owner_id"]
 
-    async def forum(action: str, post_id: int = 0, title: str = "", body: str = "") -> str:
-        """论坛：list 列表、read 读帖和评论、publish 发帖、comment 评论。发帖和评论须由用户明确要求。"""
+    async def forum(action: str, post_id: int = 0, title: str = "", body: str = "",
+                    sticker_id: str = "", title_sticker_id: str = "", category_id: str = "",
+                    reply_to: int = 0) -> str:
+        """论坛：list 列表、read 读帖和评论、stickers 列出可用表情包（可按 category_id 过滤）。
+        对现有帖子的回应使用 comment，传原帖 post_id；回复某条评论时再传该评论的 reply_to。
+        publish 仅用于独立新帖。sticker_id 附在正文或评论；title_sticker_id 附在新帖标题。
+        发帖和评论须由用户明确要求。
+        """
         try:
             if action == "list":
-                return dump(app.community.handle(owner, "GET", "", {}, {}))
+                return dump(app.social.forum_list_for_agent(owner))
+            if action == "stickers":
+                return dump(app.social.forum_stickers(owner, category_id))
             if action == "publish":
-                return dump(app.community.handle(owner, "POST", "", {"title": title, "body": body}))
+                if post_id or reply_to:
+                    raise ValueError("回复已有内容请使用 comment")
+                return dump(app.community.handle(owner, "POST", "", {
+                    "title": title, "body": body, "sticker_id": sticker_id, "title_sticker_id": title_sticker_id,
+                }, is_agent=True))
             if post_id <= 0:
                 raise ValueError("请指定帖子编号")
             if action == "read":
-                return dump({"post": app.community.thread(str(post_id)),
-                             **app.community.handle(owner, "GET", str(post_id), {}, {})})
+                post = app.community.thread(str(post_id))
+                result = app.community.handle(owner, "GET", str(post_id), {}, {})
+                app.remember_community(owner, post["owner"], post["body"], "forum", stream=post_id, event="post",
+                                       is_agent=bool(post["is_agent"]))
+                for entry in reversed(result["entries"]):
+                    app.remember_community(owner, entry["owner"], entry["body"], "forum",
+                                           stream=post_id, event="comment:" + str(entry["id"]), is_agent=bool(entry["is_agent"]))
+                return dump({
+                    "post": app.social.forum_entry_for_agent(owner, post),
+                    "entries": [app.social.forum_entry_for_agent(owner, row) for row in result["entries"]],
+                })
             if action == "comment":
-                return dump(app.community.handle(owner, "POST", str(post_id), {"body": body}))
+                return dump(app.community.handle(owner, "POST", str(post_id), {
+                    "body": body, "sticker_id": sticker_id, "reply_to": reply_to or None,
+                }, is_agent=True))
             raise ValueError("论坛操作无效")
         except (ValueError, web.HTTPException) as exc:
             return dump({"ok": False, "error": getattr(exc, "reason", str(exc))})
@@ -33,8 +57,25 @@ def build_tools(app, gid):
                 return dump(app.community.groups(owner, "GET" if action == "list" else "POST", "", {"name": name, "private": private}))
             if action not in {"join", "leave", "read", "send"} or room_id <= 0:
                 raise ValueError("请指定有效的群操作及群编号")
-            return dump(app.community.groups(owner, "GET" if action == "read" else "POST",
-                                            str(room_id), {"action": action, "body": body}))
+            if action == "send":
+                if not body.strip():
+                    raise ValueError("请输入消息内容")
+                if not app.social.send(owner, room_id, body.strip()):
+                    raise ValueError("智能体未加入该群")
+                return dump({"ok": True})
+            result = app.community.groups(owner, "GET" if action == "read" else "POST",
+                                          str(room_id), {"action": action, "body": body})
+            if action == "read":
+                for entry in result["entries"]:
+                    media = entry.pop("attachment", None)
+                    ref = image_reference(media, f"group:{room_id}:{entry['id']}")
+                    if ref:
+                        entry["image"] = ref
+                    elif media:
+                        entry["attachment"] = {"kind": media["kind"], "label": media.get("label", "")}
+            if result.get("message_id"):
+                app.social.on_message(str(room_id), result["message_id"])
+            return dump(result)
         except (ValueError, web.HTTPException) as exc:
             return dump({"ok": False, "error": getattr(exc, "reason", str(exc))})
 

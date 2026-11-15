@@ -2,6 +2,8 @@
 import asyncio
 import json
 import logging
+import math
+from collections import Counter
 import re
 import time
 
@@ -13,26 +15,58 @@ from .model_registry import model_client
 
 log = logging.getLogger(__name__)
 MEMORY_DAYS = 90
+BATCH_THRESHOLD = 5
+FORUM_COMMENT_THRESHOLD = 6
+QUIET_SECONDS = 12
+MAX_BATCH = 48
 
 
-def strength(stamp, now):
-    return max(0.0, min(1.0, 1 - (now - stamp) / (MEMORY_DAYS * 86400)))
+def strength(stamp, now, initial=1.0):
+    return max(0.0, min(1.0, initial - (now - stamp) / (MEMORY_DAYS * 86400)))
+
+
+def ranked_tags(rows):
+    strongest = {}
+    for row in rows:
+        current = row["strength"]
+        if current > 0:
+            for tag in row["tags"]:
+                strongest[tag] = max(current, strongest.get(tag, 0))
+    ordered = sorted(strongest.items(), key=lambda item: (-item[1], item[0]))
+    return [{"tag": tag, "strength": strength} for tag, strength in ordered[:100]]
+
+
+# Split Chinese text into overlapping pairs and keep Latin words intact.
+_RECALL_FILLERS = (
+    "请问", "你好", "谢谢", "好的", "你还记得", "还记得", "记不记得",
+    "你知道", "我想问", "能不能", "告诉我", "帮我", "上次", "之前",
+    "那个", "这个", "刚才", "怎么说", "怎么样",
+)
 
 
 def terms(text):
-    result = set()
     for token in re.findall(r"[a-z0-9]+|[\u3400-\u9fff]+", text.casefold()):
         if token.isascii():
-            result.add(token)
+            if len(token) > 1 and token not in {"the", "is", "it", "you", "me", "to", "do"}:
+                yield token
         else:
-            result.update(token[i:i + 2] for i in range(len(token) - 1))
-    return result
+            yield from (token[i:i + 2] for i in range(len(token) - 1))
+
+
+def query_terms(text):
+    for filler in _RECALL_FILLERS:
+        text = text.replace(filler, " ")
+    return set(terms(text))
 
 
 class Memory:
-    def __init__(self, db):
+    def __init__(self, db, call_logs=None):
         self.db = db
+        self.call_logs = call_logs
         self.tasks = {}
+        self.last_seen = {}
+        self.results = {}
+        self.slots = asyncio.Semaphore(8)
         db.execute("""CREATE TABLE IF NOT EXISTS agent_memory(
             id INTEGER PRIMARY KEY,
             owner TEXT NOT NULL REFERENCES sim_users(id) ON DELETE CASCADE,
@@ -59,23 +93,92 @@ class Memory:
                 finally:
                     db.execute("RELEASE migrate_agent_memory")
 
+        columns = {row[1] for row in db.execute("PRAGMA table_info(agent_memory)")}
+        for name, definition in (
+            ("kind", "TEXT NOT NULL DEFAULT 'knowledge'"),
+            ("tags", "TEXT NOT NULL DEFAULT '[]'"),
+            ("initial", "REAL NOT NULL DEFAULT 1"),
+            ("created", "REAL NOT NULL DEFAULT 0"),
+        ):
+            if name not in columns:
+                db.execute(f"ALTER TABLE agent_memory ADD COLUMN {name} {definition}")
+        db.execute("""CREATE TABLE IF NOT EXISTS agent_memory_events(
+            seq INTEGER PRIMARY KEY,
+            owner TEXT NOT NULL REFERENCES sim_users(id) ON DELETE CASCADE,
+            stream TEXT NOT NULL, event TEXT NOT NULL, subject TEXT NOT NULL,
+            text TEXT NOT NULL, reply TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(owner,stream,event)
+        )""")
+        db.execute("""CREATE INDEX IF NOT EXISTS agent_memory_events_pending
+            ON agent_memory_events(owner,stream,done,seq)""")
+
     def list(self, owner):
         now = time.time()
-        return [dict(row) | {"strength": strength(row["updated"], now)} for row in self.db.execute(
-            "SELECT id,text,subject,updated FROM agent_memory WHERE owner=? ORDER BY id DESC LIMIT 200", (owner,)
+        return [dict(row) | {"strength": strength(row["updated"], now, row["initial"]),
+                             "tags": json.loads(row["tags"]), "created": row["created"] or row["updated"]} for row in self.db.execute(
+            "SELECT id,text,subject,updated,kind,tags,initial,created FROM agent_memory WHERE owner=? ORDER BY id DESC LIMIT 200", (owner,)
         )]
 
-    def recall(self, owner, message, subject="self"):
-        query = terms(message)
-        ranked = [(len(query & terms(row["text"])) * row["strength"], row["text"])
-                  for row in self.list(owner) if row["subject"] == subject and row["strength"] > 0]
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        return [value for score, value in ranked[:5] if score]
+    def recall(self, owner, message, subject="self", *, recent=()):
+        query = query_terms(message[:2000])
+        # Only borrow the preceding topic for a short, referential follow-up.
+        if len(query) <= 1 and message.lstrip().startswith(("那", "这", "它", "继续")):
+            for previous in recent:
+                query.update(query_terms(previous[:400]))
+        if not query:
+            return []
+
+        rows = self.db.execute(
+            """SELECT text,tags,updated,created,initial FROM agent_memory
+               WHERE owner=? AND subject=? AND initial > 0 AND updated > ?""",
+            (owner, subject, time.time() - MEMORY_DAYS * 86400),
+        )
+        now = time.time()
+        documents = []
+        frequency = Counter()
+        for row in rows:
+            active = strength(row["updated"], now, row["initial"])
+            if active <= 0:
+                continue
+            counts = Counter(terms(row["text"]))
+            tags = Counter(term for tag in json.loads(row["tags"]) for term in terms(tag))
+            matches = query & (counts.keys() | tags.keys())
+            frequency.update(matches)
+            documents.append((row, active, counts, tags, matches, sum(counts.values())))
+        if not frequency:
+            return []
+
+        size = len(documents)
+        average = max(1, sum(doc[-1] for doc in documents) / size)
+        idf = {term: math.log1p((size - count + .5) / (count + .5))
+               for term, count in frequency.items()}
+        ranked = []
+        for row, active, counts, tags, matches, length in documents:
+            score = 0.0
+            for term in sorted(matches & idf.keys()):
+                weight = counts[term] + 2 * bool(tags[term])
+                score += idf[term] * 2.2 * weight / (weight + 1.2 * (.25 + .75 * length / average))
+            if score > 0:
+                ranked.append((score, active, row["updated"], row))
+        ranked.sort(key=lambda item: item[:3], reverse=True)
+        result, seen = [], set()
+        for _, _, _, row in ranked:
+            text = row["text"][:300]
+            normalized = re.sub(r"[\W_]+", "", text.casefold())
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append({"text": text, "created": int(row["created"] or row["updated"])})
+            if len(result) == 5:
+                break
+        return result
 
     def cancel(self, owner):
-        task = self.tasks.get(owner)
-        if task:
-            task.cancel()
+        for key, task in list(self.tasks.items()):
+            if key[0] == owner:
+                self.tasks.pop(key)
+                self.last_seen.pop(key, None)
+                task.cancel()
 
     async def close(self):
         tasks = list(self.tasks.values())
@@ -114,31 +217,135 @@ class Memory:
             raise web.HTTPNotFound(reason="找不到该记忆")
         self.cancel(owner)
 
-    def schedule(self, owner, model, validate_url, message, reply):
-        if not model.get("key") or len(message) < 5 or owner in self.tasks or len(self.tasks) >= 8:
-            return
-        task = asyncio.create_task(self.extract(owner, model, validate_url, message, reply))
-        self.tasks[owner] = task
-        task.add_done_callback(lambda _: self.tasks.pop(owner, None))
+    def include_private_history(self, owner, gid):
+        stream = f"private:{gid}"
+        self.db.execute("""INSERT OR IGNORE INTO agent_memory_events
+            (owner,stream,event,subject,text,reply)
+            SELECT ?,?,CAST(a.id AS TEXT),'self',substr(u.content,1,3000),substr(a.content,1,1500)
+            FROM demo_chat u JOIN demo_chat a ON a.id=(
+                SELECT next.id FROM demo_chat next WHERE next.game=u.game AND next.id>u.id
+                ORDER BY next.id LIMIT 1
+            )
+            WHERE u.game=? AND u.role='user' AND a.role='assistant' AND trim(u.content)<>''
+            ORDER BY u.id""", (owner, stream, gid))
 
-    async def extract(self, owner, model, validate_url, message, reply):
+    def progress(self, owner):
+        pending, done = self.db.execute("""SELECT count(*)-coalesce(sum(done),0),coalesce(sum(done),0)
+            FROM agent_memory_events WHERE owner=?""", (owner,)).fetchone()
+        return dict(pending=pending, done=done, active=any(key[0] == owner for key in self.tasks),
+                    failed=any(key[0] == owner and result is not None for key, result in self.results.items()),
+                    threshold=BATCH_THRESHOLD, forum_comment_threshold=FORUM_COMMENT_THRESHOLD)
+
+    def schedule(self, owner, model, validate_url, message, reply="", *, subject="self", stream, event):
+        if not model.get("key") or not model.get("model") or not message.strip():
+            return
+        cursor = self.db.execute("""INSERT OR IGNORE INTO agent_memory_events(owner,stream,event,subject,text,reply)
+            VALUES(?,?,?,?,?,?)""", (owner, stream, str(event), subject, message[:3000], reply[:1500]))
+        key = (owner, stream)
+        if cursor.rowcount:
+            self.last_seen[key] = asyncio.get_running_loop().time()
+        self.start(owner, stream, model, validate_url)
+
+    def start(self, owner, stream, model, validate_url):
+        key = (owner, stream)
+        if key in self.tasks or time.monotonic() - self.results.get(key, float("-inf")) < 60:
+            return
+        if self.ready(stream, self.batch(key)):
+            self.tasks[key] = asyncio.create_task(self.drain(key, model, validate_url))
+        else:
+            self.last_seen.pop(key, None)
+
+    async def drain(self, key, model, validate_url):
+        loop = asyncio.get_running_loop()
         try:
-            known = self.recall(owner, message)
-            result = await model_client(model, validate_url).ainvoke([
-                SystemMessage(content=workflow("memory")),
-                HumanMessage(content=json.dumps(dict(user=message, reply=reply[:600], known=known), ensure_ascii=False)),
-            ])
-            raw = result.text.strip()
-            if raw.startswith("```") and raw.endswith("```"):
-                raw = raw.partition("\n")[2][:-3]
-            items = json.loads(raw)
-            if not isinstance(items, list):
-                return
-            for item in items[:3]:
-                if isinstance(item, str) and 1 <= len(item.strip()) <= 300:
-                    if len(self.list(owner)) >= 200:
-                        break
-                    self.db.execute("INSERT OR IGNORE INTO agent_memory(owner,text,updated) VALUES(?,?,?)",
-                                    (owner, item.strip(), time.time()))
+            while True:
+                rows = self.batch(key)
+                if not self.ready(key[1], rows):
+                    return
+                remaining = QUIET_SECONDS - (loop.time() - self.last_seen.get(key, 0))
+                if remaining > 0 and len(rows) < MAX_BATCH:
+                    await asyncio.sleep(remaining)
+                    continue
+                async with self.slots:
+                    await self.extract(key, model, validate_url, self.batch(key))
+                    self.results.pop(key, None)
         except Exception as exc:
-            log.warning("Chat memory extraction failed: %s", type(exc).__name__)
+            self.results[key] = time.monotonic()
+            log.warning("Chat memory batch failed: %s", type(exc).__name__)
+        finally:
+            if self.tasks.get(key) is asyncio.current_task():
+                self.tasks.pop(key, None)
+                self.last_seen.pop(key, None)
+
+    @staticmethod
+    def ready(stream, rows):
+        if stream.startswith("forum:"):
+            return sum(row["event"].startswith("comment:") for row in rows) >= FORUM_COMMENT_THRESHOLD
+        return len(rows) >= BATCH_THRESHOLD
+
+    def batch(self, key):
+        return self.db.execute("""SELECT seq,event,subject,text,reply FROM agent_memory_events
+            WHERE owner=? AND stream=? AND done=0 ORDER BY CASE WHEN stream LIKE 'private:%' THEN CAST(event AS INTEGER) ELSE seq END LIMIT ?""", (*key, MAX_BATCH)).fetchall()
+
+    async def extract(self, key, model, validate_url, rows):
+        owner, stream = key
+        subjects = {row["subject"] for row in rows}
+        memories = self.list(owner)
+        known = [row for row in memories if row["subject"] in subjects]
+        audit = self.call_logs.callback(owner, "memory") if self.call_logs else None
+        result = await model_client(model, validate_url, audit=audit).ainvoke([
+            SystemMessage(content=workflow("memory")),
+            HumanMessage(content=json.dumps({
+                "source": stream.split(":", 1)[0], "events": [{field: row[field] for field in ("seq", "subject", "text", "reply")} for row in rows],
+                "available_tags": [item["tag"] for item in ranked_tags(memories)],
+                "known": [{k: row[k] for k in ("id", "subject", "text")} for row in known],
+            }, ensure_ascii=False)),
+        ])
+        raw = result.text.strip()
+        if raw.startswith("```") and raw.endswith("```"):
+            raw = raw.partition("\n")[2][:-3]
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            raise ValueError("Expected memory array")
+        evidence = {row["seq"]: row["subject"] for row in rows}
+        existing = {row["id"]: row for row in known}
+        now = time.time()
+        self.db.execute("SAVEPOINT save_memory_batch")
+        try:
+            seen = set()
+            for item in items[:12]:
+                if not isinstance(item, dict):
+                    continue
+                subject = evidence.get(item.get("event")) if type(item.get("event")) is int else None
+                text = item.get("text")
+                if not subject or not isinstance(text, str) or not 1 <= len(text.strip()) <= 300:
+                    continue
+                text = text.strip()
+                match = existing.get(item.get("match")) if type(item.get("match")) is int else None
+                if not match or match["subject"] != subject:
+                    match = next((row for row in known if row["subject"] == subject and row["text"] == text), None)
+                token = (subject, match["id"] if match else text)
+                if token in seen:
+                    continue
+                seen.add(token)
+                initial = 0.95 if item.get("important") is True else 0.45
+                kind = item.get("kind")
+                if kind not in ("knowledge", "event", "emotion"):
+                    kind = "knowledge"
+                tags = item.get("tags")
+                tags = list(dict.fromkeys(tag.strip()[:24] for tag in tags
+                            if isinstance(tag, str) and tag.strip()))[:6] if isinstance(tags, list) else []
+                if match:
+                    combined = list(dict.fromkeys(match["tags"] + tags))[:6]
+                    self.db.execute("UPDATE agent_memory SET updated=?,initial=?,tags=? WHERE id=? AND owner=?",
+                                    (now, min(1, max(initial, match["strength"] + 0.2)), json.dumps(combined), match["id"], owner))
+                elif len(self.list(owner)) < 200:
+                    self.db.execute("""INSERT OR IGNORE INTO agent_memory(owner,subject,text,updated,created,kind,tags,initial)
+                        VALUES(?,?,?,?,?,?,?,?)""", (owner, subject, text, now, now, kind, json.dumps(tags), initial))
+            self.db.executemany("UPDATE agent_memory_events SET done=1,text='',reply='' WHERE seq=?",
+                                [(row["seq"],) for row in rows])
+        except BaseException:
+            self.db.execute("ROLLBACK TO save_memory_batch")
+            raise
+        finally:
+            self.db.execute("RELEASE save_memory_batch")

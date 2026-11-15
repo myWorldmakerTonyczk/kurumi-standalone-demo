@@ -10,7 +10,7 @@ const TABS = [["forum", "论坛"], ["groups", "群聊"], ["ai", "AI 助手"]];
 
 export function mountCommunity(root, ctx = {}) {
   const me = () => cachedProfile()?.nickname || "";
-  const base = {game: ctx.game || (() => ""), pairs: ctx.pairs || (() => []), me};
+  const base = {game: ctx.game || (() => ""), pairs: ctx.pairs || (() => []), me, onNavigate: ctx.onNavigate};
   let current = "forum", unread = 0, tabBadge, demoNote;
 
   const forum = createForum(base);
@@ -120,6 +120,7 @@ export function mountCommunity(root, ctx = {}) {
     if (reselected) views[key].home?.();
     syncList();
     views[key].activate();
+    ctx.onNavigate?.();
   }
 
   // Keep the unread badge fresh while the community page is closed.
@@ -143,7 +144,10 @@ export function mountCommunity(root, ctx = {}) {
       show("ai");
       ai.gotoDraft(values, origin, review);
     },
-    openPost(id) { show("forum"); return forum.openPost(id); },
+    openPost(id, commentId) { show("forum"); return forum.openPost(id, commentId); },
+    openGroup(id, messageId) { show("groups"); return groups.openRoom(id, messageId); },
+    canGoBack: () => Boolean(views[current].canGoBack?.()),
+    back() { views[current].home?.(); },
     warm() { warmed = true; return groups.refresh(); },
     unread: () => unread,
   };

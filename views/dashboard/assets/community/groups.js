@@ -1,3 +1,4 @@
+import {prepareImage} from "/assets/community/media.js";
 /* Group chat: list with unread, join/leave/dissolve, members with inferred presence, messages, mark-read, AI summary. */
 import {h, clear, append, formatTime, clockTime, timeEl, relativeTime, uid, isAbort} from "/assets/ui/dom.js";
 import {groupApi, aiApi} from "/assets/ui/api.js";
@@ -14,10 +15,12 @@ export function createGroups(ctx) {
 
   const s = {
     groups: [], listStatus: "idle", listError: null, room: "",
-    detail: null, members: [], messages: [], detailStatus: "idle", detailError: null,
+    detail: null, members: [], agents: [], messages: [], hasOlder: false, detailStatus: "idle", detailError: null,
     unread: new Map(), summary: null, summaryStatus: "idle", summaryError: null,
   };
   const drafts = new Map();
+  let olderCtl = null, readTimer, reading = false;
+  const readThrough = new Map();
   let listCtl = null, detailCtl = null, sig = "", roomMode = "", actionSig = "", started = false, tick = 0;
   const current = () => s.groups.find(group => String(group.id) === s.room) || null;
 
@@ -72,18 +75,18 @@ export function createGroups(ctx) {
     return button;
   }
 
-  function renderList() {
-    clear(listBody);
-    if (s.listStatus === "loading") { listBody.append(stateBlock("loading", "正在加载群聊…"), skeleton(3)); return; }
-    if (s.listStatus === "error") { listBody.append(stateBlock("error", s.listError?.message || "群聊列表加载失败", {retry: () => loadList(), hint: "请检查网络后重试。"})); return; }
+  function renderList(target = listBody) {
+    clear(target);
+    if (s.listStatus === "loading") { target.append(stateBlock("loading", "正在加载群聊…"), skeleton(3)); return; }
+    if (s.listStatus === "error") { target.append(stateBlock("error", s.listError?.message || "群聊列表加载失败", {retry: () => loadList(), hint: "请检查网络后重试。"})); return; }
     if (!s.groups.length) {
-      listBody.append(stateBlock("empty", "还没有群聊", {hint: "点击「创建群聊」开一个，或等待他人创建。"}));
+      target.append(stateBlock("empty", "还没有群聊", {hint: "点击「创建群聊」开一个，或等待他人创建。"}));
       return;
     }
     const sorted = sortedGroups();
     const mine = sorted.filter(group => group.joined), others = sorted.filter(group => !group.joined);
-    if (mine.length) listBody.append(h("h4", {class: "gr-section"}, `已加入 · ${mine.length}`), h("div", {class: "gr-items"}, mine.map(groupRow)));
-    if (others.length) listBody.append(h("h4", {class: "gr-section"}, `可加入 · ${others.length}`), h("div", {class: "gr-items"}, others.map(groupRow)));
+    if (mine.length) target.append(h("h4", {class: "gr-section"}, `已加入 · ${mine.length}`), h("div", {class: "gr-items"}, mine.map(groupRow)));
+    if (others.length) target.append(h("h4", {class: "gr-section"}, `可加入 · ${others.length}`), h("div", {class: "gr-items"}, others.map(groupRow)));
   }
 
   function reportUnread() {
@@ -95,7 +98,7 @@ export function createGroups(ctx) {
   async function loadList({silent = false} = {}) {
     listCtl?.abort();
     const ctl = listCtl = new AbortController();
-    if (!silent) { s.listStatus = s.groups.length ? "ready" : "loading"; s.listError = null; renderList(); }
+    if (!silent) { s.listStatus = s.groups.length ? "ready" : "loading"; s.listError = null; renderList(); if (!s.room) renderRoom(); }
     try {
       const data = await groupApi.list(ctl.signal);
       if (ctl !== listCtl) return;
@@ -112,16 +115,86 @@ export function createGroups(ctx) {
         renderRoom(); renderMembers();
       } else if (before && Boolean(before.joined) !== Boolean(current()?.joined)) { renderRoom(); renderMembers(); }
       renderList();
+      if (!s.room) renderRoom();
       reportUnread();
     } catch (error) {
       if (isAbort(error) || ctl !== listCtl) return;
       if (silent) return;
-      s.listStatus = "error"; s.listError = error; renderList();
+      s.listStatus = "error"; s.listError = error; renderList(); if (!s.room) renderRoom();
     }
   }
 
   /* ---------- room view (built once so the composer keeps focus and text across polls) ---------- */
   const R = {};
+  const imageDrafts = new Map();
+  const quoteDrafts = new Map();
+
+  function quoteText(quote) {
+    if (!quote.nickname) return "原消息已不可用";
+    if (quote.kind === "sticker") return "[表情包]";
+    if (quote.kind === "image") return "[图片]";
+    return quote.body;
+  }
+
+  function renderQuoteDraft() {
+    const quote = quoteDrafts.get(s.room);
+    R.quote.hidden = !quote;
+    R.quote.replaceChildren();
+    if (!quote) return;
+    R.quote.append(h("div", {class: "gr-quote-excerpt"},
+      h("strong", {}, "引用 " + quote.nickname), h("span", {}, quoteText(quote))),
+      h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", onClick: () => {
+        quoteDrafts.delete(s.room);
+        renderQuoteDraft();
+      }}, "取消引用"));
+  }
+
+  function selectQuote(message, media) {
+    quoteDrafts.set(s.room, {id: message.id, nickname: message.nickname,
+      body: message.body.slice(0, 160), kind: media ? message.attachment.kind : null, media});
+    renderQuoteDraft();
+    R.input.focus({preventScroll: true});
+  }
+  let mentionIndex = 0;
+
+
+  function renderImageDraft() {
+    const image = imageDrafts.get(s.room);
+    R.preview.hidden = !image;
+    R.preview.replaceChildren();
+    if (image) R.preview.append(h("img", {src: image, alt: "待发送图片"}),
+      h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", onClick: () => {
+        imageDrafts.delete(s.room);
+        renderImageDraft();
+      }}, "移除图片"));
+  }
+
+  function mentionQuery() {
+    const end = R.input.selectionStart;
+    if (end !== R.input.selectionEnd) return null;
+    const match = /@([^@\n]*)$/.exec(R.input.value.slice(0, end));
+    if (!match || match[1].length > 48) return null;
+    return {start: match.index, end, text: match[1].toLowerCase()};
+  }
+
+  function updateMentions(reset = true) {
+    if (reset) mentionIndex = 0;
+    const query = mentionQuery();
+    const candidates = query ? [...s.members, ...s.agents].filter(member =>
+      member.nickname.toLowerCase().includes(query.text)).slice(0, 8) : [];
+    mentionIndex = Math.min(mentionIndex, Math.max(0, candidates.length - 1));
+    R.mentions.hidden = !candidates.length;
+    R.mentions.replaceChildren(...candidates.map((member, index) => h("button", {
+      type: "button", class: "gr-mention-option" + (index === mentionIndex ? " is-active" : ""),
+      onPointerdown: event => event.preventDefault(),
+      onClick: () => {
+        R.input.setRangeText("@" + member.nickname + " ", query.start, query.end, "end");
+        R.input.focus();
+        R.input.dispatchEvent(new Event("input", {bubbles: true}));
+        R.mentions.hidden = true;
+      },
+    }, member.nickname)));
+  }
   function buildRoom() {
     R.title = h("h2", {tabindex: "-1"});
     R.meta = h("p", {class: "gr-meta"});
@@ -129,21 +202,57 @@ export function createGroups(ctx) {
     R.unread = h("div", {class: "gr-unread", role: "status"});
     R.summary = h("div", {class: "gr-summary", hidden: true});
     R.log = h("div", {class: "gr-log", role: "log", "aria-live": "polite", "aria-relevant": "additions", "aria-label": "群聊消息", tabindex: "0"});
+    R.older = h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm gr-trunc", onClick: loadOlder}, "加载更早消息");
+    R.log.addEventListener("scroll", () => {
+      if (R.log.scrollTop < 32 && s.hasOlder) loadOlder();
+      scheduleRead();
+    }, {passive: true});
     R.input = h("textarea", {rows: "3", maxlength: String(MSG_MAX), "aria-label": "消息内容", placeholder: "输入消息，Ctrl + Enter 发送"});
     R.count = h("span", {class: "ui-counter", "aria-hidden": "true"});
     bindCounter(R.input, R.count, MSG_MAX);
     R.error = h("p", {class: "ui-field-error", role: "alert"});
     R.send = h("button", {type: "submit", class: "ui-btn ui-btn-primary"}, "发送");
-    R.input.addEventListener("keydown", event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") R.form.requestSubmit(); });
+    R.mentions = h("div", {class: "gr-mentions", hidden: true, "aria-label": "提及候选"});
+    R.preview = h("div", {class: "gr-image-preview", hidden: true});
+    R.quote = h("div", {class: "gr-quote gr-quote-draft", hidden: true, "aria-live": "polite"});
+    R.input.addEventListener("input", () => updateMentions());
+    R.input.addEventListener("click", () => updateMentions());
+    R.input.addEventListener("blur", event => {
+      if (!R.mentions.contains(event.relatedTarget)) R.mentions.hidden = true;
+    });
+    R.input.addEventListener("keydown", event => {
+      if (event.isComposing) return;
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        R.form.requestSubmit();
+      } else if (!R.mentions.hidden && ["ArrowUp", "ArrowDown", "Enter", "Escape"].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === "Escape") R.mentions.hidden = true;
+        else if (event.key === "Enter") R.mentions.children[mentionIndex]?.click();
+        else {
+          mentionIndex = (mentionIndex + R.mentions.children.length + (event.key === "ArrowUp" ? -1 : 1))
+            % R.mentions.children.length;
+          updateMentions(false);
+        }
+      }
+    });
     R.form = h("form", {class: "gr-composer", novalidate: true, onSubmit: async event => {
       event.preventDefault();
       R.error.textContent = "";
       const text = R.input.value.trim();
-      if (!text) { R.error.textContent = "请输入消息内容"; R.input.focus(); return; }
       const id = s.room;
+      const image = imageDrafts.get(id);
+      const quote = quoteDrafts.get(id);
+      if (R.send.disabled || R.preparingImage) return;
+      if (!text && !image) { R.error.textContent = "请输入消息内容或拖入图片"; R.input.focus(); return; }
+      R.mentions.hidden = true;
       try {
-        await withBusy(R.send, () => groupApi.send(id, text), "发送中…");
+        await withBusy(R.send, () => groupApi.send(id, text, image, quote), "发送中…");
+        if (quoteDrafts.get(id) === quote) quoteDrafts.delete(id);
+        if (imageDrafts.get(id) === image) imageDrafts.delete(id);
         if (id !== s.room) return;
+        renderImageDraft();
+        renderQuoteDraft();
         R.input.value = ""; drafts.delete(id); R.count.textContent = `0 / ${MSG_MAX}`;
         await loadDetail({silent: true, stick: true});
         R.input.focus();
@@ -151,7 +260,28 @@ export function createGroups(ctx) {
         R.error.textContent = error.message;
         if (error.status === 403) loadList({silent: true});
       }
-    }}, h("div", {class: "ui-label-row"}, h("span", {class: "ui-muted"}, "Enter 换行，Ctrl + Enter 发送"), R.count), R.input, R.error, h("div", {class: "cm-form-actions"}, R.send));
+    }}, h("div", {class: "ui-label-row"}, h("span", {class: "ui-muted"}, "输入 @ 提及成员，也可拖入图片"), R.count), R.quote, R.input, R.mentions, R.preview, R.error, h("div", {class: "cm-form-actions"}, R.send));
+    R.form.addEventListener("dragover", event => {
+      if (!event.dataTransfer.types.includes("Files")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    });
+    R.form.addEventListener("drop", async event => {
+      const file = event.dataTransfer.files[0];
+      if (!file) return;
+      event.preventDefault();
+      if (R.preparingImage || R.send.disabled) return;
+      const room = s.room;
+      R.preparingImage = true;
+      R.error.textContent = "";
+      try {
+        imageDrafts.set(room, await prepareImage(file));
+        if (room === s.room) renderImageDraft();
+      } catch (error) {
+        if (room === s.room) R.error.textContent = error.message || "图片无法读取";
+      } finally { R.preparingImage = false; }
+    });
+    renderImageDraft();
     R.view = h("div", {class: "gr-room"}, h("div", {class: "gr-head"}, h("div", {class: "gr-head-text"}, R.title, R.meta), R.actions), R.unread, R.summary, R.log, R.form);
   }
 
@@ -167,13 +297,13 @@ export function createGroups(ctx) {
     field.focus();
     field.dispatchEvent(new Event("input", {bubbles: true}));
   }
-  function longPressMention(el, name) {
+  function bindLongPress(el, action, label) {
     let timer = null, origin = null;
     const cancel = () => { clearTimeout(timer); timer = null; origin = null; };
     el.addEventListener("pointerdown", event => {
       if (event.button !== 0) return;
       origin = [event.clientX, event.clientY];
-      timer = setTimeout(() => { timer = null; insertMention(name); }, MENTION_HOLD_MS);
+      timer = setTimeout(() => { timer = null; action(); }, MENTION_HOLD_MS);
     });
     el.addEventListener("pointermove", event => {
       if (timer && origin && Math.hypot(event.clientX - origin[0], event.clientY - origin[1]) > 10) cancel();
@@ -181,39 +311,99 @@ export function createGroups(ctx) {
     for (const type of ["pointerup", "pointercancel", "pointerleave"]) el.addEventListener(type, cancel);
     el.addEventListener("contextmenu", event => event.preventDefault());
     el.addEventListener("keydown", event => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); insertMention(name); }
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); action(); }
     });
     el.setAttribute("role", "button");
     el.setAttribute("tabindex", "0");
-    el.setAttribute("aria-label", "长按提及 " + name);
-    el.title = "长按 @" + name;
+    el.setAttribute("aria-label", label);
+    el.title = label;
     return el;
+  }
+
+  function longPressMention(el, name) {
+    return bindLongPress(el, () => insertMention(name), "长按提及 " + name);
+  }
+
+  function quoteBlock(quote) {
+    if (!quote) return null;
+    return h("div", {class: "gr-quote gr-quote-excerpt"},
+      quote.nickname ? h("strong", {}, quote.nickname) : null,
+      h("span", {}, quoteText(quote)));
   }
 
   function messageRow(message) {
     const mine = Boolean(message.mine);
     const avatar = h("img", {class: "gr-message-avatar", src: message.avatar?.startsWith("data:image/webp;base64,") ? message.avatar : "/assets/" + (message.avatar || "user-avatar.svg"), alt: "", draggable: "false"});
     if (!mine) longPressMention(avatar, message.nickname);
-    return h("article", {class: "gr-msg" + (mine ? " is-mine" : "")},
+    const attachment = message.attachment;
+    const media = ["image", "sticker"].includes(attachment?.kind) && attachment.url?.startsWith("/api/groups?")
+      ? h("img", {class: attachment.kind === "sticker" ? "gr-sticker" : "gr-image",
+          src: attachment.url, alt: attachment.label || "群聊图片", draggable: "false", loading: "lazy"}) : null;
+    if (media) bindLongPress(media, () => selectQuote(message, true),
+      attachment.kind === "sticker" ? "长按引用表情包" : "长按引用图片");
+    const bubble = message.body ? bindLongPress(h("p", {class: "gr-msg-body"}, message.body),
+      () => selectQuote(message, false), "长按引用消息") : null;
+    return h("article", {id: "group-message-" + message.id, tabindex: "-1", class: "gr-msg" + (mine ? " is-mine" : "")},
       h("div", {class: "gr-msg-head"}, avatar,
         h("strong", {}, mine ? "我" : message.nickname),
         message.is_agent ? h("span", {class: "ui-badge"}, "智能体") : null,
         h("time", {datetime: new Date(message.created * 1000).toISOString(), title: formatTime(message.created)}, clockTime(message.created))),
-      h("p", {class: "gr-msg-body"}, message.body));
+      quoteBlock(message.quote), bubble, media);
   }
 
-  function renderLog(stick) {
-    const el = R.log, group = s.detail;
-    const keep = el.scrollTop;
-    const wasBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    clear(el);
-    if (!s.messages.length) el.append(stateBlock("empty", "还没有消息", {hint: "发出第一条消息，打个招呼。"}));
-    else {
-      if (group.messages_count > s.messages.length)
-        el.append(h("p", {class: "ui-muted gr-trunc"}, `仅显示最近 ${s.messages.length} 条，共 ${group.messages_count} 条（接口暂不支持加载更早消息）`));
-      el.append(...s.messages.map(messageRow));
+  function renderLog(stick, older = false) {
+    const el = R.log;
+    const keep = el.scrollTop, previousHeight = el.scrollHeight;
+    const wasBottom = previousHeight - keep - el.clientHeight < 60;
+    if (R.renderedRoom !== s.room || !s.messages.length) {
+      clear(el);
+      R.renderedRoom = s.room;
     }
-    el.scrollTop = stick || wasBottom ? el.scrollHeight : keep;
+    if (!s.messages.length) {
+      el.append(stateBlock("empty", "还没有消息", {hint: "发出第一条消息，打个招呼。"}));
+      return;
+    }
+    if (el.firstElementChild && !el.firstElementChild.matches("[data-message-id]") &&
+        el.firstElementChild !== R.older) el.firstElementChild.remove();
+    if (s.hasOlder && R.older.parentNode !== el) el.prepend(R.older);
+    if (!s.hasOlder) R.older.remove();
+    let next = s.hasOlder ? R.older.nextElementSibling : el.firstElementChild;
+    for (const message of s.messages) {
+      if (next?.dataset.messageId === String(message.id)) {
+        next = next.nextElementSibling;
+      } else {
+        const row = messageRow(message);
+        row.dataset.messageId = String(message.id);
+        el.insertBefore(row, next);
+      }
+    }
+    while (next) {
+      const old = next;
+      next = next.nextElementSibling;
+      old.remove();
+    }
+    el.scrollTop = older ? keep + el.scrollHeight - previousHeight : stick || wasBottom ? el.scrollHeight : keep;
+  }
+
+  async function loadOlder() {
+    if (!s.hasOlder || olderCtl || !s.messages.length) return;
+    const id = s.room;
+    const ctl = olderCtl = new AbortController();
+    R.older.disabled = true;
+    try {
+      const data = await groupApi.detail(id, FETCH, ctl.signal, {before: s.messages[0].id});
+      if (ctl !== olderCtl || id !== s.room) return;
+      s.hasOlder = data.has_more;
+      s.messages.unshift(...[...data.entries].reverse());
+      renderLog(false, true);
+    } catch (error) {
+      if (!isAbort(error)) toast(error.message || "未能加载更早消息", "error");
+    } finally {
+      if (ctl === olderCtl) {
+        olderCtl = null;
+        R.older.disabled = false;
+      }
+    }
   }
 
   function renderActions() {
@@ -244,7 +434,44 @@ export function createGroups(ctx) {
     R.unread.hidden = unread === 0;
     renderActions();
     renderLog(stick);
+    scheduleRead();
   }
+
+  function scheduleRead() {
+    if (readTimer || reading || !s.unread.get(s.room)) return;
+    readTimer = setTimeout(async () => {
+      readTimer = null;
+      const id = s.room;
+      const last = s.messages.at(-1)?.id;
+      if (document.hidden || String(s.detail?.id) !== id || !R.log?.getClientRects().length ||
+          !last || last <= (readThrough.get(id) || 0) || !s.unread.get(id)) return;
+      const logRect = R.log.getBoundingClientRect();
+      const tail = R.log.lastElementChild?.getBoundingClientRect();
+      if (!tail || R.log.scrollHeight - R.log.clientHeight - R.log.scrollTop > 12 ||
+          tail.bottom > Math.min(logRect.bottom, innerHeight) + 2 ||
+          tail.bottom <= Math.max(logRect.top, 0)) return;
+      const x = (Math.max(tail.left, 0) + Math.min(tail.right, innerWidth)) / 2;
+      const y = Math.max(tail.top, tail.bottom - 8);
+      if (!R.log.contains(document.elementFromPoint(x, y))) return;
+      reading = true;
+      try {
+        const {unread} = await groupApi.markRead(id, last);
+        readThrough.set(id, last);
+        if (Number.isInteger(unread)) s.unread.set(id, unread);
+        reportUnread();
+        renderList();
+        if (id === s.room && s.detailStatus === "ready") renderRoomParts();
+      } catch {
+        // Retry when the room next refreshes.
+      } finally {
+        reading = false;
+      }
+    }, 350);
+  }
+
+  window.addEventListener("scroll", scheduleRead, {passive: true});
+  document.addEventListener("visibilitychange", scheduleRead);
+  window.addEventListener("resize", scheduleRead);
 
   async function markAllRead(button) {
     const id = s.room;
@@ -366,7 +593,12 @@ export function createGroups(ctx) {
 
   function renderRoom({focus = false} = {}) {
     const group = current();
-    if (!s.room) { setRoom("none", stateBlock("empty", "选择一个群聊开始交流", {hint: "左侧「已加入」的群聊可以直接聊天；「可加入」的群聊需要先加入。"})); return; }
+    if (!s.room) {
+      const choices = h("div", {class: "gr-room-choices"});
+      renderList(choices);
+      setRoom("none", h("section", {class: "gr-room-directory"}, h("h3", {}, "选择群聊"), choices));
+      return;
+    }
     if (!group) {
       if (s.listStatus === "loading" || s.listStatus === "idle") setRoom("wait", stateBlock("loading", "正在读取群聊信息…"));
       else setRoom("gone", stateBlock("empty", "这个群聊不存在或已被解散"));
@@ -381,7 +613,7 @@ export function createGroups(ctx) {
     if (!s.detail) return;
     if (!R.view) buildRoom();
     const entered = setRoom("room", R.view);
-    if (entered) { R.input.value = drafts.get(s.room) || ""; R.count.textContent = `${R.input.value.length} / ${MSG_MAX}`; R.error.textContent = ""; actionSig = ""; renderSummary(); }
+    if (entered) { R.input.value = drafts.get(s.room) || ""; R.count.textContent = `${R.input.value.length} / ${MSG_MAX}`; R.error.textContent = ""; actionSig = ""; renderSummary(); renderImageDraft(); renderQuoteDraft(); }
     renderRoomParts({stick: entered});
     if (focus && entered) R.title.focus({preventScroll: true});
   }
@@ -450,18 +682,23 @@ export function createGroups(ctx) {
       h("p", {class: "ui-muted gr-legend"}, "状态依据本页已加载的最近消息推断，服务器目前不提供实时在线数据。"));
   }
 
-  async function loadDetail({silent = false, stick = false, focus = false} = {}) {
+  async function loadDetail({silent = false, stick = false, focus = false, messageId} = {}) {
     const id = s.room;
     if (!id || !current()?.joined) return;
     detailCtl?.abort();
     const ctl = detailCtl = new AbortController();
     if (!silent) { s.detailStatus = "loading"; s.detailError = null; renderRoom(); renderMembers(); }
     try {
-      const data = await groupApi.detail(id, FETCH, ctl.signal);
+      const after = s.messages.at(-1)?.id;
+      const cursor = after ? {after} : messageId ? {before: Number(messageId) + 1} : {};
+      const data = await groupApi.detail(id, FETCH, ctl.signal, cursor);
       if (ctl !== detailCtl || id !== s.room) return;
-      const messages = [...(data.entries || [])].reverse();
-      const signature = JSON.stringify([data.group, (data.members || []).map(m => [m.owner, m.role, m.muted]), messages.map(m => m.id)]);
-      s.detail = data.group; s.members = data.members || []; s.messages = messages; s.detailStatus = "ready";
+      const page = [...(data.entries || [])].reverse();
+      const messages = after ? [...s.messages, ...page] : page;
+      if (!after) s.hasOlder = data.has_more;
+      const signature = JSON.stringify([data.group, (data.members || []).map(m => [m.owner, m.role, m.muted]),
+        messages[0]?.id, messages.at(-1)?.id, messages.length]);
+      s.detail = data.group; s.members = data.members || []; s.agents = data.agents || []; s.messages = messages; s.detailStatus = "ready";
       s.unread.set(id, Number(data.group.unread) || 0);
       const entry = current();
       if (entry) {
@@ -469,9 +706,15 @@ export function createGroups(ctx) {
         if (messages.length) entry.last_activity = messages[messages.length - 1].created;
       }
       reportUnread();
-      if (silent && signature === sig && !stick) return;
+      if (silent && signature === sig && !stick) { scheduleRead(); return; }
       sig = signature;
       renderList(); renderRoom({focus}); renderMembers();
+      if (messageId) {
+        const message = document.getElementById("group-message-" + messageId);
+        message?.scrollIntoView({block: "center"});
+        message?.focus({preventScroll: true});
+        return Boolean(message);
+      }
     } catch (error) {
       if (isAbort(error) || ctl !== detailCtl) return;
       if (error.status === 403) {
@@ -488,16 +731,20 @@ export function createGroups(ctx) {
     }
   }
 
-  function selectRoom(id) {
+  function selectRoom(id, messageId) {
     ctx.onSelect?.();
     id = String(id);
     if (R.input && s.room && roomMode === "room") { if (R.input.value) drafts.set(s.room, R.input.value); else drafts.delete(s.room); }
-    s.room = id; s.detail = null; s.members = []; s.messages = [];
+    s.room = id; s.detail = null; s.members = []; s.agents = []; s.messages = []; s.hasOlder = false;
+    olderCtl?.abort();
+    olderCtl = null;
+    if (R.older) R.older.disabled = false;
     s.detailStatus = "idle"; s.detailError = null; s.summary = null; s.summaryStatus = "idle";
     sig = ""; actionSig = ""; roomMode = "";
     detailCtl?.abort();
     renderList(); renderRoom({focus: true}); renderMembers();
-    if (current()?.joined) loadDetail({focus: true});
+    ctx.onNavigate?.();
+    if (current()?.joined) return loadDetail({focus: !messageId, messageId});
   }
 
   const visible = () => root.isConnected && root.getClientRects().length > 0 && !document.hidden;
@@ -517,7 +764,14 @@ export function createGroups(ctx) {
       else { loadList({silent: true}); if (s.room && current()?.joined) loadDetail({silent: true}); }
     },
     refresh: () => { if (!started) { started = true; renderAll(); return loadList(); } return loadList({silent: true}); },
-    openRoom: id => { started = true; renderAll(); return loadList().then(() => selectRoom(id)); },
+    async openRoom(id, messageId) {
+      started = true;
+      await loadList();
+      const located = await selectRoom(id, messageId);
+      if (messageId && !located) throw Error("无法定位这条群消息，可能已被删除或你已经退出群聊");
+    },
+    canGoBack: () => Boolean(s.room),
+    home: () => { if (s.room) selectRoom(""); },
     unread: () => [...s.groups].reduce((sum, group) => sum + (group.joined ? s.unread.get(String(group.id)) || 0 : 0), 0),
   };
 }

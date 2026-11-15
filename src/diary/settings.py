@@ -9,7 +9,7 @@ DEFAULTS = dict(
     time="00:10",
     timezone="Asia/Shanghai",
     min_logs=2,
-    chat_only=False,
+    chat_only=True,
     send_to_owner=True,
     history_count=40,
 )

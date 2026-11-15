@@ -51,11 +51,14 @@ export const forumApi = {
 
 export const groupApi = {
   list: signal => api("groups", {signal}),
-  detail: (id, limit = 80, signal) => api("groups", {query: {room: id, limit}, signal}),
+  detail: (id, limit = 80, signal, cursor = {}) =>
+    api("groups", {query: {room: id, limit, media: "lazy", ...cursor}, signal}),
   create: (name, privateRoom) => api("groups", {method: "POST", body: {name, private: privateRoom}}),
   act: (id, action, params) => api("groups", {method: "POST", query: {room: id}, body: {action, ...params}}),
-  send: (id, body) => api("groups", {method: "POST", query: {room: id}, body: {body}}),
-  markRead: id => api("groups", {method: "POST", query: {room: id}, body: {action: "mark-read"}}),
+  send: (id, body, image, quote) => api("groups", {method: "POST", query: {room: id},
+    body: {body, image, reply_to: quote?.id, reply_media: quote?.media}}),
+  markRead: (id, messageId) => api("groups", {method: "POST", query: {room: id},
+    body: {action: "mark-read", message_id: messageId}}),
 };
 
 export const aiApi = {

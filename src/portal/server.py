@@ -26,7 +26,7 @@ ASSETS = {
     "portal-kurumi-journal.webp": "assets/portal-kurumi-journal.webp",
     "portal-kurumi.webp": "assets/portal-kurumi.webp",
     "portal-kurumi-header.webp": "assets/portal-kurumi-header.webp",
-    "portal.js": "portal.js", "portal.css": "portal.css", "portal-trading.js": "portal-trading.js",
+    "portal.js": "portal.js", "portal-bridge.js": "portal-bridge.js", "portal.css": "portal.css", "portal-trading.js": "portal-trading.js",
     "replay-panel.js": "replay-panel.js", "replay.css": "replay.css",
     "lightweight-charts.js": "vendor/lightweight-charts.js",
     "LICENSE-lightweight-charts.txt": "vendor/LICENSE-lightweight-charts.txt",
@@ -274,7 +274,8 @@ class Portal(Operations):
         else:
             games = [self.game(request, session)]
         return web.json_response(dict(
-            authenticated=True, mode=mode, games=[self.describe_game(game, mode) for game in games],
+            authenticated=True, mode=mode, account_id=session["owner"] if mode == "account" else None,
+            games=[self.describe_game(game, mode) for game in games],
         ))
 
     async def login(self, request):

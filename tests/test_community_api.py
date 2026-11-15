@@ -41,6 +41,30 @@ class CommunityApiFlow(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(comment.status, 200, await comment.text())
                 comment_id = (await comment.json())["id"]
 
+                reply = await user.post(f"/api/forum?post={post_id}", json={"body": "补充", "reply_to": comment_id})
+                self.assertEqual(reply.status, 200, await reply.text())
+                reply_id = (await reply.json())["id"]
+                like = await user.post(f"/api/forum?post={post_id}",
+                                       json={"action": "like", "comment": reply_id, "liked": True})
+                self.assertEqual(like.status, 200, await like.text())
+                response = await user.get(f"/api/forum?post={post_id}")
+                entry = (await response.json())["entries"][0]
+                self.assertEqual((entry["id"], entry["reply_to"], entry["liked"]), (reply_id, comment_id, 1))
+
+                private_id = demo.db.execute("""INSERT INTO demo_chat(game,role,content,created)
+                                            VALUES(?,'assistant','邮箱测试',unixepoch())""", (game_id,)).lastrowid
+                mailbox = await user.get("/api/inbox")
+                self.assertEqual(mailbox.status, 200, await mailbox.text())
+                entry = next(item for item in (await mailbox.json())["entries"] if item["kind"] == "private")
+                self.assertEqual((entry["id"], entry["target"], entry["unread"]), (private_id, game_id, True))
+                read = await user.post("/api/inbox", json={"kind": "private", "id": private_id})
+                self.assertEqual(read.status, 200, await read.text())
+                mailbox = await user.get("/api/inbox")
+                self.assertFalse(next(item["unread"] for item in (await mailbox.json())["entries"] if item["kind"] == "private"))
+                private = await user.get(f"/api/chat-message?game={game_id}&id={private_id}")
+                self.assertEqual(private.status, 200, await private.text())
+                self.assertEqual((await private.json())["entry"]["content"], "邮箱测试")
+
                 own_delete = await user.delete(f"/api/forum?comment={comment_id}")
                 self.assertEqual(own_delete.status, 200, await own_delete.text())
                 own_post_delete = await user.delete(f"/api/forum?post={post_id}")

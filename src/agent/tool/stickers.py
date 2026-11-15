@@ -1,10 +1,15 @@
 """Send a sticker from the current account's library."""
+from langchain_core.tools import tool
+
 from src.core.engine import dump
 
 
 def build_tools(app, gid, attachments):
-    owner = app.engine.get(gid)["owner_id"]
+    return sticker_tools(app, app.engine.get(gid)["owner_id"], attachments)
 
+
+def sticker_tools(app, owner, attachments):
+    @tool
     async def sticker(action: str, sticker_id: str = "", category_id: str = "") -> str:
         """表情包：list 查看分类和使用说明，send 按 category_id 随机发送一张。
         如需指定图片，先用 items 查看图片 ID，再用 send 传 sticker_id。
@@ -17,6 +22,8 @@ def build_tools(app, gid, attachments):
                          for entry in app.stickers.list(owner) if not category_id or entry["category"] == category_id])
         if action != "send":
             return "请选择 list、items 或 send"
+        if not sticker_id and not category_id:
+            return "请先用 list 查看分类，再用 send 传 category_id，或传指定的 sticker_id。"
         entry = (app.stickers.find(owner, sticker_id) if sticker_id else
                  app.stickers.pick(owner, category_id))
         if not entry:

@@ -1,3 +1,4 @@
+import { signalPortalSessionChange } from "./portal-bridge.js";
 import { encodeAgentAvatar } from "/assets/workspace-chat.js";
 import { ReplayPanel } from "./replay-panel.js";
 import { PortalTrading } from "./portal-trading.js";
@@ -175,6 +176,7 @@ byId("portal-login").onsubmit = async event => {
   try {
     const credentials = Object.fromEntries(new FormData(form));
     await api("login", credentials);
+    signalPortalSessionChange();
     form.reset();
     await start();
   } catch (error) {
@@ -185,7 +187,7 @@ byId("portal-login").onsubmit = async event => {
 };
 
 byId("portal-logout").onclick = async () => {
-  try { await api("logout", {}); location.reload(); }
+  try { await api("logout", {}); signalPortalSessionChange(); location.reload(); }
   catch (error) { setStatus(error.message, true); }
 };
 

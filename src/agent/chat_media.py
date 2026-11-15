@@ -13,7 +13,7 @@ from .model_registry import model_client, selected
 log = logging.getLogger(__name__)
 
 
-async def voice_reply(profile, history, question, reply, validate_url):
+async def voice_reply(profile, history, question, reply, validate_url, *, audit_factory=None):
     policy = profile.get("model_policy", {})
     config = selected(profile, "speech", default=False)
     if not policy.get("voice_enabled") or not config.get("key") or random.random() >= policy.get("voice_probability", .2):
@@ -27,7 +27,8 @@ async def voice_reply(profile, history, question, reply, validate_url):
     if emotion.get("key"):
         try:
             context = "\n".join(str(message.content)[:400] for message in history[-5:])
-            result = await model_client(emotion, validate_url).ainvoke([
+            audit = audit_factory("voice_instruction") if audit_factory else None
+            result = await model_client(emotion, validate_url, audit=audit).ainvoke([
                 SystemMessage(content=workflow("voice")),
                 HumanMessage(content=f"人格：{profile.get('persona', '')[:1200]}\n近期对话：{context}\n问题：{question[:500]}\n回复：{text}"),
             ])
@@ -39,13 +40,19 @@ async def voice_reply(profile, history, question, reply, validate_url):
                                max_retries=0) as client:
             params = dict(model=config["model"], voice=policy.get("voice") or "alloy", input=text,
                           response_format="mp3")
+            audit = audit_factory("speech") if audit_factory else None
+            submit = client.audio.speech.create
+
+            async def synthesize(arguments):
+                return await audit.record_speech(submit, arguments) if audit else await submit(**arguments)
+
             if instruction:
                 try:
-                    response = await client.audio.speech.create(**params, instructions=instruction)
+                    response = await synthesize(params | {"instructions": instruction})
                 except (TypeError, ValueError):
-                    response = await client.audio.speech.create(**params)
+                    response = await synthesize(params)
             else:
-                response = await client.audio.speech.create(**params)
+                response = await synthesize(params)
         if len(response.content) <= 2_000_000:
             return {"kind": "audio", "src": "data:audio/mpeg;base64," + base64.b64encode(response.content).decode("ascii")}
     except Exception:

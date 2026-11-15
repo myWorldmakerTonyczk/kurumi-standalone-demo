@@ -1,3 +1,9 @@
+export const PORTAL_SESSION_EVENT = "kurumi-portal-session-update";
+
+export function signalPortalSessionChange() {
+  try { localStorage.setItem(PORTAL_SESSION_EVENT, String(Date.now())); } catch {}
+}
+
 export function createPortalBridge(getGame) {
   async function request(path, params = {}, body) {
     const query = new URLSearchParams(params);
@@ -9,7 +15,11 @@ export function createPortalBridge(getGame) {
     });
     if (response.status === 401) location.replace("/");
     const result = await response.json();
-    if (!response.ok) throw Error(result.error || "面板请求失败");
+    if (!response.ok) {
+      const error = Error(result.error || "面板请求失败");
+      error.status = response.status;
+      throw error;
+    }
     return result;
   }
 
@@ -27,6 +37,7 @@ export function createPortalBridge(getGame) {
     },
     async logout() {
       await request("logout", {}, {});
+      signalPortalSessionChange();
       location.replace("/");
     },
   };

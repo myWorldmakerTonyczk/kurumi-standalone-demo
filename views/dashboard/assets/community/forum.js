@@ -1,6 +1,7 @@
 /* Forum: search, tag filter, latest/hot sort, paged list, thread view, compose, comment, delete. */
 import {h, clear, append, formatTime, timeEl, parseTags, highlight, debounce, uid, isAbort} from "/assets/ui/dom.js";
 import {forumApi} from "/assets/ui/api.js";
+import {prepareImage} from "/assets/community/media.js";
 import {confirmAction, toast, stateBlock, skeleton, withBusy, bindCounter} from "/assets/ui/feedback.js";
 
 const PAGE_SIZE = 20;
@@ -108,14 +109,116 @@ export function createForum(ctx) {
     }
   }
 
+  function authorAvatar(author) {
+    const fallback = author.is_agent ? "avatar.png" : "user-avatar.svg";
+    const avatar = author.avatar || fallback;
+    const src = avatar.startsWith("data:image/webp;base64,") ? avatar : "/assets/" +
+      (["avatar.png", "neutral.png", "laugh.png", "user-avatar.svg"].includes(avatar) ? avatar : fallback);
+    return h("img", {class: "cm-author-avatar", src, alt: "", width: 28, height: 28, loading: "lazy"});
+  }
+
+  function renderMedia(media, inTitle = false) {
+    if (!["image", "sticker"].includes(media?.kind) || !media.src?.startsWith("data:image/webp;base64,")) return null;
+    const style = media.kind === "sticker" ? " is-sticker" : "";
+    return h("img", {class: "cm-media-img" + style + (inTitle ? " is-title" : ""),
+      src: media.src, alt: media.label || "图片", loading: "lazy"});
+  }
+
+  let stickerLibrary;
+  function getStickers() {
+    stickerLibrary ||= fetch("/api/stickers", {cache: "no-store"}).then(async response => {
+      if (!response.ok) throw Error("无法读取表情包库");
+      return (await response.json()).stickers || [];
+    }).catch(error => { stickerLibrary = null; throw error; });
+    return stickerLibrary;
+  }
+
+  function mediaInput(field, label, error) {
+    let media = null, revision = 0, pending = false;
+    const preview = h("div", {class: "cm-media-preview", hidden: true});
+    const menu = h("select", {hidden: true, "aria-label": label + "表情包"});
+    const pick = h("input", {type: "file", hidden: true, accept: "image/*", "aria-label": label + "图片"});
+    function set(value) {
+      media = value;
+      preview.hidden = !media;
+      preview.replaceChildren();
+      if (media) preview.append(renderMedia(media, true),
+        h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", onClick: clearMedia}, "移除"));
+    }
+    function clearMedia() {
+      revision++;
+      pending = false;
+      pick.value = "";
+      menu.hidden = true;
+      menu.replaceChildren();
+      set(null);
+    }
+    async function loadImage(file) {
+      if (!file) return;
+      const token = ++revision;
+      pending = true;
+      error.textContent = "";
+      try {
+        const src = await prepareImage(file);
+        if (token === revision) set({kind: "image", src});
+      } catch (failure) {
+        if (token === revision) error.textContent = failure.message || "图片无法读取";
+      } finally {
+        if (token === revision) pending = false;
+      }
+    }
+    pick.onchange = () => { loadImage(pick.files[0]); pick.value = ""; };
+    field.addEventListener("dragover", event => {
+      if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+    });
+    field.addEventListener("drop", event => {
+      const file = event.dataTransfer.files[0];
+      if (!file) return;
+      event.preventDefault();
+      loadImage(file);
+    });
+    const stickers = h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", onClick: async () => {
+      if (!menu.hidden) { menu.hidden = true; return; }
+      try {
+        const token = revision;
+        const items = await getStickers();
+        if (token !== revision) return;
+        menu.replaceChildren(h("option", {value: ""}, items.length ? "选择一个表情包" : "表情包库为空"),
+          ...items.map(item => h("option", {value: item.id}, item.label)));
+        menu.onchange = () => {
+          const item = items.find(entry => entry.id === menu.value);
+          if (!item) return;
+          revision++;
+          pending = false;
+          set({kind: "sticker", src: item.src, label: item.label, id: item.id});
+          menu.hidden = true;
+        };
+        menu.hidden = false;
+        menu.focus();
+      } catch (failure) { error.textContent = failure.message; }
+    }}, "表情包");
+    return {
+      element: h("div", {class: "cm-media-controls"}, pick,
+        h("div", {class: "cm-media-actions"},
+          h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", onClick: () => pick.click()}, "添加图片"), stickers),
+        menu, preview),
+      clear: clearMedia,
+      hasMedia: () => Boolean(media),
+      pending: () => pending,
+      payload: (prefix = "") => media?.kind === "image" ? {[prefix + "image"]: media.src}
+        : media ? {[prefix + "sticker_id"]: media.id} : {},
+    };
+  }
+
   function postRow(post) {
     const open = () => openPost(post.id);
-    const title = h("button", {type: "button", class: "cm-post-title", onClick: open, "aria-label": "查看帖子：" + post.title}, highlight(post.title, s.keyword));
+    const title = h("button", {type: "button", class: "cm-post-title", onClick: open, "aria-label": "查看帖子：" + (post.title || "媒体帖子")},
+      highlight(post.title || "", s.keyword), renderMedia(post.title_media, true));
     const row = h("article", {class: "cm-post" + (String(post.id) === s.newId ? " is-new" : ""), "data-id": String(post.id)},
       h("div", {class: "cm-post-head"}, badgesFor(post), h("h3", {}, title)),
       h("p", {class: "cm-post-body"}, highlight(post.body, s.keyword)),
       h("div", {class: "cm-post-meta"},
-        h("span", {}, post.nickname), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
+        authorAvatar(post), h("span", {}, post.nickname), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {}, "发布 ", timeEl(post.created)), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {}, "最近活跃 ", timeEl(post.last_activity)), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {class: "cm-count"}, `${post.comments} 条评论`)),
@@ -191,24 +294,29 @@ export function createForum(ctx) {
     bindCounter(body, count, POST_MAX);
     const error = h("p", {class: "ui-field-error", role: "alert"});
     const submit = h("button", {type: "submit", class: "ui-btn ui-btn-primary"}, "发布帖子");
+    const titleMedia = mediaInput(title, "标题", error), bodyMedia = mediaInput(body, "正文", error);
     const form = h("form", {class: "cm-compose", novalidate: true, onSubmit: async event => {
       event.preventDefault();
       error.textContent = "";
       const values = {title: title.value.trim(), body: body.value.trim()};
       const parsed = parseTags(tags.value);
-      const problem = !values.title ? "请填写标题" : !values.body ? "请填写正文" : parsed.error;
-      if (problem) { error.textContent = problem; (!values.title ? title : !values.body ? body : tags).focus(); return; }
+      if (submit.disabled || titleMedia.pending() || bodyMedia.pending()) return;
+      const missingTitle = !values.title && !titleMedia.hasMedia();
+      const missingBody = !values.body && !bodyMedia.hasMedia() && !titleMedia.hasMedia();
+      const problem = missingTitle ? "请填写标题或添加标题附件" : missingBody ? "请填写正文或添加附件" : parsed.error;
+      if (problem) { error.textContent = problem; (missingTitle ? title : missingBody ? body : tags).focus(); return; }
       try {
-        const result = await withBusy(submit, () => forumApi.create({title: values.title, body: values.body, tags: parsed.tags}), "发布中…");
-        form.reset(); count.textContent = `0 / ${POST_MAX}`;
+        const result = await withBusy(submit, () => forumApi.create({...values, tags: parsed.tags,
+          ...titleMedia.payload("title_"), ...bodyMedia.payload()}), "发布中…");
+        form.reset(); titleMedia.clear(); bodyMedia.clear(); count.textContent = `0 / ${POST_MAX}`;
         toast("帖子已发布", "success");
         s.keyword = ""; s.tag = ""; s.sort = "latest"; search.value = ""; s.newId = String(result.id);
         await loadList();
       } catch (failure) { error.textContent = failure.message; toast("发布失败：" + failure.message, "error"); }
     }},
-      h("label", {for: titleId}, "标题", title),
+      h("label", {for: titleId}, "标题", title), titleMedia.element,
       h("label", {for: tagsId}, "标签（选填）", tags),
-      h("label", {for: bodyId}, h("span", {class: "ui-label-row"}, "正文", count), body),
+      h("label", {for: bodyId}, h("span", {class: "ui-label-row"}, "正文", count), body), bodyMedia.element,
       error,
       h("p", {class: "ui-muted"}, "发布后所有社区成员可见。只有你自己能删除这篇帖子。"),
       submit);
@@ -221,7 +329,6 @@ export function createForum(ctx) {
   const isMine = post => Boolean(post.mine);
 
   function buildThread() {
-    T.back = h("button", {type: "button", class: "ui-btn ui-btn-quiet", onClick: backToList}, "← 返回帖子列表");
     T.head = h("div", {class: "cm-thread-head"});
     T.commentsHead = h("h3", {class: "cm-comments-title"}, "评论");
     T.comments = h("div", {class: "cm-comments", "aria-live": "polite"});
@@ -230,31 +337,96 @@ export function createForum(ctx) {
     bindCounter(area, count, COMMENT_MAX);
     const error = h("p", {class: "ui-field-error", role: "alert"});
     const submit = h("button", {type: "submit", class: "ui-btn ui-btn-primary"}, "发表评论");
+    const media = T.media = mediaInput(area, "评论", error);
+    const reply = h("span");
+    T.replyBar = h("div", {class: "cm-reply-toolbar", hidden: true}, reply,
+      h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: () => T.setReply(null)}, "取消回复"));
+    T.setReply = comment => {
+      T.reply = comment;
+      T.replyBar.hidden = !comment;
+      reply.textContent = comment ? "回复 @" + comment.nickname : "";
+    };
+    const suggestions = h("div", {class: "cm-reply-toolbar", hidden: true, "aria-label": "选择要提及的人"});
+    area.addEventListener("input", () => {
+      clear(suggestions); suggestions.hidden = true;
+      const end = area.selectionStart;
+      const match = /(?:^|\s)@([^@\s]*)$/.exec(area.value.slice(0, end));
+      if (!T.reply || !match) return;
+      const start = end - match[1].length;
+      const names = new Set([s.post?.nickname, ...s.comments.map(c => c.nickname)]);
+      for (const name of [...names].filter(name => name?.toLowerCase().includes(match[1].toLowerCase())).slice(0, 8)) {
+        suggestions.append(h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: () => {
+          area.setRangeText(name + " ", start, end, "end");
+          area.dispatchEvent(new Event("input")); area.focus();
+        }}, "@" + name));
+      }
+      suggestions.hidden = !suggestions.childElementCount;
+    });
     area.addEventListener("keydown", event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") form.requestSubmit(); });
     const form = h("form", {class: "cm-comment-form", novalidate: true, onSubmit: async event => {
       event.preventDefault();
       error.textContent = "";
       const text = area.value.trim();
-      if (!text) { error.textContent = "请填写评论内容"; area.focus(); return; }
+      if (submit.disabled || media.pending()) return;
+      if (!text && !media.hasMedia()) { error.textContent = "请填写评论或添加附件"; area.focus(); return; }
+      const postId = s.postId;
       try {
-        await withBusy(submit, () => forumApi.comment(s.postId, {body: text}), "发送中…");
+        const sent = await withBusy(submit, () => forumApi.comment(postId, {body: text, reply_to: T.reply?.id, ...media.payload()}), "发送中…");
+        if (postId !== s.postId) return;
+        media.clear();
         area.value = ""; count.textContent = `0 / ${COMMENT_MAX}`;
         toast("评论已发表", "success");
         await loadThread({silent: true});
-        T.comments.lastElementChild?.scrollIntoView({block: "nearest"});
+        T.setReply(null);
+        area.dispatchEvent(new Event("input"));
+        if (!T.comments.querySelector("details:not([open]) #" + CSS.escape("forum-comment-" + sent.id))) {
+          focusComment(sent.id);
+        }
       } catch (failure) { error.textContent = failure.message; toast("评论失败：" + failure.message, "error"); }
-    }}, h("div", {class: "ui-label-row"}, h("span", {}, "发表评论"), count), area, error,
+    }}, h("div", {class: "ui-label-row"}, h("span", {}, "发表评论"), count), T.replyBar, area, suggestions, media.element, error,
       h("div", {class: "cm-form-actions"}, h("span", {class: "ui-muted"}, "Ctrl + Enter 快速发送"), submit));
     T.form = form;
-    T.view = h("section", {class: "cm-thread", "aria-label": "帖子详情"}, T.back, T.head, T.commentsHead, T.comments, form);
+    T.view = h("section", {class: "cm-thread", "aria-label": "帖子详情"}, T.head, T.commentsHead, T.comments, form);
     T.info = h("section", {class: "cm-panel"});
   }
 
-  function commentRow(comment) {
+  const expanded = new Set();
+  function rootComment(comment, byId) {
+    while (comment.reply_to && byId.has(comment.reply_to)) comment = byId.get(comment.reply_to);
+    return comment.id;
+  }
+
+  function focusComment(id) {
+    const byId = new Map(s.comments.map(comment => [comment.id, comment]));
+    const target = byId.get(Number(id));
+    if (!target) return false;
+    expanded.add(rootComment(target, byId));
+    renderThread();
+    const row = document.getElementById("forum-comment-" + id);
+    row?.scrollIntoView({block: "center"});
+    row?.focus({preventScroll: true});
+    return Boolean(row);
+  }
+
+  function commentRow(comment, parent) {
+    const reply = h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", onClick: () => {
+      T.setReply(comment);
+      T.form.elements.body.focus();
+      T.form.elements.body.dispatchEvent(new Event("input"));
+    }}, "回复");
+    const like = h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", "aria-pressed": String(Boolean(comment.liked)),
+      onClick: async () => {
+        try {
+          await withBusy(like, () => forumApi.comment(s.postId, {action: "like", comment: comment.id, liked: !comment.liked}));
+          await loadThread({silent: true});
+        } catch (error) { toast(error.message, "error"); }
+      }}, "赞 " + (comment.likes || 0));
     const remove = comment.mine ? h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm ui-danger-text", onClick: () => removeComment(comment)}, "删除") : null;
-    return h("article", {class: "cm-comment" + (comment.mine ? " is-mine" : "")},
-      h("div", {class: "cm-comment-head"}, h("strong", {}, comment.nickname), comment.mine ? h("span", {class: "ui-badge"}, "我") : null, timeEl(comment.created), remove),
-      h("p", {}, comment.body));
+    return h("article", {id: "forum-comment-" + comment.id, tabindex: "-1", class: "cm-comment" + (comment.mine ? " is-mine" : "")},
+      h("div", {class: "cm-comment-head"}, authorAvatar(comment), h("strong", {}, comment.nickname), comment.mine ? h("span", {class: "ui-badge"}, "我") : null, timeEl(comment.created), remove),
+      parent ? h("small", {class: "ui-muted"}, "回复 @" + parent.nickname) : null,
+      comment.body ? h("p", {}, comment.body) : null, renderMedia(comment.media),
+      h("div", {class: "cm-reply-toolbar"}, reply, like));
   }
 
   function renderThread() {
@@ -277,18 +449,42 @@ export function createForum(ctx) {
       h("strong", {}, "引用交易复盘"), post.pair ? ` · ${post.pair}` : "",
       Number(post.reference_id) > 0 ? ` · 复盘截止 ${formatTime(post.reference_id)}` : "",
       h("span", {class: "ui-muted"}, " 数据来自作者的模拟账本，不代表真实收益。")) : null;
-    const title = h("h2", {tabindex: "-1", id: "cm-thread-title"}, post.title);
+    const title = h("h2", {tabindex: "-1", id: "cm-thread-title"}, post.title, renderMedia(post.title_media, true));
     append(clear(T.head), [
       h("div", {class: "cm-post-head"}, badgesFor(post)), title,
-      h("div", {class: "cm-post-meta"}, h("span", {}, post.nickname), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
+      h("div", {class: "cm-post-meta"}, authorAvatar(post), h("span", {}, post.nickname), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {title: formatTime(post.created)}, "发布于 ", timeEl(post.created))),
-      ref, h("div", {class: "cm-post-full"}, post.body),
+      ref, post.body ? h("div", {class: "cm-post-full"}, post.body) : null, renderMedia(post.media),
       post.tags?.length ? h("div", {class: "cm-tags"}, post.tags.map(tag =>
         h("button", {type: "button", class: "ui-chip ui-chip-sm", "aria-label": "查看标签：" + tag, onClick: () => { s.tag = tag; backToList({reload: true}); }}, tag))) : null]);
     T.commentsHead.textContent = `评论（${s.comments.length}）`;
     clear(T.comments);
     if (!s.comments.length) T.comments.append(stateBlock("empty", "还没有评论", {hint: "来写第一条吧。"}));
-    else T.comments.append(...s.comments.map(commentRow));
+    else {
+      const byId = new Map(s.comments.map(comment => [comment.id, comment]));
+      const branches = new Map();
+      for (const comment of s.comments) {
+        const rootId = rootComment(comment, byId);
+        if (!branches.has(rootId)) branches.set(rootId, []);
+        if (comment.id !== rootId) branches.get(rootId).push(comment);
+      }
+      for (const [rootId, replies] of branches) {
+        const open = expanded.has(rootId);
+        const branch = h("div", {class: "cm-comment-branch"}, commentRow(byId.get(rootId)));
+        if (replies.length) {
+          const thread = h("details", {class: "cm-comment-replies", open},
+            h("summary", {}, open ? "收起回复" : "查看 " + replies.length + " 条回复"),
+            replies.map(comment => commentRow(comment, byId.get(comment.reply_to))));
+          thread.addEventListener("toggle", () => {
+            if (thread.open) expanded.add(rootId);
+            else expanded.delete(rootId);
+            thread.firstElementChild.textContent = thread.open ? "收起回复" : "查看 " + replies.length + " 条回复";
+          });
+          branch.append(thread);
+        }
+        T.comments.append(branch);
+      }
+    }
     const mine = isMine(post);
     clear(T.info).append(h("h3", {}, "帖子信息"),
       h("dl", {class: "ui-dl"},
@@ -308,7 +504,7 @@ export function createForum(ctx) {
       const data = await forumApi.thread(s.postId, ctl.signal);
       if (ctl !== threadCtl) return;
       const comments = [...(data.entries || [])].reverse(); // backend sends newest first
-      const sig = JSON.stringify([data.post?.id, data.post?.title, comments.map(c => c.id), data.post?.pinned, data.post?.featured]);
+      const sig = JSON.stringify([data.post?.id, data.post?.title, comments.map(c => [c.id, c.likes, c.liked]), data.post?.pinned, data.post?.featured]);
       s.post = data.post; s.comments = comments; s.threadStatus = "ready";
       if (silent && sig === threadSig) return;
       threadSig = sig;
@@ -323,20 +519,28 @@ export function createForum(ctx) {
     }
   }
 
-  async function openPost(id) {
+  async function openPost(id, commentId) {
     s.view = "thread"; s.postId = String(id); s.lastOpened = String(id);
     s.post = null; s.comments = []; threadSig = "";
     if (!T.view) buildThread();
+    T.media.clear();
+    expanded.clear();
+    T.setReply(null);
+    T.form.reset();
+    T.form.elements.body.dispatchEvent(new Event("input"));
     renderAll();
+    ctx.onNavigate?.();
     await loadThread();
     root.querySelector("#cm-thread-title")?.focus({preventScroll: true});
     T.view.scrollIntoView({block: "start"});
+    if (commentId && !focusComment(commentId)) throw Error("无法定位这条评论，可能已被删除");
   }
 
   function backToList({reload = false} = {}) {
     threadCtl?.abort();
     s.view = "list";
     renderAll();
+    ctx.onNavigate?.();
     if (reload || s.status === "idle") loadList();
     const target = listBox.querySelector(`[data-id="${CSS.escape(s.lastOpened)}"] .cm-post-title`);
     (target || search).focus({preventScroll: true});
@@ -389,7 +593,8 @@ export function createForum(ctx) {
     activate() {
       if (!started) { started = true; renderAll(); loadList(); }
     },
-    openPost(id) { started = true; return openPost(id); },
+    openPost(id, commentId) { started = true; return openPost(id, commentId); },
+    canGoBack: () => s.view === "thread",
     /** Re-selecting the already-open 论坛 tab returns from a thread to the list. */
     home() { if (s.view === "thread") backToList(); },
     refresh: () => (s.view === "thread" ? loadThread() : loadList()),

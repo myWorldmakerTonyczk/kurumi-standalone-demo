@@ -1,6 +1,8 @@
 import sqlite3
 import unittest
 
+from aiohttp.web import HTTPNotFound
+
 from src.portal.community import Community
 
 
@@ -62,6 +64,51 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(groups[0]["members"], 1)
         self.assertEqual(groups[0]["messages"], 1)
 
+    def test_thread_replies_likes_and_inbox(self):
+        self.db.executescript("""
+            INSERT INTO sim_users VALUES('u2', '回复者'), ('u3', '旁观者');
+            CREATE TABLE games(id TEXT PRIMARY KEY, data TEXT);
+            INSERT INTO games VALUES('g', '{"owner_id":"u1"}'), ('g2', '{"owner_id":"u2"}');
+            CREATE TABLE demo_chat(id INTEGER PRIMARY KEY, game TEXT, role TEXT, content TEXT, created REAL);
+            INSERT INTO demo_chat VALUES(1,'g','assistant','收到',unixepoch()),
+                (2,'g2','assistant','别人的私聊',unixepoch());
+        """)
+        c = self.community
+        post = str(c.handle('u3', 'POST', '', {'title': '主题', 'body': '正文'})['id'])
+        root = c.handle('u1', 'POST', post, {'body': '评论'})['id']
+        reply = c.handle('u2', 'POST', post, {'body': '@测试用户 回复', 'reply_to': root})['id']
+        other_post = str(c.handle('u2', 'POST', '', {'title': '另一个主题', 'body': '正文'})['id'])
+        with self.assertRaises(ValueError):
+            c.handle('u2', 'POST', post, {'body': '无效评论', 'reply_to': '1'})
+        with self.assertRaises(HTTPNotFound):
+            c.handle('u2', 'POST', other_post, {'body': '跨帖子回复', 'reply_to': root})
+
+        like = {'action': 'like', 'comment': reply, 'liked': True}
+        c.handle('u1', 'POST', post, like)
+        c.handle('u1', 'POST', post, like)
+        entry = c.handle('u1', 'GET', post, {})['entries'][0]
+        self.assertEqual((entry['reply_to'], entry['likes'], entry['liked']), (root, 1, 1))
+        c.handle('u1', 'POST', post, dict(like, liked=False))
+        self.assertEqual(c.handle('u1', 'GET', post, {})['entries'][0]['likes'], 0)
+
+        room = str(c.groups('u2', 'POST', '', {'name': '测试群'})['id'])
+        c.groups('u1', 'POST', room, {'action': 'join'})
+        mention = c.groups('u2', 'POST', room, {'body': '@测试用户 来看看'})['id']
+        c.groups('u2', 'POST', room, {'body': '@测试用户甲 你也来看看'})
+        inbox = {(row['kind'], row['id']): row['unread'] for row in c.inbox('u1')}
+        self.assertEqual(inbox, {('private', 1): True, ('forum', reply): True, ('group', mention): True})
+        self.db.executescript("""
+            INSERT INTO demo_chat VALUES(3,'g','assistant','同组未读',unixepoch()),
+                (4,'g','assistant','之后到达的消息',unixepoch());
+        """)
+        c.mark_inbox_read('u1', 'private', 3)
+        self.assertEqual([row['id'] for row in c.inbox('u1', unread_only=True) if row['kind'] == 'private'], [4])
+        self.assertTrue(next(row['unread'] for row in c.inbox('u2') if row['kind'] == 'private'))
+        c.mark_inbox_read('u1', 'forum', reply)
+        self.assertFalse(next(row['unread'] for row in c.inbox('u1') if row['kind'] == 'forum'))
+        c.groups('u1', 'POST', room, {'action': 'leave'})
+        self.assertFalse(any(row['kind'] == 'group' for row in c.inbox('u1')))
+
     def test_thread_reports_comment_count(self):
         post = self.community.handle("u1", "POST", "", {"title": "标题", "body": "正文"})["id"]
         self.community.handle("u1", "POST", str(post), {"body": "评论"})
@@ -95,6 +142,11 @@ class CommunityTests(unittest.TestCase):
         detail = self.community.groups("u2", "GET", str(room), {})
         self.assertEqual(detail["group"]["unread"], 1)
         self.assertEqual(self.community.groups("u2", "GET", "", {})["groups"][0]["unread"], 1)
+        self.community.groups("u1", "POST", str(room), {"body": "读取过程中到达的消息"})
+        result = self.community.groups("u2", "POST", str(room), {
+            "action": "mark-read", "message_id": detail["entries"][0]["id"],
+        })
+        self.assertEqual(result["unread"], 1)
         self.community.groups("u2", "POST", str(room), {"action": "mark-read"})
         self.assertEqual(self.community.groups("u2", "GET", str(room), {})["group"]["unread"], 0)
         self.assertEqual(self.community.groups("u2", "GET", "", {})["groups"][0]["unread"], 0)

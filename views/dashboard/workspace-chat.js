@@ -1,3 +1,5 @@
+import {prepareImage} from "/assets/community/media.js";
+
 export function insertMention(field, name) {
   const start = field.selectionStart;
   const prefix = start && !/\s$/.test(field.value.slice(0, start)) ? " " : "";
@@ -87,8 +89,12 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
         <button type="button" data-close aria-label="收起聊天">×</button>
       </div>
       <div class="chat-log" role="log"></div>
-      <form><textarea aria-label="消息" name="message" rows="2" maxlength="2000" required placeholder="想和久留美聊什么？"></textarea>
-        <button type="submit" class="primary">发送</button></form>
+      <form>
+        <div class="chat-upload-preview" hidden><img alt="待发送图片"><button type="button" data-remove-image>移除</button></div>
+        <textarea aria-label="消息" name="message" rows="2" maxlength="2000" placeholder="输入消息或拖入图片"></textarea>
+        <div class="chat-composer-actions"><input type="file" accept="image/*" name="picture" hidden>
+          <button type="button" data-pick-image>图片</button><button type="submit" class="primary">发送</button></div>
+      </form>
       <p role="status"></p>
     </section>`;
   document.body.append(root);
@@ -120,7 +126,7 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     const mention = document.createElement("button");
     mention.type = "button";
     mention.className = "chat-mention";
-    mention.textContent = name;
+    mention.textContent = user || !identity.nickname ? name : name + "（" + identity.nickname + "）";
     mention.title = "提及 " + name;
     mention.onclick = () => insertMention(form.elements.message, name);
     speaker.append(img, mention);
@@ -137,19 +143,24 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     if (!response.ok) throw Error(result.error || "请求失败");
     return result;
   }
-  function add(role, content, attachments = []) {
+  function add(role, content, attachments = [], id) {
     const row = document.createElement("div");
     row.className = role === "user" ? "chat-user" : "chat-assistant";
     row.classList.add("chat-message");
+    if (id) {
+      row.id = "private-message-" + id;
+      row.tabIndex = -1;
+    }
     if (role === "user") row.textContent = content;
-    else markdown(row, content);
+    else if (content) markdown(row, content);
+    const images = [];
     for (const attachment of attachments) {
-      if (attachment.kind === "image" && attachment.src.startsWith("data:image/png;base64,")) {
+      if (attachment.kind === "image" && /^data:image\/(png|webp);base64,/.test(attachment.src)) {
         const image = document.createElement("img");
         image.className = "chat-attachment";
         image.src = attachment.src;
         image.alt = attachment.label;
-        row.append(image);
+        images.push(image);
       } else if (attachment.kind === "sticker" && attachment.src.startsWith("data:image/webp;base64,")) {
         const image = document.createElement("img");
         image.className = "chat-sticker";
@@ -169,8 +180,20 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
         row.append(link);
       }
     }
-    if (content || attachments.length) decorate(row, role === "user");
-    log.append(row);
+    const user = role === "user";
+    const hasBubble = Boolean(content || row.childNodes.length);
+    if (hasBubble) decorate(row, user);
+    if (hasBubble || !attachments.length) log.append(row);
+    for (const [index, image] of images.entries()) {
+      const media = document.createElement("div");
+      media.className = user ? "chat-image-message from-user" : "chat-image-message";
+      if (!hasBubble && index === 0) {
+        decorate(media, user);
+        if (id) { media.id = row.id; media.tabIndex = -1; }
+      }
+      media.append(image);
+      log.append(media);
+    }
     log.scrollTop = log.scrollHeight;
     return row;
   }
@@ -207,32 +230,45 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     launch.setAttribute("aria-expanded", "false");
     launch.focus();
   };
-  launch.onclick = async () => {
+  launch.onclick = () => open();
+  async function open(messageId) {
     windowBox.hidden = false;
     launch.hidden = true;
     launch.setAttribute("aria-expanded", "true");
     if (floatingPosition && !root.classList.contains("docked")) position(floatingPosition.left, floatingPosition.top);
     form.elements.message.focus();
     const gid = gameId();
-    if (gid === loadedGame || busy) return;
+    if (busy && messageId) throw Error("私聊正在加载，请稍后重试");
+    if (busy || (gid === loadedGame && !messageId)) return;
     busy = true;
-    form.querySelector("button").disabled = true;
+    form.querySelector('[type="submit"]').disabled = true;
     status.textContent = "正在读取聊天记录…";
     try {
       const data = await request("state", gid);
       updateIdentity(data);
       const {chat} = data;
+      if (messageId && !chat.some(message => message.id === messageId)) {
+        const {entry} = await request("chat-message", gid, undefined, {id: messageId});
+        chat.unshift(entry);
+      }
       log.replaceChildren();
       for (const message of chat) {
         const parts = message.role === "assistant" ? await splitReply(message.content) : [message.content];
-        parts.forEach((part, i) => add(message.role, part, i === 0 ? message.attachments : []));
+        parts.forEach((part, i) => add(message.role, part, i === 0 ? message.attachments : [], i === 0 ? message.id : undefined));
       }
       lastProactiveId = chat.at(-1)?.id ?? 0;
       loadedGame = gid;
       status.textContent = "";
-    } catch (error) { status.textContent = error.message; }
-    finally { busy = false; form.querySelector("button").disabled = false; }
-  };
+      if (messageId) {
+        const target = document.getElementById("private-message-" + messageId);
+        target?.scrollIntoView({block: "center"});
+        target?.focus({preventScroll: true});
+      }
+    } catch (error) {
+      status.textContent = error.message;
+      if (messageId) throw error;
+    } finally { busy = false; form.querySelector('[type="submit"]').disabled = false; }
+  }
   setInterval(async () => {
     const gid = gameId();
     if (busy || polling || document.hidden || !loadedGame || gid !== loadedGame ||
@@ -242,7 +278,7 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
       const {entries} = await request("proactive-chat", gid, undefined, {after: lastProactiveId});
       if (busy || gid !== loadedGame || gameId() !== gid) return;
       for (const entry of entries) {
-        add("assistant", entry.content);
+        add("assistant", entry.content, [], entry.id);
         lastProactiveId = entry.id;
       }
     } catch {
@@ -288,25 +324,57 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
   };
   window.addEventListener("kurumi-identity", () => request("state", gameId()).then(updateIdentity).catch(() => {}));
   request("state", gameId()).then(updateIdentity).catch(() => {});
+  const imagePreview = find(".chat-upload-preview"), picture = form.elements.picture;
+  let imageDraft = null, preparingImage = false;
+  function setImage(src) {
+    imageDraft = src;
+    imagePreview.hidden = !src;
+    const thumbnail = imagePreview.querySelector("img");
+    if (src) thumbnail.src = src;
+    else thumbnail.removeAttribute("src");
+  }
+  async function addImage(file) {
+    if (!file || busy || preparingImage) return;
+    preparingImage = true;
+    status.textContent = "";
+    try { setImage(await prepareImage(file)); }
+    catch (error) { status.textContent = error.message || "图片无法读取"; }
+    finally { preparingImage = false; }
+  }
+  find("[data-pick-image]").onclick = () => { if (!busy) picture.click(); };
+  find("[data-remove-image]").onclick = () => setImage(null);
+  picture.onchange = () => { addImage(picture.files[0]); picture.value = ""; };
+  form.addEventListener("dragover", event => {
+    if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+  });
+  form.addEventListener("drop", event => {
+    const file = event.dataTransfer.files[0];
+    if (!file) return;
+    event.preventDefault();
+    addImage(file);
+  });
   form.onsubmit = async event => {
     event.preventDefault();
     const message = form.elements.message.value.trim();
-    if (!message || busy) return;
+    const image = imageDraft;
+    if ((!message && !image) || busy || preparingImage) return;
     busy = true;
-    const button = form.querySelector("button");
+    const button = form.querySelector('[type="submit"]');
     button.disabled = true;
     form.reset();
-    const sent = add("user", message);
+    setImage(null);
+    const sent = add("user", message, image ? [{kind: "image", src: image, label: "用户图片"}] : []);
+    const sentImage = image ? log.lastElementChild : null;
     const pending = add("assistant", "");
     pending.classList.add("chat-typing");
     pending.setAttribute("aria-label", identity.agent_name + "正在回复");
     pending.append(...Array.from({length: 3}, () => document.createElement("span")));
     status.textContent = "";
     try {
-      const {reply, attachments} = await request("chat", gameId(), {message});
+      const {reply, attachments} = await request("chat", gameId(), {message, image: image || undefined});
       const parts = await splitReply(reply);
-      const minimum = identity.split_delay_min ?? 1;
-      const maximum = identity.split_delay_max ?? 1.5;
+      const minimum = identity.split_delay_min ?? 1.5;
+      const maximum = identity.split_delay_max ?? 3;
       for (const [index, part] of parts.entries()) {
         if (parts.length > 1 && maximum > 0) {
           const seconds = minimum + Math.random() * (maximum - minimum);
@@ -318,10 +386,12 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
       status.textContent = "";
     } catch (error) {
       sent.remove();
+      sentImage?.remove();
       pending.remove();
+      if (image) setImage(image);
       if (!form.elements.message.value) form.elements.message.value = message;
       status.textContent = error.message;
     } finally { busy = false; button.disabled = false; }
   };
-  return {setFull};
+  return {setFull, openMessage: open, launcher: launch};
 }
