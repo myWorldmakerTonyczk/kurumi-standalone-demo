@@ -33,6 +33,7 @@ from src.agent.call_logs import CallLogs
 from src.agent.stickers import Stickers
 from src.agent.memory import MEMORY_DAYS, Memory
 from src.portal.community import Community, community_image
+from src.portal.leaderboard import standings
 from src.external_agent.api import ExternalAgent
 from src.agent.model_registry import connections, model_client, public_models, retryable, selected, update as update_models
 from src.agent.decision_settings import settings as rest_settings
@@ -780,6 +781,13 @@ class Demo:
                 else:
                     raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST", "DELETE"])
                 return web.json_response({"ok": True}, headers=headers)
+            if action == "agent-leaderboard":
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                if request.method != "GET":
+                    raise web.HTTPMethodNotAllowed(request.method, ["GET"])
+                return web.json_response(standings(self, owner, request.query.get("board", "wealth")),
+                                         headers={"Cache-Control": "no-store"})
             if action == "community-summary" and request.method == "GET":
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()

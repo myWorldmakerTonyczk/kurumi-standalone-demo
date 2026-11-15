@@ -2,6 +2,7 @@ import { mountAgentMode } from "/assets/agent-mode.js";
 import {h, relativeTime} from "/assets/ui/dom.js";
 import {api} from "/assets/ui/api.js";
 import { mountCommunity } from "/assets/community.js";
+import {mountLeaderboard} from "/assets/community/leaderboard.js";
 import { createHome } from "/assets/home/home.js";
 import { mountChat } from "/assets/workspace-chat.js";
 import { mountPreferences } from "/assets/user-preferences.js";
@@ -1555,6 +1556,7 @@ if (bridge) {
     nav.firstElementChild.click();
     const switcher = document.querySelector(".workspace-switch");
     if (session.mode === "account") {
+      mountLeaderboard();
       communityView = mountCommunity(document.querySelector('[data-page="community"]'), {
         game: () => gid,
         pairs: () => state?.current?.game.pairs || [],
