@@ -181,8 +181,8 @@ class PortalAccounts:
                 username = base[:40-len(number)] + number
                 suffix += 1
             owner = resolve(self.db, {"type": "random", "values": []}, username)["owner_id"]
-            self.db.execute("INSERT INTO portal_accounts(owner,username,salt,verifier) VALUES(?,?,?,?)",
-                            (owner, username, salt, verifier))
+            self.db.execute("INSERT INTO portal_accounts(owner,username,salt,verifier,admin_password) VALUES(?,?,?,?,?)",
+                            (owner, username, salt, verifier, password))
         return owner
 
     async def login(self, username, password):

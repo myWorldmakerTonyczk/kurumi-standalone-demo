@@ -1,0 +1,9 @@
+.avatar-crop-dialog { width: min(540px, calc(100% - 28px)); max-height: 90vh; overflow: auto; padding: 22px; border: 1px solid #e5d6e4; border-radius: 18px; background: #fffafd; color: #482a43; }
+.avatar-crop-dialog::backdrop { background: #34253888; }
+.avatar-crop-dialog h2 { margin: 0; }
+.avatar-crop-dialog canvas { display: block; max-width: 100%; height: auto; margin: 14px auto; touch-action: none; cursor: move; border-radius: 8px; }
+.avatar-crop-dialog label { display: grid; gap: 4px; }
+.avatar-crop-dialog input[type=range] { width: 100%; accent-color: #873b63; }
+.avatar-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.avatar-crop-apply { background: #873b63; border-color: #873b63; color: #fff; }
+.avatar-crop-dialog button { padding: 8px 12px; border: 1px solid #e5d6e4; border-radius: 8px; cursor: pointer; }

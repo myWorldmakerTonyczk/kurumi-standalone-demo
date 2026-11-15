@@ -15,7 +15,7 @@ def build_tools(app, owner):
         """查询当前用户的有效长期记忆，按当前强度降序。
         list_tags=true 时列出当前账号可检索记忆中按关联记忆的最高当前强度列出前 100 个标签，忽略其他筛选条件。
         keyword 搜索记忆正文。tags 填多个标签时须全部匹配。
-        person 可填用户 ID、昵称、智能体名或 self（当前用户）。重名时用固定 ID 缩小范围。
+        person 可填用户 ID、昵称、智能体名、原作人物姓名或 self（当前用户）。重名时用固定 ID 缩小范围。
         start_date、end_date 按北京时间筛选创建日期，格式 YYYY-MM-DD，包含首尾两天。
         所有条件可组合或留空，limit 为 1～20。
         """
@@ -34,6 +34,7 @@ def build_tools(app, owner):
 
         names = {}
         if person.strip():
+            names.update({subject: (name,) for subject, name in app.memory.character_subjects().items()})
             for user in app.db.execute("SELECT id,nickname FROM sim_users"):
                 uid = user["id"]
                 names["self" if uid == owner else "user:" + uid] = (uid, user["nickname"])
@@ -47,6 +48,8 @@ def build_tools(app, owner):
         for row in app.memory.list(owner):
             subject = row["subject"]
             identities = (subject, subject.partition(":")[2], *names.get(subject, ()))
+            if row.get("permanent"):
+                identities += tuple(row["tags"])
             if person and all(person != value.casefold() for value in identities):
                 continue
             if (row["strength"] <= 0 or not start <= row["created"] < end
@@ -58,7 +61,11 @@ def build_tools(app, owner):
         entries = []
         for row in results[:max(1, min(20, limit))]:
             entry = {key: row[key] for key in ("id", "text", "subject", "kind", "tags", "strength")}
-            entry["user_id"] = owner if row["subject"] == "self" else row["subject"].partition(":")[2]
+            if row.get("permanent"):
+                entry["permanent"] = True
+                entry["person"] = row["name"]
+            else:
+                entry["user_id"] = owner if row["subject"] == "self" else row["subject"].partition(":")[2]
             entry["created_at"] = datetime.fromtimestamp(row["created"], BEIJING).isoformat(timespec="seconds")
             entries.append(entry)
         return dump({"entries": entries})

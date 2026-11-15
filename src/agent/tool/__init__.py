@@ -1,11 +1,11 @@
 """Tools for the authenticated workspace."""
 from random import random
 
-from . import community, delivery, images, memory, notifications, queries, stickers, trading
+from . import bulletins, community, delivery, images, memory, notifications, queries, stickers, trading
 
 
 def workspace_tools(app, gid, *, writable, revision, attachments=None, user_image=None):
-    tools = queries.build_tools(app, gid) + trading.build_tools(app, gid, writable, revision)
+    tools = [bulletins.build_tool(app)] + queries.build_tools(app, gid) + trading.build_tools(app, gid, writable, revision)
     if attachments is not None:
         tools += delivery.build_tools(app, gid, attachments) + community.build_tools(app, gid)
         owner = app.engine.get(gid)["owner_id"]

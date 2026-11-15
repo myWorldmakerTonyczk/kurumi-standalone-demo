@@ -17,7 +17,10 @@ export function badgesFor(post) {
   return out;
 }
 
+import {marketBulletin} from "/assets/home/bulletin.js";
+
 export function createForum(ctx) {
+  const officialBulletin = marketBulletin({compact: true});
   const root = h("div", {class: "cm-split"});
   const main = h("div", {class: "cm-main"});
   const side = h("section", {class: "cm-side", "aria-label": "发帖与帖子信息"});
@@ -50,7 +53,7 @@ export function createForum(ctx) {
   const listBox = h("div", {class: "cm-list", "aria-live": "polite"});
   const moreBox = h("div", {class: "cm-more"});
   const listView = h("section", {"aria-label": "帖子列表", class: "cm-listview"},
-    h("div", {class: "cm-toolbar"}, h("div", {class: "cm-search"}, search), sortBox), tagBox, filterNote, listBox, moreBox);
+    officialBulletin.panel, h("div", {class: "cm-toolbar"}, h("div", {class: "cm-search"}, search), sortBox), tagBox, filterNote, listBox, moreBox);
 
   let composing = false;
   const runSearch = debounce(() => {
@@ -210,18 +213,63 @@ export function createForum(ctx) {
     };
   }
 
+  function voteButtons(item, postId, comment = false) {
+    const positive = h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm"});
+    const negative = h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm"});
+    function update() {
+      positive.textContent = "赞 " + (item.likes || 0);
+      negative.textContent = "踩 " + (item.dislikes || 0);
+      positive.setAttribute("aria-label", "点赞 " + (item.likes || 0));
+      negative.setAttribute("aria-label", "点踩 " + (item.dislikes || 0));
+      positive.setAttribute("aria-pressed", String(item.vote === 1));
+      negative.setAttribute("aria-pressed", String(item.vote === -1));
+    }
+    async function cast(value) {
+      positive.disabled = negative.disabled = true;
+      try {
+        const vote = item.vote === value ? 0 : value;
+        const result = await forumApi.comment(postId, {action: "vote", vote, ...(comment ? {comment: item.id} : {})});
+        const {likes, dislikes, vote: selected} = result;
+        const stats = {likes, dislikes, vote: selected};
+        Object.assign(item, stats);
+        if (comment) {
+          const row = s.view === "thread" && s.postId === String(postId) && s.comments.find(entry => entry.id === item.id);
+          if (row) Object.assign(row, stats);
+        } else {
+          const listed = s.entries.find(entry => entry.id === item.id);
+          if (listed) Object.assign(listed, stats);
+          if (s.post?.id === item.id) Object.assign(s.post, stats);
+        }
+        update();
+        if (!positive.isConnected) {
+          if (s.view === "thread" && s.postId === String(postId)) renderThread();
+          else if (!comment && s.view === "list") renderList();
+        }
+      } catch (error) { toast(error.message, "error"); }
+      finally { positive.disabled = negative.disabled = false; }
+    }
+    positive.onclick = () => cast(1);
+    negative.onclick = () => cast(-1);
+    update();
+    return h("div", {class: "cm-reply-toolbar cm-votes", role: "group", "aria-label": comment ? "评论投票" : "帖子投票"},
+      positive, negative);
+  }
+
   function postRow(post) {
     const open = () => openPost(post.id);
     const title = h("button", {type: "button", class: "cm-post-title", onClick: open, "aria-label": "查看帖子：" + (post.title || "媒体帖子")},
-      highlight(post.title || "", s.keyword), renderMedia(post.title_media, true));
+      highlight(post.title || "", s.keyword));
+    const preview = renderMedia(post.title_media || post.media);
     const row = h("article", {class: "cm-post" + (String(post.id) === s.newId ? " is-new" : ""), "data-id": String(post.id)},
       h("div", {class: "cm-post-head"}, badgesFor(post), h("h3", {}, title)),
+      preview ? h("div", {class: "cm-post-preview"}, preview) : null,
       h("p", {class: "cm-post-body"}, highlight(post.body, s.keyword)),
       h("div", {class: "cm-post-meta"},
         authorAvatar(post), h("span", {}, post.nickname), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {}, "发布 ", timeEl(post.created)), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {}, "最近活跃 ", timeEl(post.last_activity)), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {class: "cm-count"}, `${post.comments} 条评论`)),
+      voteButtons(post, post.id),
       post.tags?.length ? h("div", {class: "cm-tags"}, post.tags.map(tag =>
         h("button", {type: "button", class: "ui-chip ui-chip-sm", "aria-pressed": String(s.tag === tag), "aria-label": "筛选标签：" + tag, onClick: event => { event.stopPropagation(); setTag(tag); }}, tag))) : null);
     row.addEventListener("click", event => { if (!event.target.closest("button, a")) open(); });
@@ -414,19 +462,12 @@ export function createForum(ctx) {
       T.form.elements.body.focus();
       T.form.elements.body.dispatchEvent(new Event("input"));
     }}, "回复");
-    const like = h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm", "aria-pressed": String(Boolean(comment.liked)),
-      onClick: async () => {
-        try {
-          await withBusy(like, () => forumApi.comment(s.postId, {action: "like", comment: comment.id, liked: !comment.liked}));
-          await loadThread({silent: true});
-        } catch (error) { toast(error.message, "error"); }
-      }}, "赞 " + (comment.likes || 0));
     const remove = comment.mine ? h("button", {type: "button", class: "ui-btn ui-btn-quiet ui-btn-sm ui-danger-text", onClick: () => removeComment(comment)}, "删除") : null;
     return h("article", {id: "forum-comment-" + comment.id, tabindex: "-1", class: "cm-comment" + (comment.mine ? " is-mine" : "")},
       h("div", {class: "cm-comment-head"}, authorAvatar(comment), h("strong", {}, comment.nickname), comment.mine ? h("span", {class: "ui-badge"}, "我") : null, timeEl(comment.created), remove),
       parent ? h("small", {class: "ui-muted"}, "回复 @" + parent.nickname) : null,
       comment.body ? h("p", {}, comment.body) : null, renderMedia(comment.media),
-      h("div", {class: "cm-reply-toolbar"}, reply, like));
+      h("div", {class: "cm-reply-toolbar"}, reply, voteButtons(comment, s.postId, true)));
   }
 
   function renderThread() {
@@ -455,6 +496,7 @@ export function createForum(ctx) {
       h("div", {class: "cm-post-meta"}, authorAvatar(post), h("span", {}, post.nickname), h("span", {class: "ui-dot", "aria-hidden": "true"}, "·"),
         h("span", {title: formatTime(post.created)}, "发布于 ", timeEl(post.created))),
       ref, post.body ? h("div", {class: "cm-post-full"}, post.body) : null, renderMedia(post.media),
+      voteButtons(post, post.id),
       post.tags?.length ? h("div", {class: "cm-tags"}, post.tags.map(tag =>
         h("button", {type: "button", class: "ui-chip ui-chip-sm", "aria-label": "查看标签：" + tag, onClick: () => { s.tag = tag; backToList({reload: true}); }}, tag))) : null]);
     T.commentsHead.textContent = `评论（${s.comments.length}）`;
@@ -504,7 +546,9 @@ export function createForum(ctx) {
       const data = await forumApi.thread(s.postId, ctl.signal);
       if (ctl !== threadCtl) return;
       const comments = [...(data.entries || [])].reverse(); // backend sends newest first
-      const sig = JSON.stringify([data.post?.id, data.post?.title, comments.map(c => [c.id, c.likes, c.liked]), data.post?.pinned, data.post?.featured]);
+      const voteState = item => [item?.id, item?.likes, item?.dislikes, item?.vote];
+      const sig = JSON.stringify([voteState(data.post), data.post?.title, comments.map(voteState),
+        data.post?.pinned, data.post?.featured]);
       s.post = data.post; s.comments = comments; s.threadStatus = "ready";
       if (silent && sig === threadSig) return;
       threadSig = sig;
@@ -591,6 +635,7 @@ export function createForum(ctx) {
   return {
     el: root,
     activate() {
+      officialBulletin.refresh();
       if (!started) { started = true; renderAll(); loadList(); }
     },
     openPost(id, commentId) { started = true; return openPost(id, commentId); },

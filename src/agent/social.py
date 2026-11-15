@@ -13,9 +13,11 @@ from aiohttp import web
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.core.engine import dump
+from .chat_debounce import ChatDebounce, debounce_config
 from .image_library import image_reference
 from .model_registry import model_client, selected
-from .workflow import workflow
+from .tool.bulletins import build_tool as build_bulletins_tool
+from .workflow import social_system_prompt, workflow
 
 log = logging.getLogger(__name__)
 ZONE = ZoneInfo("Asia/Shanghai")
@@ -68,6 +70,7 @@ class Social:
 
         self.running = set()
         self.chat_pending = Counter()
+        self.chat_batches = ChatDebounce()
         self.chat_received = {}
         self.db.execute("""CREATE TABLE IF NOT EXISTS agent_social_clock(
             owner TEXT REFERENCES sim_users(id) ON DELETE CASCADE,
@@ -88,18 +91,56 @@ class Social:
             WHERE a.room=?""", (room,))
         return self.decorate([dict(row) for row in rows])
 
+    def group_roster(self, room):
+        rows = self.db.execute("""SELECT m.owner,u.nickname,
+                EXISTS(SELECT 1 FROM community_group_agents a WHERE a.room=m.room AND a.owner=m.owner) AS agent
+            FROM community_group_members m JOIN sim_users u ON u.id=m.owner
+            WHERE m.room=? ORDER BY m.owner""", (room,))
+        roster = {}
+        for row in rows:
+            owner = row["owner"]
+            display = self.group_display_nickname(owner, row["nickname"])
+            roster[f"user:{owner}"] = {"type": "user", "name": display, "mention": "@" + display}
+            if row["agent"]:
+                agent = self.identity(owner)
+                roster[f"agent:{owner}"] = {
+                    "type": "agent", "name": agent, "owner_nickname": display, "owner_id": f"user:{owner}",
+                    "mention": f"@{agent}（{display}）",
+                }
+        return roster
+
+    @staticmethod
+    def group_mentions(text, roster):
+        aliases = {}
+        for member_id, member in roster.items():
+            labels = [member["mention"][1:]]
+            if member["type"] == "agent":
+                labels.extend((member["name"], f'{member["name"]}({member["owner_nickname"]})'))
+            for label in labels:
+                aliases.setdefault(label.casefold(), set()).add(member_id)
+        if not aliases or "@" not in text:
+            return []
+        labels = sorted(aliases, key=len, reverse=True)
+        pattern = re.compile(r"@(" + "|".join(map(re.escape, labels)) + r")(?=$|[\s，。！？、,.!?：:；;])", re.IGNORECASE)
+        return list(dict.fromkeys(
+            next(iter(ids)) for match in pattern.finditer(text)
+            if len(ids := aliases[match[1].casefold()]) == 1
+        ))
+
+    def group_display_nickname(self, owner, nickname):
+        duplicate = self.db.execute("""SELECT count(*) FROM sim_users
+            WHERE nickname=? COLLATE NOCASE AND id<?""", (nickname, owner)).fetchone()[0]
+        return nickname + (f"（{duplicate + 1}）" if duplicate else "")
+
     def decorate(self, entries):
         for entry in entries:
             owner = entry.pop("owner")
             profile = self.app.profile(owner)
-            if not entry["is_agent"]:
-                duplicate = self.db.execute("""SELECT count(*) FROM sim_users
-                    WHERE nickname=? COLLATE NOCASE AND id<?""", (entry["nickname"], owner)).fetchone()[0]
-                if duplicate:
-                    entry["nickname"] += f"（{duplicate + 1}）"
+            nickname = self.group_display_nickname(owner, entry["nickname"])
             if entry["is_agent"]:
                 entry["mention_name"] = self.identity(owner)
-                entry["nickname"] = "{}（{}）".format(entry["mention_name"], entry["nickname"])
+                nickname = f'{entry["mention_name"]}（{nickname}）'
+            entry["nickname"] = nickname
             entry["avatar"] = profile.get("agent_avatar", "avatar.png") if entry["is_agent"] else profile.get("avatar", "user-avatar.svg")
         return entries
 
@@ -149,35 +190,64 @@ class Social:
         return True
 
     async def close(self):
+        await self.chat_batches.close()
         tasks = list(self.tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def on_message(self, room, message_id):
-        message = self.db.execute("SELECT body,created,owner,is_agent FROM community_group_messages WHERE id=? AND room=?",
-                                  (message_id, room)).fetchone()
+        if not room:
+            return
+        room = int(room)
+        message = self.db.execute("""SELECT m.body,m.owner,m.is_agent,m.mentions,m.mention_depth,
+                q.owner AS reply_owner,q.is_agent AS reply_agent
+            FROM community_group_messages m LEFT JOIN community_group_messages q
+              ON q.id=m.reply_to AND q.room=m.room AND q.status='active'
+            WHERE m.id=? AND m.room=? AND m.status='active'""", (message_id, room)).fetchone()
         if not message:
             return
-        for row in self.db.execute("SELECT owner FROM community_group_agents WHERE room=?", (room,)):
-            owner = row[0]
-            if not self.joined(room, owner):
+        roster = self.group_roster(room)
+        if message["mentions"] is None:
+            mentions = self.group_mentions(message["body"], roster)
+            self.db.execute("UPDATE community_group_messages SET mentions=? WHERE id=?", (dump(mentions), message_id))
+        else:
+            mentions = json.loads(message["mentions"])
+        targets = set(mentions)
+        if message["reply_owner"]:
+            role = "agent" if message["reply_agent"] else "user"
+            targets.add(f'{role}:{message["reply_owner"]}')
+        agent_addressed = any(target.startswith("agent:") and target in roster for target in targets)
+        for member_id, member in roster.items():
+            if member["type"] != "agent":
                 continue
-            profile = self.app.profile(owner)
-            nickname = self.db.execute("SELECT nickname FROM sim_users WHERE id=?", (owner,)).fetchone()[0]
-            name = self.identity(owner)
-            labels = (f"{name}（{nickname}）", name)
-            mention = re.search(r"@(?:" + "|".join(map(re.escape, labels)) + r")(?=$|[\s，。！？、,.!?：:])", message["body"])
-            followup = self.db.execute("""SELECT 1 FROM community_group_messages
-                WHERE room=? AND owner=? AND is_agent=1 AND id<? AND created BETWEEN ? AND ?
-                LIMIT 1""", (room, owner, message_id, message["created"] - 5, message["created"])).fetchone() is not None
-            if mention or followup:
+            owner = member_id.partition(":")[2]
+            if message["is_agent"] and message["owner"] == owner:
+                continue
+            directed = member_id in targets
+            if directed:
                 self.app.remember_community(owner, message["owner"], message["body"], "group",
                                             stream=room, event=message_id, is_agent=bool(message["is_agent"]))
-            if not message["is_agent"] and (mention or followup or random.random() * 100 < profile.get("social", {}).get("probability", 50)):
-                self.submit(self.reply, owner, room, message_id, followup)
+            if message["is_agent"] and (
+                message["mention_depth"] >= 1 or not agent_addressed
+            ):
+                continue
+            profile = self.app.profile(owner)
+            config = debounce_config(profile.get("chat_debounce", {}))
+            quiet = config["group_quiet"] if config["enabled"] else 0
+            maximum = config["group_max"] if config["enabled"] else 0
+            self.chat_batches.enqueue(("group", owner, room), (message_id, directed),
+                                      quiet, maximum, self.group_batch)
 
-    async def reply(self, owner, room, message_id, followup=False):
+    async def group_batch(self, key, messages):
+        _, owner, room = key
+        directed = any(item[1] for item in messages)
+        probability = self.app.profile(owner).get("social", {}).get("probability", 50)
+        if directed or random.random() * 100 < probability:
+            await self.reply(owner, room, messages[-1][0], directed,
+                             incoming_ids=[message_id for message_id, _ in messages])
+
+    async def reply(self, owner, room, message_id, followup=False, *, incoming_ids=()):
         async with self.slots:
             try:
                 if not self.joined(room, owner):
@@ -186,16 +256,38 @@ class Social:
                 config = selected(profile)
                 if not config.get("key") or self.app.external.settings(owner)["mode"] != "platform":
                     return
-                rows = self.db.execute("""SELECT m.id,m.body,m.owner,m.is_agent,u.nickname,m.attachment FROM community_group_messages m
-                    JOIN sim_users u ON u.id=m.owner
-                    WHERE m.room=? AND m.id<=? AND m.status='active' ORDER BY m.id DESC LIMIT 16""",
-                    (room, message_id)).fetchall()
+                first_id = incoming_ids[0] if incoming_ids else message_id
+                rows = self.db.execute("""WITH history AS (
+                        SELECT * FROM community_group_messages
+                        WHERE room=? AND id<? AND status='active' ORDER BY id DESC LIMIT 15
+                    ), context AS (
+                        SELECT * FROM history UNION ALL
+                        SELECT * FROM community_group_messages WHERE room=? AND id BETWEEN ? AND ? AND status='active'
+                    )
+                    SELECT m.id,m.body,m.owner,m.is_agent,u.nickname,m.attachment,m.mentions,m.reply_to,
+                           q.owner AS reply_owner,q.is_agent AS reply_agent
+                    FROM context m JOIN sim_users u ON u.id=m.owner
+                    LEFT JOIN community_group_messages q ON q.id=m.reply_to AND q.room=m.room AND q.status='active'
+                    ORDER BY m.id DESC""",
+                    (room, first_id, room, first_id, message_id)).fetchall()
                 if not rows:
                     return
-                context = [{"name": self.identity(row["owner"]) if row["is_agent"] else row["nickname"],
-                            "subject": ("agent:" + row["owner"] if row["is_agent"] else
-                                        "self" if row["owner"] == owner else "user:" + row["owner"]),
-                            "message": row["body"]} for row in reversed(rows)]
+                roster = self.group_roster(room)
+                self_id = f"agent:{owner}"
+                context = []
+                for row in reversed(rows):
+                    role = "agent" if row["is_agent"] else "user"
+                    author_id = f'{role}:{row["owner"]}'
+                    author = dict(roster.get(author_id, {"type": role, "name": row["nickname"]}))
+                    if row["is_agent"] and author_id not in roster:
+                        author.update(name=self.identity(row["owner"]), owner_nickname=row["nickname"],
+                                      owner_id=f'user:{row["owner"]}')
+                    reply_role = "agent" if row["reply_agent"] else "user"
+                    reply_author = f'{reply_role}:{row["reply_owner"]}' if row["reply_owner"] else None
+                    context.append({"id": row["id"], "author": author | {"id": author_id, "is_self": author_id == self_id},
+                                    "text": row["body"], "reply_to": row["reply_to"], "reply_to_author": reply_author,
+                                    "mentions": json.loads(row["mentions"]) if row["mentions"] is not None
+                                    else self.group_mentions(row["body"], roster)})
                 has_images = False
                 for entry, row in zip(context, reversed(rows)):
                     ref = image_reference(json.loads(row["attachment"] or "null"), f"group:{room}:{row['id']}")
@@ -203,9 +295,9 @@ class Social:
                         entry["image"] = ref
                         has_images = True
                 task_prompt = workflow("group_followup" if followup else "group")
-                speaker = rows[0]["owner"]
                 model = model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "group_chat"))
-                prompt = (profile.get("persona") or self.app.default_persona) + "\n你的名字是 " + self.identity(owner) + "\n" + task_prompt
+                persona = self.app.agent_persona(owner, profile)
+                prompt = social_system_prompt(persona) + "\n" + task_prompt
                 portrait = []
                 if profile.get("chat_memory", {}).get("enabled", True):
                     subjects = ["self" if row["owner"] == owner else "user:" + row["owner"]
@@ -213,19 +305,39 @@ class Social:
                     portrait = self.app.memory.profiles.context(owner, f"group:{room}", subjects)
                     if portrait:
                         prompt += "\n" + workflow("private_memory_context")
-                attachment = json.loads(rows[0]["attachment"] or "null")
-                if attachment and attachment["kind"] == "image":
-                    from .vision import describe_image
+                from .vision import describe_image
 
-                    context[-1]["image_description"] = await describe_image(
-                        profile, attachment["src"], rows[0]["body"], self.app.model_url,
-                        audit=self.app.call_logs.callback(owner, "vision")
-                    )
+                incoming_ids = set(incoming_ids or (message_id,))
+                incoming = []
+                history = []
+                for entry, row in zip(context, reversed(rows)):
+                    if row["id"] not in incoming_ids:
+                        history.append(entry)
+                        continue
+                    attachment = json.loads(row["attachment"] or "null")
+                    if attachment and attachment["kind"] == "image":
+                        entry["image_description"] = await describe_image(
+                            profile, attachment["src"], row["body"], self.app.model_url,
+                            audit=self.app.call_logs.callback(owner, "vision"),
+                        )
+                    incoming.append(entry)
+                if not incoming:
+                    return
+                if any("image_description" in entry for entry in incoming):
                     prompt += "\n" + workflow("vision_context")
-                human = HumanMessage(content=dump({"history": context[:-1], "new_message": context[-1],
-                                                   "profiles": portrait}))
+                human = HumanMessage(content=dump({"you": roster[self_id] | {"id": self_id},
+                    "members": [member | {"id": member_id} for member_id, member in roster.items()],
+                    "history": history, "incoming_messages": incoming, "profiles": portrait}))
+
+                async def mention_group_member(member_id: str) -> str:
+                    """按 members 里的成员 ID 获取本群的正确 @ 写法。把返回的 mention 放入最终回复才会发送。"""
+                    member = roster.get(member_id)
+                    if not member or member_id == self_id:
+                        return dump({"error": "请选择当前群里的其他成员"})
+                    return dump({"member_id": member_id, "mention": member["mention"]})
+
                 attachments = []
-                tools = []
+                tools = [build_bulletins_tool(self.app), mention_group_member]
                 if has_images:
                     from .tool.images import build_tools
 
@@ -236,37 +348,46 @@ class Social:
 
                     tools.extend(sticker_tools(self.app, owner, attachments))
                     prompt += "\n" + workflow("private_sticker")
-                if tools:
-                    from langchain.agents import create_agent
+                from langchain.agents import create_agent
 
-                    agent = create_agent(model, tools=tools, system_prompt=prompt)
-                    result = (await agent.ainvoke({"messages": [human]}, config={"recursion_limit": 12}))["messages"][-1]
-                else:
-                    result = await model.ainvoke([SystemMessage(content=prompt), human])
+                agent = create_agent(model, tools=tools, system_prompt=prompt)
+                result = (await agent.ainvoke({"messages": [human]}, config={"recursion_limit": 12}))["messages"][-1]
                 content = result.text.strip()
                 if content != "[SKIP]" and (content or attachments):
-                    if self.send(owner, room, content, attachments[0] if attachments else None):
-                        self.app.remember_community(owner, speaker, rows[0]["body"], "group",
-                                                    stream=room, event=message_id)
+                    replying_to_agent = any(entry["author"]["type"] == "agent" for entry in incoming)
+                    if self.send(owner, room, content, attachments[0] if attachments else None,
+                                 mention_depth=int(replying_to_agent)):
+                        for row in rows:
+                            if row["id"] in incoming_ids:
+                                self.app.remember_community(owner, row["owner"], row["body"], "group",
+                                    stream=room, event=row["id"], is_agent=bool(row["is_agent"]))
             except Exception:
                 log.exception("Group agent reply failed")
 
-    def send(self, owner, room, content, attachment=None):
+    def send(self, owner, room, content, attachment=None, *, mention_depth=0):
         if self.joined(room, owner) and self.app.external.settings(owner)["mode"] == "platform":
-            cursor = self.db.execute("INSERT INTO community_group_messages(room,owner,body,is_agent,created,attachment) VALUES(?,?,?,1,?,?)",
-                            (room, owner, content[:1500], time.time(), dump(attachment) if attachment else None))
+            content = content[:1500]
+            mentions = self.group_mentions(content, self.group_roster(room))
+            cursor = self.db.execute("""INSERT INTO community_group_messages
+                (room,owner,body,is_agent,created,attachment,mentions,mention_depth) VALUES(?,?,?,1,?,?,?,?)""",
+                (room, owner, content, time.time(), dump(attachment) if attachment else None, dump(mentions), mention_depth))
             self.on_message(room, cursor.lastrowid)
             return True
         return False
 
     async def run_patrol(self, owner):
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import ModelCallLimitMiddleware
+        from langgraph.errors import GraphRecursionError
+
         async with self.slots:
             try:
-                from langchain.agents import create_agent
                 profile = self.app.profile(owner)
                 config = selected(profile)
                 if not config.get("key") or self.app.external.settings(owner)["mode"] != "platform":
                     return
+
+                published = False
 
                 async def market() -> str:
                     """查看当前公开外汇报价。"""
@@ -277,7 +398,10 @@ class Social:
                     """list 看帖子列表，read 按 post_id 看原帖和评论，stickers 看表情包。
                     回应原帖用 comment 并传 post_id，回复评论时再传 reply_to。publish 仅用于独立新帖。
                     """
+                    nonlocal published
                     try:
+                        if action in ("comment", "publish") and published:
+                            return "本次巡视已完成一次公开发言，请结束。"
                         if action == "stickers":
                             return dump(self.forum_stickers(owner))
                         if action == "list":
@@ -291,20 +415,27 @@ class Social:
                             })
                         if self.app.external.settings(owner)["mode"] == "platform":
                             if action == "comment" and post_id > 0:
-                                return dump(self.app.community.handle(owner, "POST", str(post_id), {
+                                result = self.app.community.handle(owner, "POST", str(post_id), {
                                     "body": body, "sticker_id": sticker_id, "reply_to": reply_to or None,
-                                }, is_agent=True))
+                                }, is_agent=True)
+                                published = True
+                                return dump(result)
                             if action == "publish" and not (post_id or reply_to):
-                                return dump(self.app.community.handle(owner, "POST", "", {
+                                result = self.app.community.handle(owner, "POST", "", {
                                     "title": title, "body": body, "sticker_id": sticker_id,
                                     "title_sticker_id": title_sticker_id,
-                                }, is_agent=True))
+                                }, is_agent=True)
+                                published = True
+                                return dump(result)
                         return "操作无效。回应已有帖子请使用 comment 并指定原帖 post_id。"
                     except (ValueError, web.HTTPException) as exc:
                         return dump({"ok": False, "error": getattr(exc, "reason", str(exc))})
 
                 async def group(action: str, room: str = "", body: str = "") -> str:
                     """列出已加入的群聊、读群或发言。action 是 list、read 或 send。"""
+                    nonlocal published
+                    if action == "send" and published:
+                        return "本次巡视已完成一次公开发言，请结束。"
                     if action == "list":
                         return dump([dict(row) for row in self.db.execute("""SELECT g.id,g.name FROM community_groups g
                             JOIN community_group_agents a ON a.room=g.id WHERE a.owner=?""", (owner,))])
@@ -315,14 +446,18 @@ class Social:
                         return dump([dict(name=self.identity(row["owner"]) if row["is_agent"] else row["nickname"],
                                           message=row["body"]) for row in reversed(data["entries"][:12])])
                     if action == "send" and body.strip():
-                        return "已发送" if self.send(owner, room, body.strip()) else "智能体已离开"
+                        published = self.send(owner, room, body.strip())
+                        return "已发送，请结束本次巡视" if published else "智能体已离开"
                     return "操作无效"
 
-                agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")), tools=[market, forum, group],
-                    system_prompt=(profile.get("persona") or self.app.default_persona) + "\n" + workflow("patrol")
+                agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")), tools=[market, forum, group, build_bulletins_tool(self.app)],
+                    middleware=[ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
+                    system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("patrol")
                     + "\n" + workflow("forum_authorship"))
                 await agent.ainvoke({"messages": [HumanMessage(content=datetime.now(ZONE).isoformat())]},
-                                    config={"recursion_limit": 8})
+                                    config={"recursion_limit": 48})
+            except GraphRecursionError:
+                log.warning("巡视达到流程步数上限，已结束本次巡视")
             except Exception:
                 log.exception("Agent patrol failed")
 
@@ -331,16 +466,46 @@ class Social:
             AND id > COALESCE((SELECT max(id) FROM demo_chat WHERE game=? AND role='user'),0)""",
             (gid, gid)).fetchone()[0]
 
-    async def user_chat(self, game, message, attachments, *, user_image=None):
-        gid = game["id"]
-        self.chat_received[gid] = time.time()
+    async def user_chat(self, game, message, *, user_image=None):
+        gid, owner = game["id"], game["owner_id"]
+        config = debounce_config(self.app.profile(owner).get("chat_debounce", {}))
+        now = time.time()
+        stored = self.db.execute("""INSERT INTO demo_chat(game,role,content,created,attachments)
+            VALUES(?,?,?,?,?)""", (gid, "user", message, now, dump([user_image] if user_image else [])))
+        self.chat_received[gid] = now
         self.chat_pending[gid] += 1
+        future = asyncio.get_running_loop().create_future()
+        quiet = config["private_quiet"] if config["enabled"] else 0
+        maximum = config["private_max"] if config["enabled"] else 0
+        self.chat_batches.enqueue(("private", gid), (game, stored.lastrowid, message, user_image, future),
+                                  quiet, maximum, self.private_batch)
         try:
-            return await self.app.agent(game, message, attachments=attachments, user_image=user_image)
+            return await future
         finally:
             self.chat_pending[gid] -= 1
             if not self.chat_pending[gid]:
                 del self.chat_pending[gid]
+
+    async def private_batch(self, key, items):
+        game = items[0][0]
+        messages = [(message_id, text, image) for _, message_id, text, image, _ in items]
+        attachments, entry = [], {}
+        try:
+            reply = await self.app.agent(game, "\n".join(item[1] for item in messages),
+                                         attachments=attachments, chat_messages=messages, reply_entry=entry)
+        except asyncio.CancelledError:
+            for *_, future in items:
+                future.cancel()
+            raise
+        except Exception as error:
+            for *_, future in items:
+                if not future.done():
+                    future.set_exception(error)
+        else:
+            recipient = next((item[-1] for item in reversed(items) if not item[-1].done()), None)
+            for *_, future in items:
+                if not future.done():
+                    future.set_result((reply, attachments, entry) if future is recipient else ("", [], {}))
 
     def direct_activity(self, gid):
         latest = self.db.execute(
@@ -368,7 +533,8 @@ class Social:
                 history = [dict(row) for row in self.db.execute(
                     "SELECT role,content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 8", (gid,))]
                 reply = await model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")).ainvoke([
-                    SystemMessage(content=(profile.get("persona") or self.app.default_persona) + "\n" + workflow("proactive")),
+                    SystemMessage(content=social_system_prompt(self.app.agent_persona(owner, profile))
+                                  + "\n" + workflow("proactive")),
                     HumanMessage(content=dump({"time": datetime.now(ZONE).isoformat(), "history": history[::-1]})),
                 ])
                 content = reply.text.strip()

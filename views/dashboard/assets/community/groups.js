@@ -1,6 +1,6 @@
 import {prepareImage} from "/assets/community/media.js";
 /* Group chat: list with unread, join/leave/dissolve, members with inferred presence, messages, mark-read, AI summary. */
-import {h, clear, append, formatTime, clockTime, timeEl, relativeTime, uid, isAbort} from "/assets/ui/dom.js";
+import {h, clear, append, formatTime, chatTimeMarker, timeEl, relativeTime, uid, isAbort} from "/assets/ui/dom.js";
 import {groupApi, aiApi} from "/assets/ui/api.js";
 import {confirmAction, toast, stateBlock, skeleton, withBusy, bindCounter} from "/assets/ui/feedback.js";
 
@@ -343,11 +343,10 @@ export function createGroups(ctx) {
       attachment.kind === "sticker" ? "长按引用表情包" : "长按引用图片");
     const bubble = message.body ? bindLongPress(h("p", {class: "gr-msg-body"}, message.body),
       () => selectQuote(message, false), "长按引用消息") : null;
-    return h("article", {id: "group-message-" + message.id, tabindex: "-1", class: "gr-msg" + (mine ? " is-mine" : "")},
+    return h("article", {id: "group-message-" + message.id, title: formatTime(message.created), tabindex: "-1", class: "gr-msg" + (mine ? " is-mine" : "")},
       h("div", {class: "gr-msg-head"}, avatar,
         h("strong", {}, mine ? "我" : message.nickname),
-        message.is_agent ? h("span", {class: "ui-badge"}, "智能体") : null,
-        h("time", {datetime: new Date(message.created * 1000).toISOString(), title: formatTime(message.created)}, clockTime(message.created))),
+        message.is_agent ? h("span", {class: "ui-badge"}, "智能体") : null),
       quoteBlock(message.quote), bubble, media);
   }
 
@@ -368,14 +367,21 @@ export function createGroups(ctx) {
     if (s.hasOlder && R.older.parentNode !== el) el.prepend(R.older);
     if (!s.hasOlder) R.older.remove();
     let next = s.hasOlder ? R.older.nextElementSibling : el.firstElementChild;
+    let previous;
     for (const message of s.messages) {
+      let entry;
       if (next?.dataset.messageId === String(message.id)) {
+        entry = next;
         next = next.nextElementSibling;
       } else {
-        const row = messageRow(message);
-        row.dataset.messageId = String(message.id);
-        el.insertBefore(row, next);
+        entry = h("div", {class: "gr-message-entry", "data-message-id": String(message.id)}, messageRow(message));
+        el.insertBefore(entry, next);
       }
+      const marker = chatTimeMarker(message.created, previous);
+      const existing = entry.querySelector("time.chat-time-marker");
+      if (marker && !existing) entry.prepend(marker);
+      if (!marker) existing?.remove();
+      previous = message.created;
     }
     while (next) {
       const old = next;
@@ -411,13 +417,13 @@ export function createGroups(ctx) {
     const key = [isOwner, unread > 0, s.summaryStatus === "loading", Boolean(ctx.game())].join();
     if (key === actionSig) return;
     actionSig = key;
-    const markRead = h("button", {type: "button", class: "ui-btn ui-btn-sm", disabled: unread === 0, onClick: event => markAllRead(event.currentTarget)}, "标记已读");
+    const fullscreen = h("button", {type: "button", class: "ui-btn ui-btn-sm gr-fullscreen", onClick: ctx.onFullscreen}, "全屏");
     const summary = h("button", {type: "button", class: "ui-btn ui-btn-sm", disabled: s.summaryStatus === "loading" || !ctx.game(),
       title: ctx.game() ? "" : "需要先创建模拟交易才能使用 AI 功能", onClick: () => runSummary()}, "AI 群聊摘要");
     const leave = isOwner
       ? h("button", {type: "button", class: "ui-btn ui-btn-sm ui-btn-danger-outline", onClick: dissolve}, "解散群聊")
       : h("button", {type: "button", class: "ui-btn ui-btn-sm ui-btn-danger-outline", onClick: leaveRoom}, "退出群聊");
-    clear(R.actions).append(markRead, summary, leave);
+    clear(R.actions).append(fullscreen, summary, leave);
   }
 
   function renderRoomParts({stick = false} = {}) {

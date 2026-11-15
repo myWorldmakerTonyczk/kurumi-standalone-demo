@@ -3,6 +3,7 @@
 import {h, clear, append, formatTime, money, uid, isAbort} from "/assets/ui/dom.js";
 import {aiApi, communityApi} from "/assets/ui/api.js";
 import {stateBlock, skeleton} from "/assets/ui/feedback.js";
+import {marketBulletin} from "/assets/home/bulletin.js";
 import {loadProfile} from "/assets/ui/session.js";
 
 const SIDE = {buy: "做多", sell: "做空"};
@@ -250,7 +251,8 @@ export function createHome(root, ctx) {
 
   /* ---------- assembly ---------- */
   const main = h("div", {class: "hm-main"}, account, positions, recent);
-  const side = h("div", {class: "hm-side"}, risks, summary, comSection);
+  const bulletin = marketBulletin();
+  const side = h("div", {class: "hm-side"}, risks, bulletin.panel, summary, comSection);
   const empty = h("div", {class: "hm-empty", hidden: true}, stateBlock("loading", "正在读取账户…"));
   const grid = h("div", {class: "hm-grid"}, main, side);
   root.replaceChildren(h("div", {class: "hm"}, empty, grid));
@@ -273,6 +275,7 @@ export function createHome(root, ctx) {
       grid.hidden = !ready; empty.hidden = ready;
       if (!ready) return;
       syncPairs(selected.game);
+      if (opened && !root.hidden) bulletin.refresh();
       const sig = JSON.stringify([selected.game, selected.valuation, selected.logs, selected.market_error, state.market_closed, state.automatic_break, ctx.unread()]);
       stamp.textContent = "更新于 " + nowText();
       if (sig === lastSig) return;
@@ -286,6 +289,7 @@ export function createHome(root, ctx) {
     async open() {
       if (!opened) { opened = true; renderSummary(); renderCommunity(); }
       loadCommunity();
+      bulletin.refresh(true);
       try {
         const profile = await loadProfile();
         sum.auto = !profile.modelReady;

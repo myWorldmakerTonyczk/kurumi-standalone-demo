@@ -9,7 +9,8 @@
     <link rel="stylesheet" href="/assets/ui/ui.css" />
     <link rel="stylesheet" href="/assets/community/community.css" />
     <link rel="stylesheet" href="/assets/home/home.css" />
-  </head>
+    <link rel="stylesheet" href="/assets/ui/avatar-crop.css">
+</head>
   <body>
     <div class="workspace">
       <aside>
@@ -35,6 +36,7 @@
           <button data-settings-anchor="users">用户与权限</button>
           <button data-settings-anchor="api">行情连接</button>
           <button data-settings-anchor="portal">用户面板</button>
+          <button data-settings-anchor="bulletin">市场播报</button>
         </nav>
         <div class="aside-note">
           真实行情<br />虚拟资金<br /><strong>让她自己试试看。</strong>
@@ -478,6 +480,7 @@
             <button type="button" data-settings-tab="users">用户与权限</button>
             <button type="button" data-settings-tab="api">行情连接</button>
             <button type="button" data-settings-tab="portal">用户面板</button>
+            <button type="button" data-settings-tab="bulletin">市场播报</button>
           </nav>
           <div data-settings-page="users">
             <section class="panel" id="access-scaffold">
@@ -640,6 +643,7 @@
               <p id="portal-link-status" class="caption" role="status">保存 HTTPS 地址后可检查浏览器到远程面板的连接。</p>
             </section>
           </div>
+          <div data-settings-page="bulletin" hidden></div>
           <div data-settings-page="diary" hidden>
               <section class="panel" id="diary-settings-panel">
                 <h3>她的每日小记</h3>

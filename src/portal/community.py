@@ -70,6 +70,10 @@ class Community:
         CREATE TABLE IF NOT EXISTS community_comment_likes(
           comment INTEGER REFERENCES community_messages(id) ON DELETE CASCADE,
           owner TEXT REFERENCES sim_users(id) ON DELETE CASCADE, PRIMARY KEY(comment,owner));
+        CREATE TABLE IF NOT EXISTS community_post_votes(
+          post INTEGER REFERENCES community_posts(id) ON DELETE CASCADE,
+          owner TEXT REFERENCES sim_users(id) ON DELETE CASCADE,
+          vote INTEGER NOT NULL CHECK(vote IN (-1,1)), PRIMARY KEY(post,owner));
         CREATE TABLE IF NOT EXISTS community_inbox_seen(
           owner TEXT REFERENCES sim_users(id) ON DELETE CASCADE,
           kind TEXT, source INTEGER, PRIMARY KEY(owner,kind,source));
@@ -105,6 +109,7 @@ class Community:
                 "reference_id": "TEXT NOT NULL DEFAULT ''", "pair": "TEXT NOT NULL DEFAULT ''",
             },
             "community_messages": {"reply_to": "INTEGER", "status": "TEXT NOT NULL DEFAULT 'active'", "is_agent": "INTEGER NOT NULL DEFAULT 0", "media": "TEXT"},
+            "community_comment_likes": {"vote": "INTEGER NOT NULL DEFAULT 1 CHECK(vote IN (-1,1))"},
             "community_groups": {"private": "INTEGER NOT NULL DEFAULT 0", "created": "REAL NOT NULL DEFAULT (unixepoch())"},
             "community_group_members": {
                 "role": "TEXT NOT NULL DEFAULT 'member'", "joined": "REAL NOT NULL DEFAULT (unixepoch())",
@@ -112,7 +117,9 @@ class Community:
             },
             "community_group_messages": {"is_agent": "INTEGER NOT NULL DEFAULT 0", "status": "TEXT NOT NULL DEFAULT 'active'",
                                          "attachment": "TEXT", "reply_to": "INTEGER",
-                                         "reply_media": "INTEGER NOT NULL DEFAULT 0"},
+                                         "reply_media": "INTEGER NOT NULL DEFAULT 0",
+                                         "mentions": "TEXT",
+                                         "mention_depth": "INTEGER NOT NULL DEFAULT 0"},
         }
         for table, columns in migrations.items():
             existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
@@ -235,6 +242,7 @@ class Community:
                 rows = self.db.execute(f"""
                   SELECT p.id,p.title,substr(p.body,1,220) AS body,p.body AS full_body,p.created,p.updated,
                     p.tags,p.pinned,p.featured,p.reference_type,p.reference_id,p.pair,p.owner,p.is_agent,p.owner=? AS mine,u.nickname,p.title_media,
+                    CASE WHEN p.title_media IS NULL THEN p.media END AS media,
                     (SELECT count(*) FROM community_messages WHERE post=p.id AND status='active') AS comments,
                     coalesce((SELECT max(created) FROM community_messages WHERE post=p.id AND status='active'),p.updated,p.created) AS last_activity
                   FROM community_posts p JOIN sim_users u ON u.id=p.owner
@@ -245,17 +253,19 @@ class Community:
                 for row in rows[:limit]:
                     item = self._post_dict(row)
                     item.pop("full_body", None)
+                    item.update(self.vote_stats(owner, row["id"]))
                     entries.append(item)
                 return {"entries": entries, "next_before": entries[-1]["id"] if has_more and entries else None,
                         "has_more": has_more}
             rows = self.db.execute("""
                   SELECT m.id,m.body,m.created,u.nickname,m.owner,m.is_agent,m.owner=? AS mine,m.media,m.reply_to,
-                         (SELECT count(*) FROM community_comment_likes WHERE comment=m.id) AS likes,
-                         EXISTS(SELECT 1 FROM community_comment_likes WHERE comment=m.id AND owner=?) AS liked
+                         (SELECT count(*) FROM community_comment_likes WHERE comment=m.id AND vote=1) AS likes,
+                         (SELECT count(*) FROM community_comment_likes WHERE comment=m.id AND vote=-1) AS dislikes,
+                         coalesce((SELECT vote FROM community_comment_likes WHERE comment=m.id AND owner=?),0) AS vote
                   FROM community_messages m JOIN sim_users u ON u.id=m.owner
                   WHERE m.post IS ? AND m.status='active' ORDER BY m.id DESC
                 """, (owner, owner, int(post) if post else None)).fetchall()
-            return {"entries": [dict(row, media=_json(row["media"], None)) for row in rows]}
+            return {"entries": [dict(row, media=_json(row["media"], None), liked=row["vote"] == 1) for row in rows]}
         if method == "DELETE":
             comment = query.get("comment")
             if comment:
@@ -271,15 +281,32 @@ class Community:
             return {"ok": True}
         if method != "POST":
             raise web.HTTPMethodNotAllowed(method, ["GET", "POST", "DELETE"])
-        if post and body.get("action") == "like":
-            comment = self._reply_target(post, body.get("comment"))
-            if not comment or type(body.get("liked")) is not bool:
-                raise ValueError("点赞参数无效")
-            if body["liked"]:
-                self.db.execute("INSERT OR IGNORE INTO community_comment_likes VALUES(?,?)", (comment, owner))
+        if body.get("action") in ("vote", "like"):
+            if not post:
+                raise ValueError("请指定帖子")
+            comment = self._reply_target(post, body["comment"]) if "comment" in body else None
+            if "comment" in body and comment is None:
+                raise ValueError("请指定评论")
+            if body["action"] == "like":
+                if comment is None or type(body.get("liked")) is not bool:
+                    raise ValueError("点赞参数无效")
+                if not body["liked"]:
+                    self.db.execute("DELETE FROM community_comment_likes WHERE comment=? AND owner=? AND vote=1",
+                                    (comment, owner))
+                    return {"ok": True, **self.vote_stats(owner, comment, comment=True)}
+                vote = 1
             else:
-                self.db.execute("DELETE FROM community_comment_likes WHERE comment=? AND owner=?", (comment, owner))
-            return {"ok": True}
+                vote = body.get("vote")
+                if type(vote) is not int or vote not in (-1, 0, 1):
+                    raise ValueError("投票值须为 -1、0 或 1")
+            table, key = self._vote_target(comment is not None)
+            target = int(post) if comment is None else comment
+            if vote:
+                self.db.execute(f"""INSERT INTO {table}({key},owner,vote) VALUES(?,?,?)
+                    ON CONFLICT({key},owner) DO UPDATE SET vote=excluded.vote""", (target, owner, vote))
+            else:
+                self.db.execute(f"DELETE FROM {table} WHERE {key}=? AND owner=?", (target, owner))
+            return {"ok": True, **self.vote_stats(owner, target, comment=comment is not None)}
         content = body.get("body", "")
         media = self.forum_media(owner, body)
         title_media = self.forum_media(owner, body, "title_") if post == "" else None
@@ -353,14 +380,19 @@ class Community:
         """, (owner, owner, owner, unread_only, owner)).fetchall()
         group = self.db.execute("""
             SELECT 'group' AS kind,m.id,m.owner,m.is_agent,u.nickname,m.body,m.created,
-                   m.room AS target,g.name AS label
+                   m.room AS target,g.name AS label,m.mentions
             FROM community_group_members gm JOIN community_groups g ON g.id=gm.room
             JOIN community_group_messages m ON m.room=g.id JOIN sim_users u ON u.id=m.owner
             WHERE gm.owner=? AND m.status='active' AND (m.owner<>? OR m.is_agent) AND m.created>=gm.joined
               AND instr(m.body, '@')>0
             ORDER BY m.id DESC LIMIT 1000
         """, (owner, owner)).fetchall()
-        entries = sorted([*forum, *private, *(row for row in group if mention.search(row["body"]))],
+        group_mentions = []
+        for row in group:
+            targets = _json(row["mentions"], None)
+            if (f"user:{owner}" in targets if targets is not None else mention.search(row["body"])):
+                group_mentions.append(row)
+        entries = sorted([*forum, *private, *group_mentions],
                          key=lambda row: (row["created"] or 0, row["id"]), reverse=True)
         seen = {(row["kind"], row["source"]) for row in self.db.execute(
             "SELECT kind,source FROM community_inbox_seen WHERE owner=?", (owner,))}
@@ -368,6 +400,7 @@ class Community:
                   for row in entries if not unread_only or (row["kind"], row["id"]) not in seen][:100]
         for entry in result:
             entry.pop("addressed", None)
+            entry.pop("mentions", None)
         return result
 
     def mark_inbox_read(self, owner, kind, source):
@@ -378,11 +411,24 @@ class Community:
                 INSERT OR IGNORE INTO community_inbox_seen(owner,kind,source)
                 SELECT ?, 'private', c.id FROM demo_chat c JOIN games g ON g.id=c.game
                 WHERE json_extract(g.data,'$.owner_id')=? AND c.role='assistant' AND c.id<=?
-            """, (owner, owner, source))
+                  AND c.game=(SELECT game FROM demo_chat WHERE id=? AND role='assistant')
+            """, (owner, owner, source, source))
         else:
             self.db.execute("INSERT OR IGNORE INTO community_inbox_seen VALUES(?,?,?)", (owner, kind, source))
 
-    def thread(self, post):
+    @staticmethod
+    def _vote_target(comment):
+        return ("community_comment_likes", "comment") if comment else ("community_post_votes", "post")
+
+    def vote_stats(self, viewer, target, *, comment=False):
+        table, key = self._vote_target(comment)
+        counts = self.db.execute(f"""SELECT count(CASE WHEN vote=1 THEN 1 END),
+            count(CASE WHEN vote=-1 THEN 1 END), coalesce(max(CASE WHEN owner=? THEN vote END),0)
+            FROM {table} WHERE {key}=?""", (viewer, target)).fetchone()
+        likes, dislikes, vote = counts
+        return dict(likes=likes, dislikes=dislikes, vote=vote, liked=vote == 1)
+
+    def thread(self, post, *, viewer=None):
         if not str(post).isdecimal() or len(str(post)) > 18:
             raise ValueError("帖子编号无效")
         row = self.db.execute("""
@@ -396,6 +442,8 @@ class Community:
         result["comments"] = self.db.execute(
             "SELECT count(*) FROM community_messages WHERE post=? AND status='active'", (post,)
         ).fetchone()[0]
+        if viewer is not None:
+            result.update(self.vote_stats(viewer, post))
         return result
 
     def _require_member(self, owner, room):

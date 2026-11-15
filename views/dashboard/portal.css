@@ -219,16 +219,17 @@ body { margin: 0; }
 #first-game .avatar-upload { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid #e5d6e4; border-radius: 14px; background: #fff; }
 #first-game .avatar-upload img { flex: none; border-radius: 50%; }
 #first-game .avatar-upload small { display: block; margin: 3px 0 8px; color: #695568; }
-#avatar-editor { width: min(540px, calc(100% - 28px)); max-height: 90vh; overflow: auto; padding: 22px; border: 1px solid #e5d6e4; border-radius: 18px; background: #fffafd; color: #482a43; }
-#avatar-editor::backdrop { background: #34253888; }
-#avatar-editor h2 { margin: 0; }
-#avatar-crop { display: block; max-width: 100%; height: auto; margin: 14px auto; touch-action: none; cursor: move; border-radius: 8px; }
-#avatar-editor label { display: grid; gap: 4px; }
-#avatar-size { width: 100%; accent-color: #873b63; }
-.avatar-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-#apply-avatar { background: #873b63; border-color: #873b63; color: #fff; }
 #setup-profile, #setup-model { display: grid; gap: 14px; } #first-game-form [hidden] { display: none !important; }
 
 .setup-model-selectors { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); gap: 12px; }
 .setup-model-selectors select { width: 100%; min-width: 0; }
 @media (max-width: 420px) { .setup-model-selectors { grid-template-columns: 1fr; } }
+
+#setup-persona .setup-persona-name {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+#setup-persona .setup-persona-name input {
+  width: min(12rem, 65%);
+}

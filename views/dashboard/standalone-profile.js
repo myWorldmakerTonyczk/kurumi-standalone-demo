@@ -1,20 +1,23 @@
 import {api} from "/assets/ui/api.js";
 import {h, formatTime} from "/assets/ui/dom.js";
 import {confirmAction} from "/assets/ui/feedback.js";
-import { encodeAgentAvatar } from "/assets/workspace-chat.js";
+import {cropAvatar} from "/assets/ui/avatar-crop.js";
 export function mountProfile(gameId, {container, general = false}) {
   const section = document.createElement("section");
   section.className = "profile-settings";
   section.innerHTML = `
     <form class="persona-card">
-      <h3 data-persona-title>智能体人格</h3>
-      <p data-summary></p>
-      <details><summary>编辑人格</summary>
-        <label><input name="split_reply" type="checkbox">按换行、句末标点或连续空格切分短句</label>
-        <label>人格设定<textarea name="persona" rows="7" maxlength="4000" placeholder="留空使用默认久留美人格"></textarea></label>
+      <label><input name="split_reply" type="checkbox">按换行、句末标点或连续空格切分短句</label>
+      <div class="persona-identity">
+        <label><span>我是（</span><input name="agent_name" maxlength="40" aria-label="智能体名称" required disabled><span>）</span></label>
+      </div>
+      <label class="persona-body">你的关系称呼（选填）<input name="user_relationship" maxlength="40" placeholder="朋友" disabled></label>
+      <label class="persona-body">当前人格<textarea name="persona" rows="14" maxlength="4000" disabled></textarea></label>
+      <div class="persona-actions">
         <button class="primary" type="submit" disabled>保存人格</button>
-      </details>
-      <p role="status"></p>
+        <button type="button" data-reset-persona disabled>恢复默认人格</button>
+        <p role="status"></p>
+      </div>
     </form>`;
   const split = section.querySelector('[name="split_reply"]')?.closest("label");
   if (general) {
@@ -51,14 +54,27 @@ export function mountProfile(gameId, {container, general = false}) {
   const form = section.querySelector("form");
   const status = section.querySelector("[role=status]");
   const save = section.querySelector("button[type=submit]");
+  const resetPersona = section.querySelector("[data-reset-persona]");
+  let defaultPersona;
   async function request(action, body) {
     const response = await fetch("/api/" + action + "?" + new URLSearchParams({game: gameId()}),
-      body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"},
+      body === undefined ? {cache: "no-store"} : {method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body)});
     const result = await response.json();
     if (!response.ok) throw Error(result.error || "请求失败");
     return result;
   }
+  async function loadDefaultPersona() {
+    if (defaultPersona === undefined) defaultPersona = (await request("model-presets")).persona;
+    return defaultPersona;
+  }
+  if (resetPersona) resetPersona.onclick = async () => {
+    try {
+      form.elements.persona.value = await loadDefaultPersona();
+      form.elements.persona.focus();
+      status.textContent = "";
+    } catch (error) { status.textContent = error.message; }
+  };
   async function refresh() {
     const data = await request("state");
     const {profile} = data;
@@ -71,8 +87,10 @@ export function mountProfile(gameId, {container, general = false}) {
       form.elements.split_reply.checked = data.split_reply !== false;
       form.elements.split_pattern.value = data.split_pattern || form.elements.split_pattern.placeholder;
     } else {
-      section.querySelector("[data-persona-title]").textContent = data.agent_name + "的人格";
-      section.querySelector("[data-summary]").textContent = profile.persona || "你是久留美，使用中文交流。";
+      form.elements.agent_name.value = data.agent_name || "久留美";
+      form.elements.persona.value = profile.persona || await loadDefaultPersona();
+      form.elements.agent_name.disabled = form.elements.user_relationship.disabled =
+        form.elements.persona.disabled = resetPersona.disabled = false;
     }
     save.disabled = false;
   }
@@ -93,7 +111,9 @@ export function mountProfile(gameId, {container, general = false}) {
         status.textContent = "已保存";
         return;
       }
-      await request("profile", {persona: payload.persona});
+      await request("profile", {agent_name: payload.agent_name, persona: payload.persona,
+        user_relationship: payload.user_relationship});
+      window.dispatchEvent(new Event("kurumi-identity"));
       await refresh();
       status.textContent = "已保存";
     } catch (error) { status.textContent = error.message; }
@@ -688,7 +708,7 @@ function mountMemory(container) {
   function open(entry) {
     editing = entry;
     editor.querySelector("[data-title]").textContent = entry ? "编辑记忆" : "添加记忆";
-    editor.elements.subject.replaceChildren(...Object.entries(subjects)
+    editor.elements.subject.replaceChildren(...Object.entries(subjects).filter(([id]) => !id.startsWith("character:"))
       .map(([id, label]) => new Option(label, id)));
     editor.elements.subject.value = entry?.subject || (subject.value === "all" ? "self" : subject.value);
     editor.elements.text.value = entry?.text || "";
@@ -772,7 +792,7 @@ function mountMemory(container) {
       const person = row.insertCell();
       person.append(badge);
       const id = subjectUserId(entry.subject);
-      if (id) {
+      if (id && !entry.permanent) {
         const label = document.createElement("small");
         label.style.display = "block";
         label.style.overflowWrap = "anywhere";
@@ -790,7 +810,7 @@ function mountMemory(container) {
       }
       const strength = row.insertCell();
       const percent = Math.ceil(entry.strength * 100);
-      strength.textContent = percent ? percent + "%" : "0% · 已屏蔽";
+      strength.textContent = entry.permanent ? "100% · 永久" : percent ? percent + "%" : "0% · 已屏蔽";
       const meter = document.createElement("progress");
       meter.max = 1;
       meter.value = entry.strength;
@@ -798,6 +818,10 @@ function mountMemory(container) {
       strength.append(meter);
       row.insertCell().textContent = dateFormat.format((entry.created || entry.updated) * 1000);
       const actions = row.insertCell();
+      if (entry.permanent) {
+        actions.textContent = "系统记忆";
+        continue;
+      }
       const edit = document.createElement("button");
       edit.textContent = "查看 / 编辑";
       edit.onclick = () => open(entry);
@@ -1053,7 +1077,17 @@ export function mountAdvanced(container) {
   const memory = document.createElement("div");
   const logs = document.createElement("section");
   const images = document.createElement("section");
-  container.append(navigation, stickers, memory, logs, images);
+  const debounce = document.createElement("div");
+  container.append(navigation, stickers, memory, logs, images, debounce);
+  const debounceTab = accountSettings(debounce, "消息防抖", "chat-debounce", `
+    <label>消息防抖<select name="enabled"><option value="true">开启</option><option value="false">关闭</option></select></label>
+    <label>私聊静默时间（秒）<input name="private_quiet" type="number" min="0.1" max="15" step="0.1" required></label>
+    <label>私聊最长等待（秒）<input name="private_max" type="number" min="0.1" max="15" step="0.1" required></label>
+    <label>群聊静默时间（秒）<input name="group_quiet" type="number" min="0.1" max="15" step="0.1" required></label>
+    <label>群聊最长等待（秒）<input name="group_max" type="number" min="0.1" max="15" step="0.1" required></label>
+    <p>有新消息时重新计静默时间。到最长等待时间就一起交给智能体。群聊主动发言概率每批判断一次。</p>`,
+    {}, (_, values) => ({enabled: values.enabled === "true", private_quiet: Number(values.private_quiet),
+      private_max: Number(values.private_max), group_quiet: Number(values.group_quiet), group_max: Number(values.group_max)}));
   const stickerTab = mountStickers(stickers);
   stickerTab.textContent = "表情包管理器";
   const memoryTab = document.createElement("button");
@@ -1069,7 +1103,7 @@ export function mountAdvanced(container) {
   const loadImages = mountImageLibrary(images);
   const tabs = [[stickerTab, stickers, loadStickers], [memoryTab, memory, () => {
     loadMemory().catch(error => { memory.querySelector(".sticker-status").textContent = error.message; });
-  }], [logTab, logs, loadLogs], [imageTab, images, loadImages]];
+  }], [logTab, logs, loadLogs], [imageTab, images, loadImages], [debounceTab, debounce, debounceTab.onclick]];
   let active = 0;
   function select() {
     tabs.forEach(([button, panel], i) => {
@@ -1100,6 +1134,32 @@ function accountSettings(container, title, endpoint, fields, defaults, convert) 
   const button = form.querySelector("button");
   const sliders = [...form.querySelectorAll(".probability-slider input")].map(input => bindProbabilitySlider(form, input.name));
   const status = form.querySelector("[role=status]");
+  const avatar = form.querySelector(".account-avatar");
+  const picture = form.elements.picture;
+  const reset = form.elements.reset_avatar;
+  let savedAvatar = "", draft = "", cropping = false;
+  function preview() {
+    const value = reset?.checked ? "avatar.png" : draft || savedAvatar;
+    avatar.src = value.startsWith("data:") ? value : "/assets/" + value;
+  }
+  if (picture) picture.onchange = async () => {
+    const file = picture.files[0];
+    picture.value = "";
+    if (!file || cropping) return;
+    cropping = true;
+    button.disabled = true;
+    try {
+      const result = await cropAvatar(file);
+      if (result) {
+        draft = result;
+        if (reset) reset.checked = false;
+        preview();
+        status.textContent = "";
+      }
+    } catch (error) { status.textContent = error.message || "无法读取图片"; }
+    finally { cropping = false; button.disabled = false; }
+  };
+  if (reset) reset.onchange = preview;
   async function request(body) {
     const res = await fetch("/api/" + endpoint, body ? {
       method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body),
@@ -1111,15 +1171,19 @@ function accountSettings(container, title, endpoint, fields, defaults, convert) 
       if (form.elements[key]) form.elements[key].value = value;
     }
     sliders.forEach(refresh => refresh());
-    const avatar = form.querySelector("img");
-    if (avatar) avatar.src = data.avatar.startsWith("data:") ? data.avatar : "/assets/" + data.avatar;
+    if (avatar) {
+      savedAvatar = data.avatar;
+      draft = "";
+      preview();
+    }
     button.disabled = false;
   }
   form.onsubmit = async event => {
     event.preventDefault();
+    if (cropping) return;
     button.disabled = true;
     try {
-      await request(await convert(form, Object.fromEntries(new FormData(form))));
+      await request(await convert(form, Object.fromEntries(new FormData(form)), draft));
       status.textContent = "已保存";
       if (["user-settings", "agent-identity"].includes(endpoint)) window.dispatchEvent(new Event("kurumi-identity"));
     } catch (error) { status.textContent = error.message; }
@@ -1140,19 +1204,18 @@ export function mountUserSettings(container) {
     <label>更换头像<input name="picture" type="file" accept="image/png,image/jpeg,image/webp"></label>
     <label>当前密码<input name="password" type="password" autocomplete="current-password"></label>
     <label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128"></label>
-    <small>修改用户名或密码时需验证当前密码。</small>`, {}, async (form, values) => {
+    <small>修改用户名或密码时需验证当前密码。</small>`, {}, (_, values, avatar) => {
       delete values.picture;
-      return {...values, avatar: await encodeAgentAvatar(form.elements.picture.files[0])};
+      return {...values, avatar};
     });
   const agent = accountSettings(container, "智能体资料", "agent-identity", `
     <img class="account-avatar" width="60" height="60" alt="当前智能体头像">
     <label>智能体名称<input name="agent_name" maxlength="40" required></label>
     <label>更换头像<input name="picture" type="file" accept="image/png,image/jpeg,image/webp"></label>
     <label class="check"><input name="reset_avatar" type="checkbox">恢复默认头像</label>`, {},
-    async (form, values) => {
-      const avatar = await encodeAgentAvatar(form.elements.picture.files[0]);
-      return {agent_name: values.agent_name, agent_avatar: avatar || (values.reset_avatar ? "" : undefined)};
-    });
+    (_, values, avatar) => ({
+      agent_name: values.agent_name, agent_avatar: values.reset_avatar ? "" : avatar || undefined,
+    }));
   const openAccount = account.onclick;
   account.onclick = () => { openAccount(); agent.onclick(); };
   return account;

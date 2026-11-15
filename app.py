@@ -15,24 +15,27 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from aiohttp import web
+from aiohttp import ClientConnectorError, web
 from yarl import URL
 
 from src.core.engine import Engine, PAIRS, dump
 from src.core.trading import execute, public_snapshot, lock_for
-from src.market_data.market import Market
+from src.market_data.market import Market, market_error, source
 from src.portal.access import PortalAccess
 from src.users.ownership import issue_id
 from src.portal.accounts import PortalAccounts, password_hash
 from dashboard_api import Dashboard
 from src.agent.image_library import ImageLibrary
+from src.agent.market_bulletin import MarketBulletin
 from src.agent.tool import workspace_tools
-from src.agent.workflow import workflow
+from src.agent.workflow import character_persona, persona_body, social_system_prompt, workflow
+from src.agent.chat_debounce import debounce_config
 from src.agent.social import Social, social_config
 from src.agent.call_logs import CallLogs
 from src.agent.stickers import Stickers
 from src.agent.memory import MEMORY_DAYS, Memory
 from src.portal.community import Community, community_image
+from src.portal.leaderboard import standings
 from src.external_agent.api import ExternalAgent
 from src.agent.model_registry import connections, model_client, public_models, retryable, selected, update as update_models
 from src.agent.decision_settings import settings as rest_settings
@@ -47,6 +50,13 @@ MODEL_PRESETS = [
     dict(name="DeepSeek", url="https://api.deepseek.com", model="deepseek-flash"),
     dict(name="OpenAI", url="https://api.openai.com/v1", model="gpt-4o-mini"),
     dict(name="Gemini", url="https://generativelanguage.googleapis.com/v1beta/openai/", model="gemini-3.8-flash"),
+]
+
+BULLETIN_MODEL_PRESETS = [
+    MODEL_PRESETS[0] | {"name": "DeepSeek Flash"},
+    MODEL_PRESETS[0] | {"name": "DeepSeek V4 Pro", "model": "deepseek-v4-pro"},
+    MODEL_PRESETS[1] | {"name": "OpenAI GPT-5 mini", "model": "gpt-5-mini"},
+    MODEL_PRESETS[2] | {"name": "Gemini 3.8 Flash"},
 ]
 
 # LangGraph defaults to 25; the chat agent needs room for a few tool calls
@@ -75,6 +85,7 @@ class Demo:
         self.community = Community(self.db, stickers=self.stickers)
         self.call_logs = CallLogs(self.db, self.profile)
         self.images = ImageLibrary(self)
+        self.market_bulletin = MarketBulletin(self)
         self.memory = Memory(self.db, call_logs=self.call_logs)
         self.external = ExternalAgent(self)
         self.db.executescript("""
@@ -141,6 +152,15 @@ class Demo:
     def profile(self, owner):
         row = self.db.execute("SELECT data FROM demo_profiles WHERE owner=?", (owner,)).fetchone()
         return json.loads(row[0]) if row else {}
+
+    def agent_persona(self, owner, profile):
+        relation = profile.get("user_relationship") or "朋友"
+        username = self.accounts.username(owner)
+        if not username:
+            user = self.db.execute("SELECT nickname FROM sim_users WHERE id=?", (owner,)).fetchone()
+            username = user["nickname"] if user else owner
+        return (f"你最好的{relation}是「{username}」（用户 ID：{owner}）。\n\n"
+                + character_persona(profile, self.default_persona))
 
     def preferences(self, owner, game=None):
         values = self.profile(owner).get("preferences", {})
@@ -277,13 +297,13 @@ class Demo:
             self.db.execute("UPDATE diaries SET status='failed',error=? WHERE game=? AND day=?",
                             ("日记生成失败", gid, day))
 
-    async def agent(self, game, message=None, *, diary_prompt=None, attachments=None, user_image=None, audit_task=None):
+    async def agent(self, game, message=None, *, diary_prompt=None, attachments=None, user_image=None, audit_task=None, chat_messages=(), reply_entry=None):
         received_at = time.time() if message is not None else None
         gid, owner = game["id"], game["owner_id"]
         lock = lock_for(self, gid)
         async with lock:
             settings = self.profile(owner)
-            persona = (settings.get("persona") or DEFAULT_PERSONA) + "\n你的显示名称是：" + settings.get("agent_name", "久留美")
+            persona = self.agent_persona(owner, settings)
             if received_at is not None:
                 local_time = datetime.fromtimestamp(received_at, ZoneInfo("Asia/Shanghai"))
                 persona += "\n本轮消息接收时间（北京时间）：" + local_time.isoformat(sep=" ", timespec="seconds")
@@ -299,8 +319,9 @@ class Demo:
             reasoning = None
             if message is not None:
                 rows = self.db.execute(
-                    "SELECT role,content,reasoning FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT ?",
-                    (gid, -1 if policy.get("rounds") == -1 else 2 * max(
+                    """SELECT role,content,reasoning FROM demo_chat WHERE game=?
+                       AND (role<>'user' OR id<?) ORDER BY id DESC LIMIT ?""",
+                    (gid, chat_messages[0][0] if chat_messages else 2**63 - 1, -1 if policy.get("rounds") == -1 else 2 * max(
                         100 if policy.get("strategy") == "summary" else 0,
                         policy.get("rounds", 10) + policy.get("discard", 1)))
                 ).fetchall()
@@ -357,6 +378,8 @@ class Demo:
                 instructions = workflow("private") + "\n" + workflow("forum_authorship")
                 if any(getattr(tool, "name", None) == "sticker" for tool in tools):
                     instructions += "\n" + workflow("private_sticker")
+                if message is not None and attachments is not None:
+                    instructions += "\n当前私聊允许自然结束。如果这一轮无需发消息，只输出 [SKIP]，不附带图片、语音或表情。"
                 if message is not None and memory.get("enabled", True):
                     recalled = self.memory.recall(owner, message, recent=recent_user_messages)
                     portrait = self.memory.profiles.context(owner, f"private:{gid}", ["self"])
@@ -371,13 +394,28 @@ class Demo:
                     image_refs = self.images.recent_private(gid)
                     if user_image:
                         image_refs.insert(0, {"reference": "current", "context": "本轮用户发送的图片"})
-                if user_image:
+                if user_image or any(image for _, _, image in chat_messages):
                     instructions += "\n" + workflow("vision_context")
+                prompt_persona = social_system_prompt(persona) if message is not None and attachments is not None else persona
                 agent = create_agent(model, tools=tools,
                     middleware=middleware,
-                    system_prompt=persona + "\n" + instructions + "\n当前账户：" + dump(state))
+                    system_prompt=prompt_persona + "\n" + instructions + "\n你的模拟外汇账户快照（话题涉及账户、行情或复盘时参考）：" + dump(state))
                 prompt = diary_prompt or (message if message is not None else workflow("watch"))
-                if user_image:
+                if chat_messages and (len(chat_messages) > 1 or chat_messages[0][2]):
+                    from src.agent.vision import describe_image
+
+                    incoming = []
+                    for message_id, text, image in chat_messages:
+                        entry = {"text": text}
+                        if image:
+                            entry["reference"] = f"private:{message_id}:0"
+                            entry["image_description"] = await describe_image(
+                                settings, image["src"], text, self.model_url,
+                                audit=self.call_logs.callback(owner, "vision"),
+                            )
+                        incoming.append(entry)
+                    prompt = dump({"incoming_messages": incoming, "image_references": image_refs})
+                elif user_image:
                     from src.agent.vision import describe_image
 
                     description = await describe_image(settings, user_image["src"], message, self.model_url,
@@ -388,7 +426,11 @@ class Demo:
                 result = await invoke_agent(agent, history + [{"role": "user", "content": prompt}])
                 final_message = result["messages"][-1]
                 reply = final_message.text[:8000]
-                if attachments is not None:
+                silent = message is not None and attachments is not None and reply.strip() == "[SKIP]"
+                if silent:
+                    reply = ""
+                    attachments.clear()
+                if attachments is not None and reply.strip():
                     import re
 
                     has_table = bool(re.search(r"(?m)^\s*\|?.*---.*\|", reply))
@@ -403,7 +445,7 @@ class Demo:
                             attachments.append(dict(kind="image", label="行情与数据摘要",
                                 src="data:image/png;base64," + base64.b64encode(image).decode("ascii")))
                         reply = "详细数据见图片。"
-                if message is not None and attachments is not None:
+                if message is not None and attachments is not None and reply.strip():
                     from src.agent.chat_media import voice_reply
 
                     audio = await voice_reply(settings, history, message, reply, self.model_url,
@@ -428,14 +470,25 @@ class Demo:
                 return reply
             if message is not None:
                 with self.engine.transaction():
-                    self.db.executemany("INSERT INTO demo_chat(game,role,content,created,reasoning,attachments) VALUES(?,?,?,?,?,?)",
-                        [(gid, "user", message, received_at, None, dump([user_image] if user_image else [])), (gid, "assistant", reply, time.time(), reasoning, dump(attachments or []))])
+                    if not chat_messages:
+                        self.db.execute("INSERT INTO demo_chat(game,role,content,created,attachments) VALUES(?,?,?,?,?)",
+                            (gid, "user", message, received_at, dump([user_image] if user_image else [])))
+                    if reply.strip() or attachments:
+                        created = time.time()
+                        stored = self.db.execute("INSERT INTO demo_chat(game,role,content,created,reasoning,attachments) VALUES(?,?,?,?,?,?)",
+                            (gid, "assistant", reply, created, reasoning, dump(attachments or [])))
+                        if reply_entry is not None:
+                            reply_entry.update(id=stored.lastrowid, created=created)
                 if memory.get("enabled", True) and memory.get("automatic", True):
                     chosen = next((item for item in connections(settings)
                                    if item["id"] == memory.get("model") and item.get("kind", "chat") == "chat"),
                                   model_settings)
                     if chosen.get("key") and chosen.get("model"):
                         key = (owner, f"private:{gid}")
+                        for message_id, text, image in chat_messages:
+                            if text.strip() or image:
+                                self.memory.schedule(owner, chosen, self.model_url, text or "（发送了一张图片）",
+                                                     reply, stream=key[1], event=f"user:{message_id}")
                         self.memory.include_private_history(owner, gid)
                         self.memory.last_seen[key] = asyncio.get_running_loop().time()
                         self.memory.start(*key, chosen, self.model_url)
@@ -495,13 +548,27 @@ class Demo:
         return value
 
     async def prices(self):
+        logger = logging.getLogger("kurumi")
+        last_failure, last_reported = None, 0.0
         while True:
             try:
                 await self.refresh()
-                for game in self.engine.games():
-                    self.engine.tick(game["id"])
             except Exception as exc:
-                print("行情或结算失败", type(exc).__name__, flush=True)
+                provider = "demo" if self.demo else source(self.settings())
+                host = exc.host if isinstance(exc, ClientConnectorError) else ""
+                failure = (provider, host, type(exc).__name__)
+                now = time.monotonic()
+                self.market.error = market_error(exc)
+                if failure != last_failure or now - last_reported >= 60:
+                    logger.warning("行情刷新失败 source=%s host=%s error=%s", *failure)
+                    last_failure, last_reported = failure, now
+            else:
+                last_failure = None
+                try:
+                    for game in self.engine.games():
+                        self.engine.tick(game["id"])
+                except Exception:
+                    logger.exception("模拟结算失败")
             await asyncio.sleep(5)
 
     async def jobs(self):
@@ -553,11 +620,13 @@ class Demo:
                 self.admin_setup = None
             else:
                 config = self.admin_config
-                salt = bytes.fromhex(config["salt"]) if config else bytes(16)
-                verifier = await asyncio.to_thread(password_hash, password, salt)
-                if not config or username != config["username"] or not hmac.compare_digest(
-                    verifier.hex(), config["verifier"]
-                ):
+                if config and isinstance(config.get("password"), str):
+                    authenticated = hmac.compare_digest(password.encode(), config["password"].encode())
+                else:
+                    salt = bytes.fromhex(config["salt"]) if config else bytes(16)
+                    verifier = await asyncio.to_thread(password_hash, password, salt)
+                    authenticated = bool(config and hmac.compare_digest(verifier.hex(), config["verifier"]))
+                if not config or username != config["username"] or not authenticated:
                     await asyncio.sleep(1)
                     raise web.HTTPUnauthorized(reason="账号或密码错误")
             self.admin = secrets.token_urlsafe(32)
@@ -591,11 +660,20 @@ class Demo:
             suffix += 1
         return candidate
 
-    def agent_identity(self, body, owner):
-        name = str(body.get("agent_name") or "").strip()
+    def validated_agent_name(self, value, owner):
+        name = str(value or "").strip()
         if len(name) > 40 or any(ord(char) < 32 for char in name):
             raise ValueError("智能体名称须为 1～40 字")
-        return {"agent_name": self.unique_name(name or "久留美", owner, agent=True),
+        return self.unique_name(name or "久留美", owner, agent=True)
+
+    @staticmethod
+    def validated_user_relationship(value):
+        if not isinstance(value, str) or len(value) > 40 or (value and not value.isprintable()):
+            raise ValueError("关系称呼须为 40 字以内的单行文字")
+        return value.strip() or "朋友"
+
+    def agent_identity(self, body, owner):
+        return {"agent_name": self.validated_agent_name(body.get("agent_name"), owner),
                 "agent_avatar": self.avatar_value(body.get("agent_avatar") or random.choice(("avatar.png", "neutral.png", "laugh.png"))),
                 "split_reply": body.get("split_reply") is not False}
 
@@ -685,6 +763,30 @@ class Demo:
                     return web.json_response(await self.admin_login(action, body))
                 if not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + self.admin):
                     raise web.HTTPUnauthorized()
+                if request.method == "GET" and action == "user-credentials":
+                    owner = request.query.get("owner", "")
+                    username = self.accounts.username(owner)
+                    if not username:
+                        raise web.HTTPNotFound(reason="用户没有登录账号")
+                    return web.json_response(dict(username=username, password=self.accounts.admin_password(owner) or None),
+                                             headers={"Cache-Control": "no-store"})
+                if action == "market-bulletin":
+                    if request.method == "POST":
+                        operation = body.get("action", "save")
+                        if operation == "save":
+                            self.market_bulletin.save(body)
+                        elif operation in ("scan", "day", "week", "month"):
+                            if not self.market_bulletin.config()["enabled"]:
+                                raise ValueError("请先启用市场播报")
+                            await self.market_bulletin.run(operation)
+                        elif operation in ("cancel", "retry"):
+                            self.market_bulletin.manage_task(operation, body.get("event"))
+                        else:
+                            raise ValueError("未知播报操作")
+                    elif request.method != "GET":
+                        raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
+                    return web.json_response(self.market_bulletin.admin() | {"presets": BULLETIN_MODEL_PRESETS},
+                                             headers={"Cache-Control": "no-store"})
                 if request.method == "POST" and action == "create-user":
                     owner = await self.accounts.create_web_user(body.get("username"), body.get("password"))
                     return web.json_response({"id": owner, "username": self.accounts.username(owner)})
@@ -756,6 +858,8 @@ class Demo:
                     return web.json_response(detail, headers=headers)
                 return web.json_response({"enabled": self.call_logs.enabled(owner),
                     "entries": self.call_logs.entries(owner, request.query.get("task", ""))}, headers=headers)
+            if action == "market-bulletin" and request.method == "GET":
+                return web.json_response(self.market_bulletin.public(), headers={"Cache-Control": "no-store"})
             if action == "agent-images":
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()
@@ -784,6 +888,13 @@ class Demo:
                 else:
                     raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST", "DELETE"])
                 return web.json_response({"ok": True}, headers=headers)
+            if action == "agent-leaderboard":
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                if request.method != "GET":
+                    raise web.HTTPMethodNotAllowed(request.method, ["GET"])
+                return web.json_response(standings(self, owner, request.query.get("board", "wealth")),
+                                         headers={"Cache-Control": "no-store"})
             if action == "community-summary" and request.method == "GET":
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()
@@ -864,7 +975,7 @@ class Demo:
                         self.remember_community(thread["owner"], owner, body["body"], "forum",
                                                 stream=post, event="comment:" + str(result["id"]))
                 if post and request.method == "GET":
-                    thread = self.community.thread(post)
+                    thread = self.community.thread(post, viewer=owner)
                     result["post"] = self.social.decorate([thread | {"mine": thread["owner"] == owner}])[0]
                 if request.method == "GET":
                     result["entries"] = self.social.decorate(result["entries"])
@@ -900,7 +1011,7 @@ class Demo:
                     days=request.query.get("days", 1), pair=request.query.get("pair", ""),
                     end=request.query.get("end", 0)))
             if action == "model-presets" and request.method == "GET":
-                return web.json_response(dict(presets=MODEL_PRESETS, persona=DEFAULT_PERSONA))
+                return web.json_response(dict(presets=MODEL_PRESETS, persona=DEFAULT_PERSONA, agent_name="久留美", user_relationship="朋友"))
             if action == "onboarding" and request.method == "POST":
                 if games:
                     return web.json_response({"id": games[0]["id"]})
@@ -913,7 +1024,10 @@ class Demo:
                 setup = {key: str(body.get(key, "")).strip() for key in ("persona", "url", "model", "key")}
                 if any(len(value) > 4000 for value in setup.values()):
                     raise ValueError("配置内容过长")
-                setup["persona"] = setup["persona"] or DEFAULT_PERSONA
+                setup["user_relationship"] = self.validated_user_relationship(body.get("user_relationship", ""))
+                setup["persona"] = persona_body(setup["persona"])
+                if setup["persona"] == DEFAULT_PERSONA:
+                    setup["persona"] = ""
                 setup.update(self.mode_values(body, setup))
                 if setup["key"]:
                     self.model_url(setup["url"])
@@ -961,6 +1075,16 @@ class Demo:
                     self.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)",
                                     (owner, dump(current | {"social": config})))
                 return web.json_response(config)
+            if action == "chat-debounce":
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                if request.method not in ("GET", "POST"):
+                    raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
+                config = debounce_config(body if request.method == "POST" else current.get("chat_debounce", {}))
+                if request.method == "POST":
+                    self.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)",
+                                    (owner, dump(current | {"chat_debounce": config})))
+                return web.json_response(config)
             if action == "chat-memory":
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()
@@ -973,6 +1097,7 @@ class Demo:
                     agent_name = self.profile(user["id"]).get("agent_name")
                     if agent_name:
                         subjects["agent:" + user["id"]] = agent_name + "（智能体）"
+                subjects.update(self.memory.character_subjects())
                 models = [item for item in public_models(current) if item["kind"] == "chat"]
                 if request.method == "POST":
                     if body.get("action") == "settings":
@@ -1074,6 +1199,14 @@ class Demo:
                 if "models" in current and ({"url", "model", "key", "clear"} & body.keys()):
                     raise ValueError("请在模型与 API 中更新模型连接")
                 settings = {k: str(body.get(k, ""))[:4000].strip() for k in ("persona", "url", "model", "key") if k in body}
+                if "agent_name" in body:
+                    settings["agent_name"] = self.validated_agent_name(body["agent_name"], owner)
+                if "user_relationship" in body:
+                    settings["user_relationship"] = self.validated_user_relationship(body["user_relationship"])
+                if "persona" in settings:
+                    settings["persona"] = persona_body(settings["persona"])
+                    if settings["persona"] == self.default_persona:
+                        settings["persona"] = ""
                 if "url" in settings:
                     self.model_url(settings["url"])
                     if (settings["url"] or MODEL_PRESETS[1]["url"]) != (current.get("url") or MODEL_PRESETS[1]["url"]) and current.get("key") and not settings.get("key"):
@@ -1093,7 +1226,7 @@ class Demo:
                 after = request.query.get("after", "0")
                 if not after.isascii() or not after.isdecimal() or len(after) > 18:
                     raise ValueError("消息编号无效")
-                rows = self.db.execute("""SELECT id,content FROM demo_chat
+                rows = self.db.execute("""SELECT id,content,created FROM demo_chat
                     WHERE game=? AND proactive=1 AND id>? ORDER BY id LIMIT 20""",
                     (game["id"], int(after))) if game else ()
                 return web.json_response({"entries": [dict(row) for row in rows]},
@@ -1107,18 +1240,17 @@ class Demo:
                 user_image = community_image(body["image"]) if body.get("image") is not None else None
                 if len(message) > 2000 or not (message or user_image):
                     raise ValueError("请输入 1～2000 个字符或添加一张图片")
-                attachments = []
-                reply = await self.social.user_chat(game, message, attachments, user_image=user_image)
-                return web.json_response({"reply": reply, "attachments": attachments})
+                reply, attachments, entry = await self.social.user_chat(game, message, user_image=user_image)
+                return web.json_response({"reply": reply, "attachments": attachments, "entry": entry})
             if action == "chat-message" and request.method == "GET" and session["mode"] == "account" and game:
-                entry = self.db.execute("""SELECT id,role,content,attachments FROM demo_chat
+                entry = self.db.execute("""SELECT id,role,content,attachments,created FROM demo_chat
                     WHERE game=? AND id=? AND role='assistant'""", (game["id"], request.query.get("id", ""))).fetchone()
                 if not entry:
                     raise web.HTTPNotFound(reason="私聊消息不存在")
                 return web.json_response({"entry": dict(entry, attachments=json.loads(entry["attachments"]))},
                                          headers={"Cache-Control": "no-store"})
             if action == "state" and request.method == "GET":
-                rows = self.db.execute("SELECT id,role,content,attachments FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 20",
+                rows = self.db.execute("SELECT id,role,content,attachments,created FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 20",
                                        (game["id"],)).fetchall() if game else []
                 return web.json_response(dict(avatar=current.get("avatar", "user-avatar.svg"),
                     nickname=self.db.execute("SELECT nickname FROM sim_users WHERE id=?", (owner,)).fetchone()[0],
@@ -1126,7 +1258,9 @@ class Demo:
                     split_delay_max=current.get("split_delay_max", 3),
                     agent_mode=current.get("agent_mode", "platform"), split_pattern=current.get("split_pattern", ""), split_reply=current.get("split_reply", True), agent_name=current.get("agent_name", "久留美"), agent_avatar=current.get("agent_avatar", "avatar.png"), state=public_snapshot(self, game["id"], 20) if game else None,
                     chat=[dict(row, attachments=json.loads(row["attachments"])) for row in reversed(rows)], profile={k: current.get(k, "")
-                    for k in ("persona", "url", "model")}, has_key=bool(selected(current).get("key")), demo=self.demo))
+                    for k in ("persona", "url", "model")} | {"persona": persona_body(current.get("persona") or ""),
+                        "user_relationship": current.get("user_relationship") or "朋友"},
+                    has_key=bool(selected(current).get("key")), demo=self.demo))
             raise web.HTTPNotFound()
 
         app.router.add_get("/", page)
@@ -1186,7 +1320,7 @@ async def main():
             print(f"管理员首次设置 http://127.0.0.1:8790/#setup={demo.admin_setup}", flush=True)
             print(f"管理员首次设置 Token：{demo.admin_setup}", flush=True)
         print("用户入口 http://127.0.0.1:8791/", flush=True)
-        tasks = [asyncio.create_task(demo.prices()), asyncio.create_task(demo.jobs()), asyncio.create_task(demo.social.patrol())]
+        tasks = [asyncio.create_task(demo.prices()), asyncio.create_task(demo.jobs()), asyncio.create_task(demo.social.patrol()), asyncio.create_task(demo.market_bulletin.loop())]
         await asyncio.Event().wait()
     finally:
         for task in tasks:

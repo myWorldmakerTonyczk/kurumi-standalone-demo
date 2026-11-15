@@ -53,6 +53,14 @@ export function clockTime(ts, now = new Date()) {
   return sameDay(date, now) ? hm : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${hm}`;
 }
 
+export function chatTimeMarker(ts, previous) {
+  const label = clockTime(ts);
+  if (!label) return null;
+  const date = new Date(ts * 1000);
+  if (previous && ts - previous < 300 && sameDay(date, new Date(previous * 1000))) return null;
+  return h("time", {class: "chat-time-marker", datetime: date.toISOString(), title: formatTime(ts)}, label);
+}
+
 export function relativeTime(ts, now = Date.now()) {
   const n = Number(ts);
   if (!Number.isFinite(n) || n <= 0) return "暂无";

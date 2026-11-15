@@ -2,6 +2,8 @@ import { mountAgentMode } from "/assets/agent-mode.js";
 import {h, relativeTime} from "/assets/ui/dom.js";
 import {api} from "/assets/ui/api.js";
 import { mountCommunity } from "/assets/community.js";
+import {mountLeaderboard} from "/assets/community/leaderboard.js";
+import {mountBulletinAdmin} from "/assets/home/bulletin.js";
 import { createHome } from "/assets/home/home.js";
 import { mountChat } from "/assets/workspace-chat.js";
 import { mountPreferences } from "/assets/user-preferences.js";
@@ -36,6 +38,7 @@ const modelSettings = new ModelSettings(post);
 const instanceNotices = new InstanceNotices(post, load);
 const portalSettings = new PortalSettings(post, load);
 let settingsPage = "users";
+const openBulletinSettings = remote ? null : mountBulletinAdmin(document.querySelector('[data-settings-page="bulletin"]'), bridge);
 function showSettings(page) {
   if (page !== settingsPage && !confirmLeavingApiSettings()) return;
   settingsPage = page;
@@ -43,6 +46,7 @@ function showSettings(page) {
     users: ["账号管理", "管理用户登录账号。"],
     api: ["行情连接", "这里保存的报价与历史数据来源供所有工作区使用。"],
     portal: ["用户面板", "配置用户访问工作区的对外地址。"],
+    bulletin: ["市场播报", "管理平台共享的市场简报和指标跟踪任务。"],
   }[page];
   if (copy) {
     $("settings-section-title").textContent = copy[0];
@@ -54,6 +58,7 @@ function showSettings(page) {
     const active=(button.dataset.settingsTab||button.dataset.settingsAnchor)===page;
     button.classList.toggle("selected",active);button.setAttribute("aria-pressed",String(active));
   }
+  if (page === "bulletin") openBulletinSettings?.();
 }
 for (const button of document.querySelectorAll("[data-settings-tab]")) button.onclick=()=>showSettings(button.dataset.settingsTab);
 const requestId = () =>
@@ -146,7 +151,7 @@ function mountInbox(shortcuts, openEntry) {
   const panel = h("section", {id: "workspace-inbox", class: "workspace-inbox", hidden: true, "aria-label": "消息邮箱"},
     h("header", {}, h("strong", {}, "消息邮箱"),
       h("button", {type: "button", "aria-label": "关闭邮箱", onClick: () => toggle(false)}, "×")), status, list);
-  let signature = "", loadingInbox = false;
+  let signature = "", loadingInbox = false, refreshQueued = false;
   const types = {group: "群聊 @", forum: "论坛评论", private: "私聊消息"};
   const sections = new Map(Object.entries(types).map(([kind, title]) => {
     const label = h("span");
@@ -166,7 +171,10 @@ function mountInbox(shortcuts, openEntry) {
   }
 
   async function refresh() {
-    if (loadingInbox) return;
+    if (loadingInbox) {
+      refreshQueued = true;
+      return;
+    }
     loadingInbox = true;
     try {
       const {entries} = await api("inbox", {query: {unread: 1}});
@@ -182,7 +190,6 @@ function mountInbox(shortcuts, openEntry) {
         const group = entries.filter(entry => entry.kind === kind);
         section.hidden = !group.length;
         label.textContent = group.length + " 条未读";
-        const privateThrough = kind === "private" ? Math.max(0, ...group.map(entry => entry.id)) : null;
         items.replaceChildren(...group.map(entry => {
           const button = h("button", {type: "button", class: "inbox-entry is-unread",
             onClick: async () => {
@@ -191,7 +198,8 @@ function mountInbox(shortcuts, openEntry) {
                 await openEntry(entry);
                 panel.hidden = true;
                 launcher.setAttribute("aria-expanded", "false");
-                await api("inbox", {method: "POST", body: {kind: entry.kind, id: privateThrough ?? entry.id}});
+                if (entry.kind !== "private")
+                  await api("inbox", {method: "POST", body: {kind: entry.kind, id: entry.id}});
                 await refresh();
               } catch (error) {
                 panel.hidden = false;
@@ -208,7 +216,13 @@ function mountInbox(shortcuts, openEntry) {
       }
     } catch (error) {
       status.hidden = false; status.textContent = error.message;
-    } finally { loadingInbox = false; }
+    } finally {
+      loadingInbox = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        refresh();
+      }
+    }
   }
 
   launcher.onclick = () => toggle(panel.hidden);
@@ -216,6 +230,7 @@ function mountInbox(shortcuts, openEntry) {
   document.body.append(panel);
   shortcuts.append(launcher);
   refresh();
+  window.addEventListener("kurumi-inbox-read", refresh);
   setInterval(() => { if (!document.hidden) refresh(); }, 15000);
 }
 
@@ -1247,16 +1262,36 @@ let deletingUser = null;
 let modeSettingsDirty = false;
 function renderManagedUsers() {
   const rows = (state.workspace.users || []).map(user => {
-    const row = node("div", "", "standalone-user-row");
+    const row = node("details", "", "managed-user-details");
+    const summary = node("summary", "", "standalone-user-row");
+    const details = node("div", "", "managed-user-credentials");
     const remove = node("button", "删除用户");
+    row.ontoggle = async () => {
+      if (!row.open) {
+        details.replaceChildren();
+        return;
+      }
+      details.replaceChildren(node("p", "正在读取账号…"));
+      try {
+        const account = await bridge.apiGet("user-credentials", {owner: user.id});
+        if (!row.open) return;
+        details.replaceChildren(
+          node("p", "登录账号　" + account.username),
+          node("p", account.password ? "管理员设置的密码　" + account.password : "当前密码未保留明文"),
+          remove);
+      } catch (error) {
+        if (row.open) details.replaceChildren(node("p", error.message), remove);
+      }
+    };
     remove.type = "button";
     remove.onclick = () => {
       deletingUser = user;
       $("delete-user-description").textContent = "删除「" + user.name + "」及其交易记录？";
       $("delete-user-dialog").showModal();
     };
-    row.append(node("span", Array.from(user.name)[0] || "?", "user-avatar"),
-      node("strong", user.portal_username || user.name), remove);
+    summary.append(node("span", Array.from(user.name)[0] || "?", "user-avatar"),
+      node("strong", user.portal_username || user.name), node("span", "⌄"));
+    row.append(summary, details);
     return row;
   });
   $("managed-users").replaceChildren(...(rows.length ? rows : [node("p", "还没有可管理的账号。", "catalog-empty")]));
@@ -1555,6 +1590,7 @@ if (bridge) {
     nav.firstElementChild.click();
     const switcher = document.querySelector(".workspace-switch");
     if (session.mode === "account") {
+      mountLeaderboard();
       communityView = mountCommunity(document.querySelector('[data-page="community"]'), {
         game: () => gid,
         pairs: () => state?.current?.game.pairs || [],

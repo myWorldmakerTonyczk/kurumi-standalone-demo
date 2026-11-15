@@ -6,6 +6,9 @@
 .cm-comment-branch + .cm-comment-branch { border-top: 1px solid #ead8e8; }
 .cm-reply-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .cm-reply-toolbar[hidden] { display: none; }
+.cm-post > .cm-votes, .cm-thread-head > .cm-votes { margin-top: 8px; }
+.cm-votes { gap: 4px; }
+.cm-votes .ui-btn { font-variant-numeric: tabular-nums; }
 .cm-reply-toolbar [aria-pressed="true"] { color: #90386c; background: #f6e9f1; }
 .cm-comment:focus, .gr-msg:focus { outline: 2px solid #984576; outline-offset: -2px; }
 .cm-shell { display: grid; gap: 16px; min-width: 0; }
@@ -77,10 +80,14 @@
 .gr-list-panel, .gr-members-panel, .gr-room-box { border: 1px solid var(--ui-line); border-radius: 12px; background: #fff; min-width: 0; }
 .gr-list-panel, .gr-members-panel { padding: 14px; }
 .gr-list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-/* The app sidebar is narrower than the in-page list column; let the create
-   button wrap below the title instead of squeezing it into a vertical stack. */
-.workspace > aside > .gr-list-panel .gr-list-head { flex-wrap: wrap; justify-content: flex-start; }
-.workspace > aside > .gr-list-panel .gr-list-head .ui-btn { margin-left: auto; }
+/* Keep the sidebar header usable when space is limited. */
+.workspace > aside > .gr-list-panel .gr-list-head { flex-wrap: wrap; }
+.workspace > aside > .gr-list-panel .gr-create > input {
+  box-sizing: border-box; width: 100%; min-width: 0;
+}
+.workspace > aside > .gr-list-panel .gr-create > label {
+  display: flex; gap: 6px; align-items: center;
+}
 .gr-list-head h3, .gr-members-panel h3 { margin: 0; font-size: 16px; }
 .gr-members-panel h3 { margin-bottom: 10px; }
 .gr-create { display: grid; gap: 8px; margin-top: 10px; }
@@ -106,6 +113,7 @@
 .gr-unread[hidden] { display: none; }
 .gr-summary { padding: 12px 18px; border-bottom: 1px solid var(--ui-line); }
 .gr-summary[hidden] { display: none; }
+.gr-message-entry { display: contents; }
 .gr-log { height: clamp(300px, 46dvh, 520px); overflow: auto; padding: 14px 18px; display: grid; gap: 12px; align-content: start; background: var(--ui-soft); }
 .gr-trunc { margin: 0 0 4px; text-align: center; }
 .gr-msg { display: grid; gap: 3px; max-width: min(78%, 620px); justify-self: start; }
@@ -209,9 +217,42 @@ nav button .ui-count, .workspace-switch button .ui-count { margin-left: 8px; ver
 .cm-floating > header { display: flex; align-items: center; gap: 8px; padding: 8px; cursor: move; touch-action: none; background: #efe3ee; border-radius: 10px; }
 .cm-floating > header strong { margin-right: auto; }
 .cm-floating .gr-layout { display: block; padding-top: 8px; }
-.cm-floating.is-picker :is(.gr-room-box,.gr-members-panel), .cm-floating:not(.is-picker) .gr-list-panel { display: none; }
+.cm-floating.is-picker :is(.gr-room-box,.gr-members-panel), .cm-floating:not(.is-picker):not(.is-full) .gr-list-panel { display: none; }
 .cm-floating:not(.is-picker) .gr-members-panel { margin-top: 10px; }
-.cm-floating.is-full { inset: 0 !important; width: 100vw; height: 100dvh; resize: none; border-radius: 0; }
+.cm-floating.is-full {
+  inset: 0 !important; width: 100%; height: 100dvh; box-sizing: border-box;
+  resize: none; border-radius: 0; overflow: hidden;
+}
+.cm-floating.is-full:not([hidden]) { display: flex; flex-direction: column; }
+.cm-floating.is-full > header { flex: none; flex-wrap: wrap; }
+.community-groups-fullscreen :is(.workspace-back, .workspace-shortcuts) { display: none; }
+.cm-floating.is-full .gr-layout {
+  --group-list-width: clamp(156px, 16%, 270px);
+  --group-members-width: clamp(150px, 16%, 250px);
+  display: grid; flex: 1; min-height: 0;
+  grid-template-columns: var(--group-list-width) minmax(0, 1fr) var(--group-members-width);
+  grid-template-rows: minmax(0, 1fr);
+}
+.cm-floating.is-full :is(.gr-list-panel, .gr-members-panel) { max-height: 100%; overflow: auto; }
+.cm-floating.is-full .gr-members-panel { grid-column: auto; margin-top: 0; }
+.cm-floating.is-full .gr-room-box {
+  display: flex; flex-direction: column; align-self: stretch; min-height: 0; overflow: auto;
+}
+.cm-floating.is-full .gr-room { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.cm-floating.is-full .gr-room > :not(.gr-log) { flex: none; }
+.cm-floating.is-full .gr-log { flex: 1; min-height: 0; height: auto; }
+.cm-floating.is-full .gr-fullscreen { display: none; }
+.cm-floating.is-full.list-collapsed .gr-layout { grid-template-columns: minmax(0, 1fr) var(--group-members-width); }
+.cm-floating.is-full.list-collapsed .gr-list-panel { display: none; }
+@media (max-width: 720px) {
+  .cm-floating.is-full .gr-layout, .cm-floating.is-full.list-collapsed .gr-layout {
+    grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; row-gap: 8px;
+  }
+  .cm-floating.is-full .gr-list-panel { grid-row: 1; }
+  .cm-floating.is-full .gr-room-box { grid-row: 2; }
+  .cm-floating.is-full .gr-members-panel { grid-row: 3; }
+  .cm-floating.is-full :is(.gr-list-panel, .gr-members-panel) { max-height: 18dvh; }
+}
 @media (max-width: 760px) { .gr-layout.external-list { grid-template-columns: minmax(0, 1fr); } }
 
 .gr-mentions:not([hidden]) { display: flex; flex-wrap: wrap; gap: .4rem; }
@@ -233,6 +274,7 @@ nav button .ui-count, .workspace-switch button .ui-count { margin-left: 8px; ver
 .cm-media-actions, .cm-media-preview:not([hidden]) { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
 .cm-media-img { display: block; width: auto; height: auto; max-width: min(100%, 540px); max-height: 420px; border-radius: .5rem; object-fit: contain; }
 .cm-media-img.is-sticker { max-width: min(100%, 140px); max-height: 140px; }
+.cm-post-preview .cm-media-img { max-width: min(100%, 220px); max-height: 160px; }
 .cm-media-img.is-title { display: inline-block; vertical-align: middle; max-width: min(100%, 100px); max-height: 60px; margin-inline: .35em; }
 
 .cm-author-avatar { display: block; width: 28px; height: 28px; flex: none; border-radius: 50%; object-fit: cover; }

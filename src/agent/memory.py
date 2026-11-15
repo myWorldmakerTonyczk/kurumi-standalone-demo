@@ -18,6 +18,18 @@ log = logging.getLogger(__name__)
 MEMORY_DAYS = 90
 BATCH_THRESHOLD = 5
 FORUM_COMMENT_THRESHOLD = 6
+CHARACTER_MEMORIES = (
+    ("ikuo", "福贺郁夫", ("爸爸", "父亲", "家人"),
+     "福贺郁夫是我爸。我读初中时他曾在外地工作。上大学后我瞒着他拿了家里柜子里的三百万日元做 FX，想赚到钱再还回去。他发现后哭着求我停手。后来我和他坐下来谈过。"),
+    ("kozue", "福贺梢", ("妈妈", "母亲", "家人"),
+     "福贺梢是我妈妈。我初三时得知她做 FX 亏掉家里的两千万日元。妈妈去世后，我一直放不下这件事，上大学后想靠自己把这笔钱赚回来。这段往事平时留在心里。"),
+    ("mochiko", "小金萌智子", ("萌智子", "同校", "投资朋友"),
+     "小金萌智子和我同校，是我的投资朋友。她懂股票和外汇，说话直，也喜欢可爱的东西。她推荐过妈妈做过的澳元兑日元。我们会一起讨论，也会暗暗较劲。我低谷时，她拉过我一把。"),
+    ("mebuki", "山师芽吹", ("芽吹", "朋友", "投资前后辈"),
+     "山师芽吹是萌智子的朋友。她受萌智子影响开始做 FX，叫我投资前辈，刚入门时常来找我商量。她开朗，有自己的主意，也曾兴冲冲提议大家来一场投资比赛。"),
+    ("yasuko", "高根安子", ("高根やす子", "あふぃちゃん", "投资博客"),
+     "高根安子（日文名高根やす子）是芽吹的朋友，以「あふぃちゃん」为名写投资博客。她做 FX 吃过亏，嘴上不客气，朋友真要冒险时又放不下。我和她的交集主要来自芽吹和几个人一起参与的事。"),
+)
 QUIET_SECONDS = 12
 MAX_BATCH = 48
 
@@ -114,12 +126,35 @@ class Memory:
         db.execute("""CREATE INDEX IF NOT EXISTS agent_memory_events_pending
             ON agent_memory_events(owner,stream,done,seq)""")
 
-    def list(self, owner):
+        db.execute("""CREATE TABLE IF NOT EXISTS agent_character_memory(
+            id INTEGER PRIMARY KEY, subject TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+            text TEXT NOT NULL, tags TEXT NOT NULL, created REAL NOT NULL
+        )""")
+        db.executemany("""INSERT OR IGNORE INTO agent_character_memory(id,subject,name,text,tags,created)
+            VALUES(?,?,?,?,?,?)""", [
+            (-index, "character:" + key, name, text, json.dumps([name, *tags], ensure_ascii=False), time.time())
+            for index, (key, name, tags, text) in enumerate(CHARACTER_MEMORIES, 1)
+        ])
+
+    def character_subjects(self):
+        return dict(self.db.execute("SELECT subject,name FROM agent_character_memory ORDER BY id DESC").fetchall())
+
+    def character_entries(self):
+        return [
+            dict(row) | {"tags": json.loads(row["tags"]), "updated": row["created"],
+                         "kind": "knowledge", "initial": 1.0, "strength": 1.0, "permanent": True}
+            for row in self.db.execute("SELECT * FROM agent_character_memory ORDER BY id DESC")
+        ]
+
+    def user_entries(self, owner):
         now = time.time()
         return [dict(row) | {"strength": strength(row["updated"], now, row["initial"]),
                              "tags": json.loads(row["tags"]), "created": row["created"] or row["updated"]} for row in self.db.execute(
             "SELECT id,text,subject,updated,kind,tags,initial,created FROM agent_memory WHERE owner=? ORDER BY id DESC LIMIT 200", (owner,)
         )]
+
+    def list(self, owner):
+        return self.character_entries() + self.user_entries(owner)
 
     def recall(self, owner, message, subject="self", *, recent=()):
         query = query_terms(message[:2000])
@@ -138,12 +173,17 @@ class Memory:
         now = time.time()
         documents = []
         frequency = Counter()
-        for row in rows:
-            active = strength(row["updated"], now, row["initial"])
+        candidates = [
+            dict(row) | {"tags": json.loads(row["tags"]), "strength": strength(row["updated"], now, row["initial"])}
+            for row in rows
+        ]
+        candidates.extend(self.character_entries())
+        for row in candidates:
+            active = row["strength"]
             if active <= 0:
                 continue
             counts = Counter(terms(row["text"]))
-            tags = Counter(term for tag in json.loads(row["tags"]) for term in terms(tag))
+            tags = Counter(term for tag in row["tags"] for term in terms(tag))
             matches = query & (counts.keys() | tags.keys())
             frequency.update(matches)
             documents.append((row, active, counts, tags, matches, sum(counts.values())))
@@ -195,11 +235,13 @@ class Memory:
         subject = body.get("subject", "self")
         if action != "delete" and (not isinstance(subject, str) or subject not in subjects):
             raise ValueError("请选择记忆对象")
+        if action != "delete" and subject.startswith("character:"):
+            raise ValueError("原作人物是系统记忆对象")
         text = body.get("text")
         if action != "delete" and (not isinstance(text, str) or not 1 <= len(text.strip()) <= 300):
             raise ValueError("记忆内容须为 1～300 字")
         if action == "add":
-            if len(self.list(owner)) >= 200:
+            if len(self.user_entries(owner)) >= 200:
                 raise ValueError("最多保存 200 条记忆")
             self.db.execute("INSERT OR IGNORE INTO agent_memory(owner,subject,text,updated) VALUES(?,?,?,?)",
                             (owner, subject, text.strip(), time.time()))
@@ -229,7 +271,9 @@ class Memory:
                 ORDER BY next.id LIMIT 1
             )
             WHERE u.game=? AND u.role='user' AND a.role='assistant' AND trim(u.content)<>''
-            ORDER BY u.id""", (owner, stream, gid))
+              AND NOT EXISTS (SELECT 1 FROM agent_memory_events e
+                  WHERE e.owner=? AND e.stream=? AND e.event='user:' || u.id)
+            ORDER BY u.id""", (owner, stream, gid, owner, stream))
 
     def progress(self, owner):
         pending, done = self.db.execute("""SELECT count(*)-coalesce(sum(done),0),coalesce(sum(done),0)
@@ -292,7 +336,8 @@ class Memory:
 
     def batch(self, key):
         return self.db.execute("""SELECT seq,event,subject,text,reply FROM agent_memory_events
-            WHERE owner=? AND stream=? AND done=0 ORDER BY CASE WHEN stream LIKE 'private:%' THEN CAST(event AS INTEGER) ELSE seq END LIMIT ?""", (*key, MAX_BATCH)).fetchall()
+            WHERE owner=? AND stream=? AND done=0 ORDER BY CASE WHEN event LIKE 'user:%' THEN CAST(substr(event,6) AS INTEGER)
+                WHEN stream LIKE 'private:%' THEN CAST(event AS INTEGER) ELSE seq END LIMIT ?""", (*key, MAX_BATCH)).fetchall()
 
     async def extract(self, key, model, validate_url, rows):
         owner, stream = key
@@ -346,7 +391,7 @@ class Memory:
                     combined = list(dict.fromkeys(match["tags"] + tags))[:6]
                     self.db.execute("UPDATE agent_memory SET updated=?,initial=?,tags=? WHERE id=? AND owner=?",
                                     (now, min(1, max(initial, match["strength"] + 0.2)), json.dumps(combined), match["id"], owner))
-                elif len(self.list(owner)) < 200:
+                elif len(self.user_entries(owner)) < 200:
                     self.db.execute("""INSERT OR IGNORE INTO agent_memory(owner,subject,text,updated,created,kind,tags,initial)
                         VALUES(?,?,?,?,?,?,?,?)""", (owner, subject, text, now, now, kind, json.dumps(tags), initial))
             self.db.executemany("UPDATE agent_memory_events SET done=1,text='',reply='' WHERE seq=?",

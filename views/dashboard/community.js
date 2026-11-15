@@ -14,7 +14,7 @@ export function mountCommunity(root, ctx = {}) {
   let current = "forum", unread = 0, tabBadge, demoNote;
 
   const forum = createForum(base);
-  const groups = createGroups({...base, onSelect: () => { if (!floating.hidden) showFloating(false); }, onUnread: total => {
+  const groups = createGroups({...base, onFullscreen: toggleFullscreen, onSelect: () => { if (!floating.hidden) showFloating(false); }, onUnread: total => {
     unread = total;
     renderBadge();
     ctx.onUnread?.(total);
@@ -57,18 +57,34 @@ export function mountCommunity(root, ctx = {}) {
   const title = h("strong", {}, "群聊列表");
   const close = h("button", {type: "button", class: "ui-btn ui-btn-sm", "aria-label": "关闭群聊窗口", onClick: () => {
     floating.hidden = true;
-    syncList();
+    setFullscreen(false);
   }}, "×");
   const pin = h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: () => {
     floating.hidden = true;
+    setFullscreen(false);
     ctx.dock?.();
     show("groups");
   }}, "固定");
-  const fullscreen = h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: () => {
-    floating.classList.toggle("is-full");
-    fullscreen.textContent = floating.classList.contains("is-full") ? "退出全屏" : "全屏";
-  }}, "全屏");
-  const header = h("header", {}, title, pin, fullscreen, close);
+  let returnToDock = false;
+  function setFullscreen(full) {
+    floating.classList.toggle("is-full", full);
+    fullscreen.textContent = full ? "退出全屏" : "全屏";
+    syncList();
+  }
+  function toggleFullscreen() {
+    if (floating.classList.contains("is-full") && !floating.hidden) {
+      floating.hidden = returnToDock;
+      setFullscreen(false);
+      return;
+    }
+    returnToDock = floating.hidden;
+    if (returnToDock) showFloating(false);
+    setFullscreen(true);
+  }
+  const fullscreen = h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: toggleFullscreen}, "全屏");
+  const fullListToggle = h("button", {type: "button", class: "ui-btn ui-btn-sm", hidden: true,
+    onClick: () => { collapsed = !collapsed; syncList(); }}, "收起群聊列表");
+  const header = h("header", {}, title, fullListToggle, pin, fullscreen, close);
   floating.append(header);
   document.body.append(floating);
   let collapsed = false;
@@ -93,8 +109,16 @@ export function mountCommunity(root, ctx = {}) {
     document.body.classList.toggle("community-groups-collapsed", Boolean(sidebar && collapsed));
     toggle.hidden = !sidebar;
     toggle.setAttribute("aria-expanded", String(!collapsed));
-    (sidebar || groups.el).prepend(groups.listPanel);
+    const brand = sidebar && sidebar.querySelector(":scope > .brand");
+    if (brand) brand.after(groups.listPanel);
+    else (sidebar || groups.el).prepend(groups.listPanel);
     groups.el.classList.toggle("external-list", Boolean(sidebar));
+    const full = !floating.hidden && floating.classList.contains("is-full");
+    document.body.classList.toggle("community-groups-fullscreen", full);
+    floating.classList.toggle("list-collapsed", collapsed);
+    fullListToggle.hidden = !full;
+    fullListToggle.setAttribute("aria-expanded", String(!collapsed));
+    fullListToggle.textContent = collapsed ? "展开群聊列表" : "收起群聊列表";
     if (floating.hidden) panels.groups.append(groups.el);
   }
   function showFloating(list) {
@@ -129,10 +153,11 @@ export function mountCommunity(root, ctx = {}) {
   setInterval(poll, 45000);
 
   return {
-    openFloating() { showFloating(true); },
+    openFloating() { setFullscreen(false); showFloating(true); },
     setVisible() { syncList(); },
     async open(tab = current) {
       floating.hidden = true;
+      setFullscreen(false);
       try {
         const profile = await loadProfile();
         demoNote.hidden = !profile.demo;
