@@ -341,6 +341,9 @@ class MarketBulletin:
         inbox = getattr(self.app, "agent_inbox", None)
         if inbox:
             inbox.market(ident, kind, f"{KINDS[kind]} · {label}")
+        scheduler = getattr(self.app, "task_schedule", None)
+        if scheduler:
+            scheduler.event("bulletin", ident, None, {"id": ident, "kind": kind, "title": label})
         return True
 
     async def run(self, action):

@@ -17,7 +17,7 @@ from .chat_debounce import ChatDebounce, debounce_config
 from .image_library import image_reference
 from .model_registry import model_client, selected
 from .mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups
-from .mcp.registry import flatten, inbox_group, user_group_groups, user_patrol_groups
+from .mcp.registry import flatten, inbox_group, timeline_group, user_group_groups, user_patrol_groups
 from .workflow import social_system_prompt, workflow
 
 log = logging.getLogger(__name__)
@@ -232,6 +232,10 @@ class Social:
                 message["body"] or "[图片或表情包]", room=room, mentioned=member_id in mentions,
                 reference={"message_id": message_id, "author": author_name, "author_id": author_id})
             directed = member_id in targets
+            if member_id in mentions:
+                self.app.task_schedule.event("mention", f"{owner}:{room}:{message_id}", owner,
+                    {"kind": "group", "room_id": room, "message_id": message_id,
+                     "normal_reply": not message["is_agent"] or (message["mention_depth"] < 1 and agent_addressed)})
             if directed:
                 self.app.remember_community(owner, message["owner"], message["body"], "group",
                                             stream=room, event=message_id, is_agent=bool(message["is_agent"]))
@@ -386,6 +390,7 @@ class Social:
                 (room,owner,body,is_agent,created,attachment,mentions,mention_depth) VALUES(?,?,?,1,?,?,?,?)""",
                 (room, owner, content, time.time(), dump(attachment) if attachment else None, dump(mentions), mention_depth))
             self.on_message(room, cursor.lastrowid)
+            self.app.timeline.reference(owner, {"type": "group_message", "room_id": room, "id": cursor.lastrowid})
             return True
         return False
 
@@ -396,7 +401,7 @@ class Social:
         return await timeline.run(owner, "patrol", lambda: self._run_patrol(owner), key="patrol",
             outcome=lambda completed: "已完成巡视" if completed else "已跳过")
 
-    async def _run_patrol(self, owner):
+    async def _run_patrol(self, owner, *, handoff=""):
         from langchain.agents import create_agent
         from langchain.agents.middleware import ModelCallLimitMiddleware
         from langgraph.errors import GraphRecursionError
@@ -417,7 +422,8 @@ class Social:
                     + "\n有需要时可先用 read_inbox 预览或收取持续到达的邮箱消息，再决定是否查看原文。"
                     + "\n" + TOOL_INSTRUCTIONS
                     + ("\n近期任务时间线：" + dump(self.app.timeline.context(owner)) if hasattr(self.app, "timeline") else ""))
-                await agent.ainvoke({"messages": [HumanMessage(content=datetime.now(ZONE).isoformat())]},
+                await agent.ainvoke({"messages": [HumanMessage(content=dump(
+                    {"time": datetime.now(ZONE).isoformat(), "appointment": handoff}))]},
                                     config={"recursion_limit": 48})
                 return True
             except GraphRecursionError:
@@ -494,7 +500,7 @@ class Social:
             rows = self.db.execute("""SELECT role,content,created FROM demo_chat WHERE game=?
                 ORDER BY id DESC LIMIT 12""", (gid,)).fetchall()
             history = [dict(row) for row in reversed(rows)]
-            groups = {"inbox": inbox_group(self.app)}
+            groups = {"inbox": inbox_group(self.app), "timeline": timeline_group(self.app, owner)}
         agent = create_agent(model_client(config, self.app.model_url,
             audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=flatten(groups),
             system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
@@ -512,8 +518,9 @@ class Social:
             return self.send(owner, room_id, content)
         if self.chat_pending.get(gid) or self.direct_activity(gid) != activity:
             return False
-        self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)
+        cursor = self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)
             VALUES(?,'assistant',?,?,1)""", (gid, content[:1500], time.time()))
+        self.app.timeline.reference(owner, {"type": "private_message", "game_id": gid, "id": cursor.lastrowid})
         return True
 
     def unanswered(self, gid):
@@ -594,7 +601,7 @@ class Social:
                 from langchain.agents import create_agent
 
                 agent = create_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
-                    tools=inbox_group(self.app),
+                    tools=inbox_group(self.app) + timeline_group(self.app, owner),
                     system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
                     + "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
                 result = await agent.ainvoke({"messages": [

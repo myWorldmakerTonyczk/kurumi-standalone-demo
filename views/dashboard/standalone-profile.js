@@ -1136,6 +1136,26 @@ function mountAgentTimeline(panel) {
   const logs = h("ul", {class: "agent-inbox-items"});
   const content = h("section", {hidden: true}, refresh, tasks, h("details", {}, h("summary", {}, "调试日志"), logs));
   panel.className = "profile-settings";
+  const eventFields = Object.entries({liquidation: "模拟强平", stop_loss: "止损成交", take_profit: "止盈成交",
+    margin_call: "首次保证金不足", deposit: "追加虚拟资金"}).map(([key, title]) => [key, h("input", {type: "checkbox"}), title]);
+  const saveEvents = h("button", {type: "button", disabled: true}, "保存唤起设置");
+  const eventStatus = h("p", {role: "status", class: "caption"});
+  panel.append(h("fieldset", {}, h("legend", {}, "账户事件自动唤起"),
+    ...eventFields.map(([, input, title]) => h("label", {class: "check"}, input, title)), saveEvents, eventStatus));
+  async function loadEvents(save = false) {
+    saveEvents.disabled = true;
+    try {
+      const body = Object.fromEntries(eventFields.map(([key, input]) => [key, input.checked]));
+      const values = await api("account-wakeups", save ? {method: "POST", body} : {});
+      for (const [key, input] of eventFields) input.checked = values[key];
+      eventStatus.textContent = save ? "已保存" : "";
+      saveEvents.disabled = false;
+    } catch (error) {
+      eventStatus.textContent = error.message;
+      if (save) saveEvents.disabled = false;
+    }
+  }
+  saveEvents.onclick = () => loadEvents(true);
   panel.append(h("h3", {}, "智能体任务时间线"),
     h("label", {class: "check"}, toggle, "测试开关：记录并显示任务日志"),
     h("p", {class: "caption"}, "关闭时仍为智能体保留简短任务记录。"), status, content);
@@ -1147,10 +1167,21 @@ function mountAgentTimeline(panel) {
       const data = await api("agent-timeline", enabled === undefined ? {} : {method: "POST", body: {enabled}});
       toggle.checked = data.enabled;
       content.hidden = !data.enabled;
-      tasks.replaceChildren(...data.tasks.map(task => h("li", {},
+      tasks.replaceChildren(...data.tasks.map(task => {
+        const detail = h("pre", {class: "markdown-copy"});
+        const open = h("details", {}, h("summary", {}, "查看报告"), detail);
+        open.ontoggle = async () => {
+          if (!open.open) return;
+          try {
+            const report = await api("agent-timeline", {query: {task: task.id}});
+            detail.textContent = JSON.stringify(report.details, null, 2);
+          } catch (error) { detail.textContent = error.message; }
+        };
+        return h("li", {},
         h("strong", {}, task.label + " · " + labels[task.state]),
         h("small", {}, "#" + task.id + " · " + formatTime(task.created)),
-        task.outcome ? h("p", {}, task.outcome) : null)));
+        task.outcome ? h("p", {}, task.outcome) : null, open);
+      }));
       logs.replaceChildren(...data.logs.map(entry => h("li", {},
         "#" + entry.task + " · " + labels[entry.state] + (entry.error_type ? " · " + entry.error_type : ""),
         h("small", {}, formatTime(entry.created)))));
@@ -1166,7 +1197,7 @@ function mountAgentTimeline(panel) {
   }
   toggle.onchange = () => load(toggle.checked);
   refresh.onclick = () => load();
-  return () => load();
+  return () => { load(); loadEvents(); };
 }
 
 export function mountAdvanced(container) {

@@ -2,15 +2,16 @@
 import asyncio
 import heapq
 import itertools
+import json
 import time
 from contextvars import ContextVar
 
 _active_task = ContextVar("active_agent_task", default=None)
 
-PRIORITY = {"private": 0, "group_mention": 1, "manual_watch": 2, "group": 3,
+PRIORITY = {"private": 0, "group_mention": 1, "account_check": 1, "manual_watch": 2, "group": 3,
             "private_followup": 3, "group_followup": 3, "watch": 4, "diary": 5,
             "proactive": 6, "patrol": 7}
-LABELS = {"private": "私聊", "group_mention": "群聊提及", "group": "群聊",
+LABELS = {"private": "私聊", "group_mention": "群聊提及", "group": "群聊", "account_check": "账户事件检查",
           "watch": "定时看盘", "manual_watch": "手动看盘", "diary": "日记",
           "proactive": "主动私聊", "patrol": "社区巡视", "private_followup": "私聊跟进",
           "group_followup": "群聊跟进", "trade_review": "交易复盘", "group_summary": "群聊摘要"}
@@ -27,6 +28,9 @@ class AgentTimeline:
             kind TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL,
             started REAL, ended REAL, outcome TEXT NOT NULL DEFAULT '');
         CREATE INDEX IF NOT EXISTS agent_task_owner ON agent_tasks(owner,id);
+        CREATE TABLE IF NOT EXISTS agent_task_reports(
+            task INTEGER PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+            data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_task_debug(
             id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
             state TEXT NOT NULL, created REAL NOT NULL, error_type TEXT NOT NULL DEFAULT '');
@@ -39,18 +43,19 @@ class AgentTimeline:
             self.db.execute("INSERT INTO agent_task_debug(task,state,created,error_type) VALUES(?,?,?,?)",
                             (ident, state, time.time(), error))
 
-    def enqueue(self, owner, kind, execute, *, key=None, outcome=None):
+    def enqueue(self, owner, kind, execute, *, key=None, outcome=None, report=None):
         if key is not None and (owner, key) in self.dedup:
             return self.dedup[owner, key]
         ident = self.db.execute("INSERT INTO agent_tasks(owner,kind,state,created) VALUES(?,?,'queued',?)",
                                 (owner, kind, time.time())).lastrowid
+        self.db.execute("INSERT INTO agent_task_reports VALUES(?,?)", (ident, json.dumps(report or {}, ensure_ascii=False)))
         self.debug(owner, ident, "queued")
         future = asyncio.get_running_loop().create_future()
         future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         if key is not None:
             self.dedup[owner, key] = ident, future
         queue = self.queues.setdefault(owner, [])
-        heapq.heappush(queue, (PRIORITY.get(kind, 5), next(self.order), ident, execute, future, key, outcome))
+        heapq.heappush(queue, (PRIORITY.get(kind, 5), next(self.order), ident, kind, execute, future, key, outcome))
         if owner not in self.workers:
             self.workers[owner] = asyncio.create_task(self.drain(owner))
         return ident, future
@@ -67,7 +72,7 @@ class AgentTimeline:
         queue = self.queues[owner]
         try:
             while queue:
-                _, _, ident, execute, future, key, summarize = heapq.heappop(queue)
+                _, _, ident, kind, execute, future, key, summarize = heapq.heappop(queue)
                 state, outcome, error = "completed", "已完成", ""
                 self.db.execute("UPDATE agent_tasks SET state='running',started=? WHERE id=?", (time.time(), ident))
                 self.debug(owner, ident, "running")
@@ -78,6 +83,11 @@ class AgentTimeline:
                         outcome = summarize(result)
                     if outcome == "已跳过":
                         state = "skipped"
+                    detail = {}
+                    if isinstance(result, str) and kind not in ("private", "private_followup", "group", "group_mention", "group_followup", "proactive"):
+                        detail["report"] = result[:3200]
+                    if detail:
+                        self.note(owner, detail)
                     future.set_result(result)
                 except asyncio.CancelledError:
                     state, outcome = "interrupted", "服务停止，任务中断"
@@ -85,6 +95,7 @@ class AgentTimeline:
                     raise
                 except Exception as exc:
                     state, outcome, error = "failed", "执行失败", type(exc).__name__
+                    self.note(owner, {"error_type": error})
                     future.set_exception(exc)
                 finally:
                     _active_task.reset(token)
@@ -96,12 +107,53 @@ class AgentTimeline:
         finally:
             self.workers.pop(owner, None)
             self.queues.pop(owner, None)
-            for _, _, ident, _, future, key, _ in queue:
-                future.cancel()
-                self.db.execute("UPDATE agent_tasks SET state='interrupted',ended=?,outcome='服务停止' WHERE id=?",
-                                (time.time(), ident))
-                if key is not None:
-                    self.dedup.pop((owner, key), None)
+            self.interrupt_pending(owner, queue)
+
+    def interrupt_pending(self, owner, queue):
+        for _, _, ident, _, _, future, key, _ in queue:
+            future.cancel()
+            self.db.execute("UPDATE agent_tasks SET state='interrupted',ended=?,outcome='服务停止' WHERE id=?",
+                            (time.time(), ident))
+            if key is not None:
+                self.dedup.pop((owner, key), None)
+
+    def note(self, owner, fields):
+        current = _active_task.get()
+        if current and current[0] == owner:
+            self.db.execute("UPDATE agent_task_reports SET data=json_patch(data,?) WHERE task=?",
+                            (json.dumps(fields, ensure_ascii=False), current[1]))
+
+    def reference(self, owner, reference):
+        current = _active_task.get()
+        if not current or current[0] != owner:
+            return
+        row = self.db.execute("SELECT data FROM agent_task_reports WHERE task=?", (current[1],)).fetchone()
+        if row:
+            refs = json.loads(row["data"]).get("references", [])
+            if len(refs) < 40:
+                self.note(owner, {"references": [*refs, reference]})
+
+    def report(self, owner, ident, *, summary_only=False):
+        row = self.db.execute("""SELECT t.id,t.kind,t.state,t.created,t.started,t.ended,t.outcome,r.data
+            FROM agent_tasks t LEFT JOIN agent_task_reports r ON r.task=t.id WHERE t.owner=? AND t.id=?""",
+            (owner, ident)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        data = item.pop("data")
+        item["label"] = LABELS.get(item["kind"], item["kind"])
+        if not summary_only:
+            item["details"] = json.loads(data or "{}")
+        return item
+
+    def query(self, owner, since=0, until=0, kind="", state="", before=0, limit=20):
+        limit = min(50, max(1, limit))
+        rows = self.db.execute("""SELECT id,kind,state,created,started,ended,outcome FROM agent_tasks
+             WHERE owner=? AND created>=? AND (?=0 OR created<=?) AND (?='' OR kind=?)
+                 AND (?='' OR state=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?""",
+             (owner, since, until, until, kind, kind, state, state, before, before, limit + 1)).fetchall()
+        return {"items": [dict(row) | {"label": LABELS.get(row["kind"], row["kind"])} for row in rows[:limit]],
+                "next_before": rows[limit-1]["id"] if len(rows) > limit else None}
 
     def history(self, owner, limit=30):
         rows = self.db.execute("""SELECT id,kind,state,created,started,ended,outcome FROM agent_tasks
@@ -127,3 +179,7 @@ class AgentTimeline:
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+        for owner, queue in self.queues.items():
+            self.interrupt_pending(owner, queue)
+        self.queues.clear()
+        self.workers.clear()

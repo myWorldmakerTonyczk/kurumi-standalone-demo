@@ -29,6 +29,7 @@ from src.agent.image_library import ImageLibrary
 from src.agent.market_bulletin import MarketBulletin
 from src.agent.inbox import AgentInbox
 from src.agent.timeline import AgentTimeline
+from src.agent.task_schedule import ACCOUNT_EVENTS, TaskSchedule
 from src.agent.mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups, tool_name
 from src.agent.mcp.registry import flatten, user_workspace_groups
 from src.agent.workflow import agent_real_name, character_persona, persona_body, social_system_prompt, workflow
@@ -84,11 +85,12 @@ class Demo:
         self.db = self.engine.db
         self.default_persona = DEFAULT_PERSONA
         self.timeline = AgentTimeline(self.db, self.profile)
+        self.task_schedule = TaskSchedule(self)
         self.social = Social(self)
         self.stickers = Stickers(self.db)
         self.agent_inbox = AgentInbox(self.engine)
         self.community = Community(self.db, stickers=self.stickers, agent_inbox=self.agent_inbox)
-        self.engine.on_log = self.agent_inbox.system
+        self.engine.on_log = self.record_account_event
         self.call_logs = CallLogs(self.db, self.profile)
         self.images = ImageLibrary(self)
         self.market_bulletin = MarketBulletin(self)
@@ -126,6 +128,13 @@ class Demo:
 
     def public_url(self):
         return os.getenv("KURUMI_PUBLIC_URL") or self.dashboard.get("portal", {}).get("origin") or "http://127.0.0.1:8791"
+
+    def record_account_event(self, game, entry):
+        self.agent_inbox.system(game, entry)
+        self.task_schedule.account_event(game, entry)
+        if game.get("owner_id"):
+            self.timeline.reference(game["owner_id"], {"type": "ledger", "game_id": game["id"],
+                                                       "id": entry["id"], "action": entry["action"], "status": entry["status"]})
 
     async def run_decision(self, game, *, manual=False):
         _, future = self.enqueue_decision(game, manual=manual)
@@ -349,7 +358,8 @@ class Demo:
                                 reply_entry=reply_entry),
             outcome=lambda reply: ("已回复私聊" if reply or attachments else "已跳过") if kind == "private" else "已完成")
 
-    async def _agent(self, game, message=None, *, diary_prompt=None, attachments=None, user_image=None, audit_task=None, chat_messages=(), reply_entry=None):
+    async def _agent(self, game, message=None, *, diary_prompt=None, attachments=None, user_image=None,
+                     audit_task=None, chat_messages=(), reply_entry=None, task_instruction="", readonly=False):
         received_at = time.time() if message is not None else None
         gid, owner = game["id"], game["owner_id"]
         lock = lock_for(self, gid)
@@ -426,7 +436,7 @@ class Demo:
                     middleware.append(ModelRetryMiddleware(max_retries=policy["retries"],
                                                            retry_on=retryable, on_failure="error"))
                 groups = user_workspace_groups(self, gid, revision=revision, attachments=attachments, user_image=user_image,
-                    writable=diary_prompt is None and game["status"] == "running"
+                    writable=not readonly and diary_prompt is None and game["status"] == "running"
                     and (message is None or self.accounts.trade_allowed(game)),
                     message_ids=[entry[0] for entry in chat_messages], diary=diary_prompt is not None,
                     handoff=message is None and diary_prompt is None and self.external.settings(owner)["mode"] == "platform")
@@ -460,7 +470,8 @@ class Demo:
                 agent = create_agent(model, tools=tools,
                     middleware=middleware,
                     system_prompt=prompt_persona + "\n" + instructions + "\n你的模拟外汇账户快照（话题涉及账户、行情或复盘时参考）：" + dump(state))
-                prompt = diary_prompt or (message if message is not None else workflow("watch"))
+                prompt = diary_prompt or (message if message is not None else workflow("watch") +
+                    ("\n" + task_instruction if task_instruction else ""))
                 if chat_messages and (len(chat_messages) > 1 or chat_messages[0][2]):
                     from src.agent.vision import describe_image
 
@@ -516,7 +527,7 @@ class Demo:
             elif self.demo:
                 if diary_prompt is not None:
                     reply = "离线演示日记：" + diary_prompt[:180]
-                elif message is None and game["status"] == "paused":
+                elif message is None and (readonly or game["status"] != "running"):
                     reply = "离线演示：已读取账户和行情，当前为只读看盘。"
                 elif message is None:
                     reply = "离线演示：" + (await open_trade("buy", 100, "离线演示定时任务")
@@ -539,6 +550,8 @@ class Demo:
                         created = time.time()
                         stored = self.db.execute("INSERT INTO demo_chat(game,role,content,created,reasoning,attachments) VALUES(?,?,?,?,?,?)",
                             (gid, "assistant", reply, created, reasoning, dump(attachments or [])))
+                        self.timeline.reference(owner, {"type": "private_message", "game_id": gid,
+                                                        "id": stored.lastrowid})
                         if reply_entry is not None:
                             reply_entry.update(id=stored.lastrowid, created=created)
                 if memory.get("enabled", True) and memory.get("automatic", True):
@@ -554,7 +567,7 @@ class Demo:
                         self.memory.include_private_history(owner, gid)
                         self.memory.last_seen[key] = asyncio.get_running_loop().time()
                         self.memory.start(*key, chosen, self.model_url)
-            elif game["status"] == "running":
+            elif not readonly and game["status"] == "running":
                 await execute(self, gid, "observe", {"reason": reply[:500] or "完成定时看盘"}, already_locked=True)
             return reply
 
@@ -634,7 +647,12 @@ class Demo:
             await asyncio.sleep(5)
 
     async def jobs(self):
+        self.task_schedule.recover()
         while True:
+            try:
+                self.task_schedule.tick()
+            except Exception:
+                logging.getLogger("kurumi").exception("预约任务调度失败")
             for game in self.engine.games():
                 gid = game["id"]
                 row = self.db.execute("SELECT due FROM demo_schedule WHERE game=?", (gid,)).fetchone()
@@ -939,6 +957,19 @@ class Demo:
             owner = session["owner"]
             if self.demo and session["mode"] == "account":
                 self.community.seed_demo(owner)
+            if action == "account-wakeups":
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                profile = self.profile(owner)
+                if request.method == "POST":
+                    if any(type(body.get(key)) is not bool for key in ACCOUNT_EVENTS):
+                        raise ValueError("账户事件唤起设置无效")
+                    profile["account_wakeups"] = {key: body[key] for key in ACCOUNT_EVENTS}
+                    self.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)", (owner, dump(profile)))
+                elif request.method != "GET":
+                    raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
+                return web.json_response({key: profile.get("account_wakeups", {}).get(key, True)
+                                          for key in ACCOUNT_EVENTS}, headers={"Cache-Control": "no-store"})
             if action == "agent-timeline":
                 if session["mode"] != "account":
                     raise web.HTTPForbidden()
@@ -951,6 +982,12 @@ class Demo:
                 elif request.method != "GET":
                     raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
                 enabled = bool(profile.get("timeline_debug"))
+                task_id = request.query.get("task")
+                if task_id and enabled:
+                    task = self.timeline.report(owner, int(task_id))
+                    if not task:
+                        raise web.HTTPNotFound()
+                    return web.json_response(task, headers={"Cache-Control": "no-store"})
                 return web.json_response({"enabled": enabled, "tasks": self.timeline.history(owner) if enabled else [],
                     "logs": self.timeline.logs(owner) if enabled else []}, headers={"Cache-Control": "no-store"})
             if action == "agent-inbox":
