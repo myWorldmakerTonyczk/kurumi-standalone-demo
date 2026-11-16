@@ -103,6 +103,21 @@ class MarketBulletinTests(unittest.IsolatedAsyncioTestCase):
         agent.ask.assert_not_awaited()
         self.assertIn("未发布空报", next(row for row in agent.admin()["runs"] if row["kind"] == "day")["error"])
 
+    async def test_media_reports_are_labeled_and_keep_the_original_link(self):
+        agent = self.agent
+        stamp = time.time() - 100
+        url = "https://media.example/economy"
+        media = (url, "非官方 · media.example", "Economy update", "Media summary", stamp)
+        agent.ingest_news([media])
+        agent.ingest_news([(url, media[1], media[2], media[3], stamp + 60)])
+        reports = agent.reports(10, kind="live")
+        self.assertEqual(len(reports), 1)
+        report = reports[0]
+        self.assertIn("非官方", report["label"])
+        self.assertIn("非官方 · media.example", report["body"])
+        self.assertEqual(report["details"]["links"], [["【非官方 · media.example】Economy update", url]])
+        self.assertEqual(report["details"]["media_count"], 1)
+
     def test_official_formats_and_timezone(self):
         rss = """<rss><channel><item><title>Indicator</title><link>https://example.gov/release</link>
           <pubDate>Tue, 10 Nov 2026 13:30:00 GMT</pubDate><description>Summary</description></item></channel></rss>"""

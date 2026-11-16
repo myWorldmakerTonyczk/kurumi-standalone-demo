@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timedelta
@@ -27,6 +28,8 @@ ECB = "https://www.ecb.europa.eu/rss/press.html"
 BLS = "https://www.bls.gov/feed/bls_latest.rss"
 CALENDAR = "https://www.bls.gov/schedule/news_release/bls.ics"
 BEA = "https://apps.bea.gov/rss/rss.xml"
+NEWS_SEARCH = "https://api.search.brave.com/res/v1/news/search"
+MEDIA_PREFIX = "非官方 · "
 BEA_CALENDAR = "https://www.bea.gov/news/schedule/ics/online-calendar-subscription.ics"
 FEEDS = {"美联储": FED, "欧洲央行": ECB, "美国劳工统计局": BLS, "美国经济分析局": BEA}
 CALENDARS = {"美国劳工统计局": CALENDAR, "美国经济分析局": BEA_CALENDAR}
@@ -207,6 +210,7 @@ class MarketBulletin:
         next_events = self.db.execute("SELECT title,due,source FROM platform_bulletin_events WHERE active=1 AND due>=? ORDER BY due LIMIT 8", (time.time(),))
         return {"config": config | {"has_key": bool(key), "model_ready": ready}, "available_pairs": list(PAIRS),
                 "tasks": [dict(row) for row in tasks], "agenda": [dict(row) for row in next_events],
+                "search_ready": bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()),
                 "runs": [dict(row) for row in self.db.execute("SELECT * FROM platform_bulletin_runs")],
                 "reports": self.reports(8)}
 
@@ -234,6 +238,35 @@ class MarketBulletin:
                 if len(data) > 1_000_000:
                     raise ValueError("来源返回内容过大")
             return data.decode("utf-8-sig")
+
+    async def search_news(self, query):
+        key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
+        if not key:
+            return [], ""
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=12)) as session:
+                async with session.get(NEWS_SEARCH, params={"q": query[:300], "count": 10, "freshness": "pd"},
+                                       headers={"X-Subscription-Token": key}, allow_redirects=False) as response:
+                    if response.status != 200:
+                        return [], f"联网新闻搜索（HTTP {response.status}）"
+                    results = (await response.json()).get("results", [])
+        except (TimeoutError, ClientError, ValueError):
+            return [], "联网新闻搜索暂不可用"
+        items = []
+        for result in results:
+            try:
+                url = URL(result["url"])
+                when = datetime.fromisoformat(result["page_age"].replace("Z", "+00:00"))
+                stamp = (when if when.tzinfo else when.replace(tzinfo=ZoneInfo("UTC"))).timestamp()
+                title = clean(result["title"])[:250]
+                if url.scheme != "https" or not url.host or url.user or not title:
+                    continue
+                source = MEDIA_PREFIX + url.host.removeprefix("www.")
+                items.append((str(url.with_fragment(None)), source, title,
+                              clean(result.get("description"))[:450], stamp))
+            except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
+                continue
+        return items, ""
 
     async def collect(self):
         async def read(session, label, source, address, calendar=False):
@@ -281,11 +314,13 @@ class MarketBulletin:
             sources += [(name + "日历", name, url, True) for name, url in CALENDARS.items()]
             results = await asyncio.gather(*(read(session, *source) for source in sources))
         failed = [f"{source[0]}（{error}）" for source, (_, error) in zip(sources, results) if error]
-        warning = "暂未同步 " + "、".join(failed) if failed else ""
-        if len(failed) == len(sources):
+        media, search_error = await self.search_news("forex dollar euro yen central banks inflation jobs economic data markets")
+        issues = failed + ([search_error] if search_error else [])
+        warning = "暂未同步 " + "、".join(issues) if issues else ""
+        if len(failed) == len(sources) and not media:
             raise ValueError(warning)
         if self.config()["enabled"]:
-            self.ingest_news(item for items, _ in results for item in items)
+            self.ingest_news([item for items, _ in results for item in items] + media)
         return warning
 
     def ingest_news(self, items):
@@ -294,8 +329,9 @@ class MarketBulletin:
         self.db.execute("SAVEPOINT ingest_bulletin_news")
         try:
             for url, source, title, excerpt, published in items:
-                previous = self.db.execute("SELECT published FROM platform_bulletin_news WHERE url=?", (url,)).fetchone()
-                if previous and previous[0] > published:
+                previous = self.db.execute("SELECT published,source FROM platform_bulletin_news WHERE url=?", (url,)).fetchone()
+                if previous and (source.startswith(MEDIA_PREFIX) or
+                                 (not previous["source"].startswith(MEDIA_PREFIX) and previous["published"] > published)):
                     continue
                 self.db.execute("INSERT OR REPLACE INTO platform_bulletin_news VALUES(?,?,?,?,?)",
                                 (url, source, title, excerpt, published))
@@ -304,6 +340,8 @@ class MarketBulletin:
             if fresh:
                 fresh.sort(key=lambda item: (item[4], item[0]), reverse=True)
                 headline = fresh[0][2]
+                if fresh[0][1].startswith(MEDIA_PREFIX):
+                    headline = "【非官方】" + headline
                 label = headline if len(fresh) == 1 else f"{headline} 等 {len(fresh)} 条"
                 fingerprint = json.dumps([(url, published) for url, _, _, _, published in fresh])
                 ident = "live:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:24]
@@ -312,9 +350,11 @@ class MarketBulletin:
                     stamp = datetime.fromtimestamp(published, ZONE).strftime("%m-%d %H:%M")
                     paragraphs.append(f"**{title}**\n\n{source} · {stamp}（北京时间）" + (f"\n\n{excerpt}" if excerpt else ""))
                 if len(fresh) > 12:
-                    paragraphs.append(f"另有 {len(fresh) - 12} 条，见下方官方来源。")
+                    paragraphs.append(f"另有 {len(fresh) - 12} 条，见下方来源。")
                 self.save_report(ident, "live", label, "\n\n".join(paragraphs),
-                                 {"news_count": len(fresh), "links": [(title, url) for url, _, title, _, _ in fresh]})
+                                 {"news_count": len(fresh), "media_count": sum(source.startswith(MEDIA_PREFIX) for _, source, _, _, _ in fresh),
+                                  "links": [(f"【{source}】{title}" if source.startswith(MEDIA_PREFIX) else title, url)
+                                            for url, source, title, _, _ in fresh]})
         except BaseException:
             self.db.execute("ROLLBACK TO ingest_bulletin_news")
             raise
@@ -355,7 +395,7 @@ class MarketBulletin:
                 self.db.execute("""INSERT OR IGNORE INTO platform_bulletin_wakeups(event, task)
                     VALUES(?,?)""", (event, task.strip()[:240]))
 
-    async def publish(self, kind, config, generation, *, event=None, source_warning=""):
+    async def publish(self, kind, config, generation, *, event=None, source_warning="", event_media=()):
         now = datetime.now(ZONE)
         if event:
             label = event["title"]
@@ -369,6 +409,10 @@ class MarketBulletin:
         news = [dict(row) for row in self.db.execute("""SELECT * FROM platform_bulletin_news
             WHERE published>=? AND published<? AND (? IS NULL OR source=?) ORDER BY published,url""",
             (start.timestamp(), end.timestamp(), event["source"] if event else None, event["source"] if event else None))]
+        known_urls = {item["url"] for item in news}
+        news.extend(dict(url=url, source=source, title=title, excerpt=excerpt, published=published)
+                    for url, source, title, excerpt, published in event_media
+                    if url not in known_urls and start.timestamp() <= published <= end.timestamp())
         updates = []
         agenda = []
         update_links = []
@@ -396,7 +440,7 @@ class MarketBulletin:
         ledger = []
         if len(news) > 25:
             for index in range(0, len(news), 25):
-                ledger.append((await self.ask(config, "将这一批来源压缩成简短事实清单，保留关键日期与机构。",
+                ledger.append((await self.ask(config, "将这一批来源压缩成简短事实清单，保留关键日期、来源分类、媒体域名和原文链接。",
                                               news[index:index + 25]))[:1500])
         payload = {"period": label, "type": KINDS[kind], "news": news if not ledger else ledger,
                    "items": len(news)}
@@ -406,13 +450,15 @@ class MarketBulletin:
             payload["event"] = {"title": label, "due": event["due"], "task": event["task"], "source": event["source"]}
         body = await self.ask(config, "直接从收到的已核实事项写起，合并重复消息，把计划公布单列。"
             "没有结果的跟踪任务只能标为未核实。若有来源采集失败且影响覆盖，简短注明。"
-            "指标数值须有同一事项的官方公告支撑。", payload)
+            "每条二手报道使用【非官方】加媒体来源和原文链接。媒体报道中的指标数字只能归因转述。", payload)
         if generation != self.generation:
             return False
-        links = {item["url"]: item["title"] for item in news[-12:]}
+        links = {item["url"]: (f"【{item['source']}】{item['title']}" if item["source"].startswith(MEDIA_PREFIX)
+                               else item["title"]) for item in news[-12:]}
         for title, url in update_links:
             links.setdefault(url, title)
-        details = {"news_count": len(news), "update_count": len(updates), "agenda_count": len(agenda),
+        details = {"news_count": len(news), "media_count": sum(item["source"].startswith(MEDIA_PREFIX) for item in news),
+                   "update_count": len(updates), "agenda_count": len(agenda),
                    "links": [(title, url) for url, title in list(links.items())[:20]]}
         self.save_report(ident, kind, label, body, details)
         return True
@@ -504,7 +550,11 @@ class MarketBulletin:
 
             async def wake():
                 nonlocal rescheduled
-                await self.collect()
+                try:
+                    await self.collect()
+                except ValueError as error:
+                    if not str(error).startswith("暂未同步"):
+                        raise
                 current = self.db.execute("SELECT title,due,active FROM platform_bulletin_events WHERE id=?",
                                           (event["event"],)).fetchone()
                 rescheduled = not current or not current["active"] or current["due"] != event["due"]
@@ -513,9 +563,15 @@ class MarketBulletin:
                 fresh = self.db.execute("""SELECT 1 FROM platform_bulletin_news WHERE
                     source=? AND published>=? AND published<=? LIMIT 1""",
                     (event["source"], event["due"] - 60, time.time())).fetchone()
+                media, search_warning = await self.search_news(event["title"] + " release actual result")
+                if generation != self.generation:
+                    return False
+                media = [item for item in media if event["due"] - 60 <= item[4] <= time.time()]
+                self.ingest_news(media)
                 if not fresh and event["attempts"] < 2:
                     return "尚未收到同机构的新公告，5 分钟后再次核查"
-                return await self.publish("event", config, generation, event=event)
+                published = await self.publish("event", config, generation, event=event, event_media=media)
+                return search_warning if published and search_warning else published
             ok = await self.track("event", wake())
             if generation != self.generation:
                 return

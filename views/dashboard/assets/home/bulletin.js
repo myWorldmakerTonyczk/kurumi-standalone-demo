@@ -21,7 +21,8 @@ function reportList(reports) {
       h("small", {}, time(report.generated))),
     reportBody(report.body),
     h("small", {}, [
-      report.details.news_count ? report.details.news_count + " 条官方消息" : "",
+      report.details.news_count ? report.details.news_count + " 条消息" : "",
+      report.details.media_count ? "其中 " + report.details.media_count + " 条非官方" : "",
       report.details.update_count ? report.details.update_count + " 条实时或指标更新" : "",
       report.details.agenda_count ? report.details.agenda_count + " 条待公布日程" : "",
     ].filter(Boolean).join(" · ")),
@@ -71,7 +72,7 @@ export function marketBulletin({compact = false} = {}) {
       const preview = h("div", {class: "bulletin-lead"},
         h("h4", {}, "实时动态"),
         latestUpdates.length ? latestUpdates.map(reportRow)
-          : h("p", {class: "bulletin-muted"}, "等待采集到新的官方公告"),
+          : h("p", {class: "bulletin-muted"}, "等待采集到新的市场消息"),
         h("h4", {}, "最新日报"),
         latestDaily ? reportRow(latestDaily)
           : h("p", {class: "bulletin-muted"}, data.model_ready ? "暂无已发布的日报" : "等待管理员配置播报模型"));
@@ -83,7 +84,7 @@ export function marketBulletin({compact = false} = {}) {
         : h("p", {class: "bulletin-muted"}, "暂无已同步的待公布指标");
       if (compact) {
         body.replaceChildren(h("button", {type: "button", class: "ui-btn ui-btn-sm",
-          onClick: () => dialog.showModal()}, "查看官方播报归档"));
+          onClick: () => dialog.showModal()}, "查看市场播报归档"));
       } else body.replaceChildren(preview, h("h4", {}, "主要品种 · Bid / Ask"),
         data.quotes.length ? quotes : h("p", {class: "bulletin-muted"}, "暂无报价"),
         h("h4", {}, "今日关注 · 北京时间"), events,
@@ -116,6 +117,7 @@ export function mountBulletinAdmin(root, bridge) {
   const status = h("p", {role: "status", class: "bulletin-feedback"});
   const signal = h("span", {class: "bulletin-signal"});
   const schedule = h("div", {class: "bulletin-task-list"});
+  const searchStatus = h("p", {class: "bulletin-muted"});
   const calendar = h("div", {class: "bulletin-task-list"});
   const reports = h("div");
   const operations = h("div", {class: "bulletin-actions"});
@@ -151,7 +153,7 @@ export function mountBulletinAdmin(root, bridge) {
       h("fieldset", {}, h("legend", {}, "首页关注品种"), pairs)),
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "管理员模型"),
       label("模型预设", preset), label("API Base URL", endpoint), label("模型 ID", model), label("API Key", key),
-      h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。")),
+      h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。"), searchStatus),
     h("div", {class: "bulletin-admin-footer"}, submit));
   root.className = "bulletin-admin";
   root.append(
@@ -191,6 +193,7 @@ export function mountBulletinAdmin(root, bridge) {
       dirty = false;
     }
     key.placeholder = config.has_key ? "已配置，留空保留" : "请输入管理员 API Key";
+    searchStatus.textContent = data.search_ready ? "联网新闻搜索已配置" : "联网新闻搜索待配置（BRAVE_SEARCH_API_KEY）";
     signal.textContent = !config.enabled ? "已停用" : config.model_ready ? "已启用" : "已启用 · 待配置模型";
     signal.dataset.state = config.enabled && config.model_ready ? "live" : "stale";
     runs.replaceChildren(...Object.entries(RUNS).flatMap(([kind, label]) => {
