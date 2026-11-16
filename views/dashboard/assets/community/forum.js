@@ -410,7 +410,12 @@ export function createForum(ctx) {
       }
       suggestions.hidden = !suggestions.childElementCount;
     });
-    area.addEventListener("keydown", event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") form.requestSubmit(); });
+    area.addEventListener("keydown", event => {
+      if (event.isComposing || event.keyCode === 229 || event.key !== "Enter" || event.shiftKey) return;
+      event.preventDefault();
+      if (!suggestions.hidden && suggestions.firstElementChild) suggestions.firstElementChild.click();
+      else if (area.value.trim() || media.hasMedia()) form.requestSubmit();
+    });
     const form = h("form", {class: "cm-comment-form", novalidate: true, onSubmit: async event => {
       event.preventDefault();
       error.textContent = "";
@@ -432,7 +437,7 @@ export function createForum(ctx) {
         }
       } catch (failure) { error.textContent = failure.message; toast("评论失败：" + failure.message, "error"); }
     }}, h("div", {class: "ui-label-row"}, h("span", {}, "发表评论"), count), T.replyBar, area, suggestions, media.element, error,
-      h("div", {class: "cm-form-actions"}, h("span", {class: "ui-muted"}, "Ctrl + Enter 快速发送"), submit));
+      h("div", {class: "cm-form-actions"}, h("span", {class: "ui-muted"}, "Enter 发送 · Shift + Enter 换行"), submit));
     T.form = form;
     T.view = h("section", {class: "cm-thread", "aria-label": "帖子详情"}, T.head, T.commentsHead, T.comments, form);
     T.info = h("section", {class: "cm-panel"});

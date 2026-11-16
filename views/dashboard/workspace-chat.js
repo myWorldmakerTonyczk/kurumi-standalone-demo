@@ -37,7 +37,7 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
       <div class="chat-log" role="log"></div>
       <form>
         <div class="chat-upload-preview" hidden><img alt="待发送图片"><button type="button" data-remove-image>移除</button></div>
-        <textarea aria-label="消息" name="message" rows="2" maxlength="2000" placeholder="输入消息或拖入图片"></textarea>
+        <textarea aria-label="消息" name="message" rows="2" maxlength="2000" placeholder="Enter 发送 · Shift + Enter 换行"></textarea>
         <div class="chat-composer-actions"><input type="file" accept="image/*" name="picture" hidden>
           <button type="button" data-pick-image>图片</button><button type="submit" class="primary">发送</button></div>
       </form>
@@ -333,6 +333,11 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     if (!file) return;
     event.preventDefault();
     addImage(file);
+  });
+  form.elements.message.addEventListener("keydown", event => {
+    if (event.isComposing || event.keyCode === 229 || event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    if (form.elements.message.value.trim() || imageDraft) form.requestSubmit();
   });
   form.onsubmit = async event => {
     event.preventDefault();

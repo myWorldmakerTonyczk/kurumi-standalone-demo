@@ -207,7 +207,7 @@ export function createGroups(ctx) {
       if (R.log.scrollTop < 32 && s.hasOlder) loadOlder();
       scheduleRead();
     }, {passive: true});
-    R.input = h("textarea", {rows: "3", maxlength: String(MSG_MAX), "aria-label": "消息内容", placeholder: "输入消息，Ctrl + Enter 发送"});
+    R.input = h("textarea", {rows: "3", maxlength: String(MSG_MAX), "aria-label": "消息内容", placeholder: "Enter 发送，Shift + Enter 换行"});
     R.count = h("span", {class: "ui-counter", "aria-hidden": "true"});
     bindCounter(R.input, R.count, MSG_MAX);
     R.error = h("p", {class: "ui-field-error", role: "alert"});
@@ -221,11 +221,8 @@ export function createGroups(ctx) {
       if (!R.mentions.contains(event.relatedTarget)) R.mentions.hidden = true;
     });
     R.input.addEventListener("keydown", event => {
-      if (event.isComposing) return;
-      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-        event.preventDefault();
-        R.form.requestSubmit();
-      } else if (!R.mentions.hidden && ["ArrowUp", "ArrowDown", "Enter", "Escape"].includes(event.key)) {
+      if (event.isComposing || event.keyCode === 229 || (event.key === "Enter" && event.shiftKey)) return;
+      if (!R.mentions.hidden && ["ArrowUp", "ArrowDown", "Enter", "Escape"].includes(event.key)) {
         event.preventDefault();
         if (event.key === "Escape") R.mentions.hidden = true;
         else if (event.key === "Enter") R.mentions.children[mentionIndex]?.click();
@@ -234,6 +231,9 @@ export function createGroups(ctx) {
             % R.mentions.children.length;
           updateMentions(false);
         }
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (R.input.value.trim() || imageDrafts.has(s.room)) R.form.requestSubmit();
       }
     });
     R.form = h("form", {class: "gr-composer", novalidate: true, onSubmit: async event => {
