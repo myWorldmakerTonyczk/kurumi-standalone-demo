@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage
 
 from app import Demo
 from src.agent.mcp.load_tool_group import ToolGroups, tool_name
-from src.agent.mcp.registry import flatten, user_workspace_groups
+from src.agent.mcp.registry import flatten, user_patrol_groups, user_workspace_groups
 
 
 class TrackingModel(FakeMessagesListChatModel):
@@ -47,6 +47,41 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
                              middleware=[ToolGroups(groups)])
         await graph.ainvoke({"messages": [("user", "hello")]})
         self.assertEqual(TrackingModel.bindings[-1], ["load_tool_group"])
+
+    async def test_patrol_inbox_tools_use_the_current_account(self):
+        with tempfile.TemporaryDirectory() as root:
+            app = Demo(Path(root) / "inbox.sqlite3")
+            try:
+                owner = await app.accounts.create_web_user("inbox-owner", "temporary-test-password")
+                other = await app.accounts.create_web_user("inbox-other", "temporary-test-password")
+                app.agent_inbox.add(owner, "system", "test", "own event")
+                app.agent_inbox.add(other, "system", "test", "other event")
+                groups = user_patrol_groups(app.social, owner)
+                responses = [
+                    AIMessage(content="", tool_calls=[dict(name=name, args=args, id=f"call-{i}")])
+                    for i, (name, args) in enumerate([
+                        ("load_tool_group", {"category": "inbox"}),
+                        ("read_inbox", {}),
+                        ("read_inbox_history", {}),
+                        ("mark_inbox_unread", {"item_id": 1}),
+                        ("read_inbox", {"peek": True}),
+                    ])
+                ]
+                graph = create_agent(TrackingModel(responses=responses + [AIMessage(content="done")]),
+                                     tools=flatten(groups), middleware=[ToolGroups(groups)])
+                result = await graph.ainvoke({"messages": [("user", "check inbox")]})
+                by_call = {message.tool_call_id: message.content for message in result["messages"]
+                           if message.type == "tool"}
+                inbox = json.loads(by_call["call-1"])
+                self.assertEqual([item["title"] for item in inbox["items"]], ["own event"])
+                self.assertTrue(inbox["batch_id"])
+                history = json.loads(by_call["call-2"])
+                self.assertEqual([item["title"] for item in history["items"]], ["own event"])
+                self.assertEqual(json.loads(by_call["call-3"])["marked_unread"], 1)
+                self.assertEqual(json.loads(by_call["call-4"])["counts"]["system"], 1)
+                self.assertEqual(app.agent_inbox.read(other, peek=True)["counts"]["system"], 1)
+            finally:
+                app.db.close()
 
     async def test_memory_write_merges_and_records_sources(self):
         with tempfile.TemporaryDirectory() as root:

@@ -17,8 +17,8 @@ def flatten(groups):
     return [tool for tools in groups.values() for tool in tools]
 
 
-def inbox_group(app):
-    return [module.build(app.agent_inbox) for module in (read_inbox, read_inbox_history, mark_inbox_unread)]
+def inbox_group(app, owner):
+    return [module.build(app.agent_inbox, owner) for module in (read_inbox, read_inbox_history, mark_inbox_unread)]
 
 
 def timeline_group(app, owner, *, public=False):
@@ -35,7 +35,7 @@ def user_workspace_groups(app, gid, *, writable, revision, attachments=None, use
         price_history.build(app), read_journal.build(app, gid), read_diary.build(app, gid),
         get_current_workspace.build(app, gid)]}
     if not diary:
-        groups["inbox"] = inbox_group(app)
+        groups["inbox"] = inbox_group(app, owner)
     if handoff or attachments is not None or diary:
         groups["timeline"] = timeline_group(app, owner)
     if writable:
@@ -58,7 +58,7 @@ def user_workspace_groups(app, gid, *, writable, revision, attachments=None, use
 
 
 def user_group_groups(app, owner, roster, self_id, attachments, *, has_images, with_stickers):
-    groups = {"market_review": [read_market_bulletins.build(app)], "community": [mention_group_member.build(roster, self_id)], "inbox": inbox_group(app)}
+    groups = {"market_review": [read_market_bulletins.build(app)], "community": [mention_group_member.build(roster, self_id)], "inbox": inbox_group(app, owner)}
     groups["timeline"] = timeline_group(app, owner, public=True)
     media = []
     if has_images:
@@ -75,4 +75,4 @@ def user_patrol_groups(social, owner):
     published = [False]
     return {"market_review": [market.build(app), read_market_bulletins.build(app)],
             "community": [patrol_forum.build(social, owner, published), patrol_group.build(social, owner, published)],
-            "inbox": inbox_group(app), "timeline": timeline_group(app, owner)}
+            "inbox": inbox_group(app, owner), "timeline": timeline_group(app, owner)}

@@ -500,7 +500,7 @@ class Social:
             rows = self.db.execute("""SELECT role,content,created FROM demo_chat WHERE game=?
                 ORDER BY id DESC LIMIT 12""", (gid,)).fetchall()
             history = [dict(row) for row in reversed(rows)]
-            groups = {"inbox": inbox_group(self.app), "timeline": timeline_group(self.app, owner)}
+            groups = {"inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner)}
         agent = create_agent(model_client(config, self.app.model_url,
             audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=flatten(groups),
             system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
@@ -601,7 +601,7 @@ class Social:
                 from langchain.agents import create_agent
 
                 agent = create_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
-                    tools=inbox_group(self.app) + timeline_group(self.app, owner),
+                    tools=inbox_group(self.app, owner) + timeline_group(self.app, owner),
                     system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
                     + "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
                 result = await agent.ainvoke({"messages": [
