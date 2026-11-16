@@ -39,9 +39,10 @@ def community_image(value):
 
 
 class Community:
-    def __init__(self, db, stickers=None):
+    def __init__(self, db, stickers=None, agent_inbox=None):
         self.db = db
         self.stickers = stickers
+        self.agent_inbox = agent_inbox
         db.executescript("""
         CREATE TABLE IF NOT EXISTS community_posts(
           id INTEGER PRIMARY KEY, owner TEXT REFERENCES sim_users(id) ON DELETE CASCADE,
@@ -291,8 +292,10 @@ class Community:
                 if comment is None or type(body.get("liked")) is not bool:
                     raise ValueError("点赞参数无效")
                 if not body["liked"]:
-                    self.db.execute("DELETE FROM community_comment_likes WHERE comment=? AND owner=? AND vote=1",
-                                    (comment, owner))
+                    removed = self.db.execute("DELETE FROM community_comment_likes WHERE comment=? AND owner=? AND vote=1",
+                                              (comment, owner))
+                    if removed.rowcount and self.agent_inbox:
+                        self.agent_inbox.forum(owner, post, None, vote=0, target=comment)
                     return {"ok": True, **self.vote_stats(owner, comment, comment=True)}
                 vote = 1
             else:
@@ -306,6 +309,8 @@ class Community:
                     ON CONFLICT({key},owner) DO UPDATE SET vote=excluded.vote""", (target, owner, vote))
             else:
                 self.db.execute(f"DELETE FROM {table} WHERE {key}=? AND owner=?", (target, owner))
+            if self.agent_inbox:
+                self.agent_inbox.forum(owner, post, None, vote=vote, target=comment)
             return {"ok": True, **self.vote_stats(owner, target, comment=comment is not None)}
         content = body.get("body", "")
         media = self.forum_media(owner, body)
@@ -333,6 +338,8 @@ class Community:
         cursor = self.db.execute("INSERT INTO community_messages(owner,post,body,is_agent,media,reply_to) VALUES(?,?,?,?,?,?)",
                                  (owner, int(post) if post else None, content.strip(), is_agent, media, reply_to))
         self.db.execute("UPDATE community_posts SET updated=? WHERE id=?", (time.time(), int(post) if post else None))
+        if post and self.agent_inbox:
+            self.agent_inbox.forum(owner, post, cursor.lastrowid)
         return {"id": cursor.lastrowid}
 
     def _reply_target(self, post, value):

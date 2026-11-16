@@ -5,12 +5,7 @@ from src.core.engine import dump
 from src.core.replay import review
 
 
-def build_tools(app, gid, attachments):
-    async def send_panel() -> str:
-        """发送当前工作区链接。"""
-        attachments.append({"kind": "panel", "label": "打开交易工作区"})
-        return dump({"ok": True, "message": "已附上工作区链接"})
-
+def build(app, gid, attachments):
     async def send_review_image(kind: str = "candles", pair: str = "", days: int = 1, end: int = 0,
                                 kinds: list[str] | None = None, diary_date: str = "", text: str = "") -> str:
         """直接附上图片。K 线用 candles；还可生成净值、收益、回撤、日记等复盘图。"""
@@ -41,4 +36,4 @@ def build_tools(app, gid, attachments):
         except ValueError as exc:
             return dump({"ok": False, "error": str(exc)})
 
-    return [send_panel, send_review_image]
+    return send_review_image

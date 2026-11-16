@@ -75,7 +75,7 @@ export async function cropAvatar(file) {
       draw.drawImage(photo, (x-radius)*scaleX, (y-radius)*scaleY, 2*radius*scaleX, 2*radius*scaleY, 0, 0, 96, 96);
       for (const quality of [0.78, 0.62, 0.45, 0.25]) {
         value = output.toDataURL("image/webp", quality);
-        if (value.length <= 24000) break;
+        if (value.startsWith("data:image/png;base64,") || value.length <= 24000) break;
       }
       editor.close();
     };

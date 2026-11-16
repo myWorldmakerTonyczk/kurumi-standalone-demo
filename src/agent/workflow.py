@@ -17,10 +17,16 @@ def persona_body(text):
     return re.sub(r"^你是(?:福贺)?久留美(?:[。.]|\n|$)\s*", "", text, count=1)
 
 
+def agent_real_name(profile):
+    return profile.get("agent_real_name") or profile.get("agent_name") or "久留美"
+
+
 def character_persona(profile, default):
-    name = profile.get("agent_name") or "久留美"
+    name = agent_real_name(profile)
+    nickname = profile.get("agent_name") or "久留美"
     body = persona_body(profile.get("persona") or "") or default
-    return f"我是{name}。\n\n{body}"
+    return (f"我是{name}。这是你的真实姓名。你的昵称是「{nickname}」，是你在群聊、论坛等平台界面使用的显示名。"
+            "别人用这个昵称称呼或 @ 你时，指的也是你。\n\n" + body)
 
 
 def social_system_prompt(persona):

@@ -270,6 +270,7 @@ class MarketBulletin:
         return "暂未同步 " + "、".join(failed) if failed else ""
 
     async def ask(self, config, instruction, payload):
+        """Use the administrator model with public sources and no model-callable tools."""
         result = await model_client(config, self.app.model_url).ainvoke([
             SystemMessage(content=workflow("market_bulletin") + "\n" + instruction),
             HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
@@ -337,6 +338,9 @@ class MarketBulletin:
         details = {"news_count": len(news), "links": [(item["title"], item["url"]) for item in news[-12:]]}
         self.db.execute("INSERT OR REPLACE INTO platform_bulletins VALUES(?,?,?,?,?,?)",
                         (ident, kind, label, body[:7000], int(time.time()), json.dumps(details)))
+        inbox = getattr(self.app, "agent_inbox", None)
+        if inbox:
+            inbox.market(ident, kind, f"{KINDS[kind]} · {label}")
         return True
 
     async def run(self, action):

@@ -51,14 +51,17 @@ class PatrolLimitTest(unittest.IsolatedAsyncioTestCase):
         social.app = SimpleNamespace(
             profile=lambda owner: {"model": "test", "key": "test"},
             external=SimpleNamespace(settings=lambda owner: {"mode": "platform"}),
-            model_url=lambda url: url, default_persona="test",
+            model_url=lambda url: url, agent_persona=lambda owner, profile: "test",
+            agent_inbox=Mock(),
             call_logs=SimpleNamespace(callback=lambda *args: None),
             community=SimpleNamespace(handle=publish),
         )
         model = RepeatingPatrolModel(responses=[
-            AIMessage(content="", tool_calls=[{"name": "forum", "args": {
+            AIMessage(content="", tool_calls=[{"name": "load_tool_group", "args": {
+                "category": "community"}, "id": "load-community"}]),
+            *[AIMessage(content="", tool_calls=[{"name": "forum", "args": {
                 "action": "publish", "title": "News", "body": "Update"}, "id": f"tool-{i}"}])
-            for i in range(9)
+            for i in range(8)],
         ])
         with patch("src.agent.social.model_client", return_value=model), patch("src.agent.social.log") as logger:
             await social.run_patrol("owner")

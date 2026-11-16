@@ -107,6 +107,10 @@ class Memory:
                 finally:
                     db.execute("RELEASE migrate_agent_memory")
 
+        db.execute("""CREATE TABLE IF NOT EXISTS agent_memory_sources(
+            memory INTEGER NOT NULL REFERENCES agent_memory(id) ON DELETE CASCADE,
+            stream TEXT NOT NULL, messages TEXT NOT NULL, created REAL NOT NULL,
+            PRIMARY KEY(memory,stream,messages))""")
         columns = {row[1] for row in db.execute("PRAGMA table_info(agent_memory)")}
         for name, definition in (
             ("kind", "TEXT NOT NULL DEFAULT 'knowledge'"),

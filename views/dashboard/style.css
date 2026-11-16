@@ -1987,6 +1987,11 @@ input[type="checkbox"]:disabled { opacity: .55; cursor: default; }
 .persona-card > .persona-body {
   gap: 8px; font-weight: 600;
 }
+.agent-inbox-filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.agent-inbox-items { padding: 0; list-style: none; }
+.agent-inbox-items li { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.agent-inbox-items small { display: block; margin-top: 4px; }
+.agent-inbox-items p { margin: 4px 0 0; }
 .markdown-copy { min-width: 0; overflow-wrap: anywhere; }
 .markdown-copy > :first-child { margin-top: 0; }
 .markdown-copy > :last-child { margin-bottom: 0; }

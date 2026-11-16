@@ -71,6 +71,7 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
                     finally:
                         job.cancel()
                         await asyncio.gather(job, return_exceptions=True)
+                        await demo.timeline.close()
                     self.assertEqual((await admin.get("/api/state")).status, 401)
             demo.db.close()
 

@@ -275,6 +275,7 @@ byId("first-game-form").onsubmit = async event => {
       const config = await api("model-presets");
       presets = config.presets;
       form.elements.agent_name.value = config.agent_name;
+      form.elements.agent_real_name.value = config.agent_real_name || config.agent_name;
       form.elements.user_relationship.value = config.user_relationship || "朋友";
       form.elements.persona.value = config.persona;
       providerChoice.replaceChildren(...presets.map((preset, index) => new Option(preset.name, index)));
@@ -287,7 +288,7 @@ byId("first-game-form").onsubmit = async event => {
       });
       byId("first-game").querySelector("h2").textContent = setupStep === 1 ? "设置智能体人格" : "配置模型 API";
       button.textContent = setupStep === 1 && (!external || background) ? "下一步" : "进入交易工作区";
-      (setupStep === 1 ? form.elements.agent_name : form.elements.key).focus();
+      (setupStep === 1 ? form.elements.agent_real_name : form.elements.key).focus();
       setStatus("");
       return;
     }

@@ -1,14 +1,8 @@
-"""Send a sticker from the current account's library."""
 from langchain_core.tools import tool
-
 from src.core.engine import dump
 
 
-def build_tools(app, gid, attachments):
-    return sticker_tools(app, app.engine.get(gid)["owner_id"], attachments)
-
-
-def sticker_tools(app, owner, attachments):
+def build(app, owner, attachments):
     @tool
     async def sticker(action: str, sticker_id: str = "", category_id: str = "") -> str:
         """表情包：list 查看分类和使用说明，send 按 category_id 随机发送一张。
@@ -33,4 +27,4 @@ def sticker_tools(app, owner, attachments):
         attachments.append(dict(kind="sticker", label=entry["label"], src=entry["src"]))
         return "表情包已附在回复中"
 
-    return [sticker]
+    return sticker

@@ -10,13 +10,14 @@ import time
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
 from src.core.engine import dump
 from .chat_debounce import ChatDebounce, debounce_config
 from .image_library import image_reference
 from .model_registry import model_client, selected
-from .tool.bulletins import build_tool as build_bulletins_tool
+from .mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups
+from .mcp.registry import flatten, inbox_group, user_group_groups, user_patrol_groups
 from .workflow import social_system_prompt, workflow
 
 log = logging.getLogger(__name__)
@@ -218,12 +219,18 @@ class Social:
             role = "agent" if message["reply_agent"] else "user"
             targets.add(f'{role}:{message["reply_owner"]}')
         agent_addressed = any(target.startswith("agent:") and target in roster for target in targets)
+        room_name = self.db.execute("SELECT name FROM community_groups WHERE id=?", (room,)).fetchone()["name"]
+        author_id = ("agent:" if message["is_agent"] else "user:") + message["owner"]
+        author_name = roster.get(author_id, {}).get("name", "群成员")
         for member_id, member in roster.items():
             if member["type"] != "agent":
                 continue
             owner = member_id.partition(":")[2]
             if message["is_agent"] and message["owner"] == owner:
                 continue
+            self.app.agent_inbox.add(owner, "group", message_id, room_name,
+                message["body"] or "[图片或表情包]", room=room, mentioned=member_id in mentions,
+                reference={"message_id": message_id, "author": author_name, "author_id": author_id})
             directed = member_id in targets
             if directed:
                 self.app.remember_community(owner, message["owner"], message["body"], "group",
@@ -244,10 +251,18 @@ class Social:
         directed = any(item[1] for item in messages)
         probability = self.app.profile(owner).get("social", {}).get("probability", 50)
         if directed or random.random() * 100 < probability:
-            await self.reply(owner, room, messages[-1][0], directed,
-                             incoming_ids=[message_id for message_id, _ in messages])
+            try:
+                await self.reply(owner, room, messages[-1][0], directed,
+                                 incoming_ids=[message_id for message_id, _ in messages])
+            except Exception:
+                log.exception("Group task failed")
 
     async def reply(self, owner, room, message_id, followup=False, *, incoming_ids=()):
+        return await self.app.timeline.run(owner, "group_mention" if followup else "group",
+            lambda: self._reply(owner, room, message_id, followup, incoming_ids=incoming_ids),
+            outcome=lambda sent: "已发群聊消息" if sent else "已跳过")
+
+    async def _reply(self, owner, room, message_id, followup=False, *, incoming_ids=()):
         async with self.slots:
             try:
                 if not self.joined(room, owner):
@@ -329,29 +344,26 @@ class Social:
                     "members": [member | {"id": member_id} for member_id, member in roster.items()],
                     "history": history, "incoming_messages": incoming, "profiles": portrait}))
 
-                async def mention_group_member(member_id: str) -> str:
-                    """按 members 里的成员 ID 获取本群的正确 @ 写法。把返回的 mention 放入最终回复才会发送。"""
-                    member = roster.get(member_id)
-                    if not member or member_id == self_id:
-                        return dump({"error": "请选择当前群里的其他成员"})
-                    return dump({"member_id": member_id, "mention": member["mention"]})
 
                 attachments = []
-                tools = [build_bulletins_tool(self.app), mention_group_member]
+                with_stickers = random.random() * 100 < profile.get("sticker_probability", 100)
+                groups = user_group_groups(self.app, owner, roster, self_id, attachments,
+                                           has_images=has_images, with_stickers=with_stickers)
                 if has_images:
-                    from .tool.images import build_tools
-
-                    tools.extend(build_tools(self.app, owner, None, None, None))
                     prompt += "\n可用 save_image 收藏当前群聊中值得留存的图片，使用消息附带的 reference。"
-                if random.random() * 100 < profile.get("sticker_probability", 100):
-                    from .tool.stickers import sticker_tools
-
-                    tools.extend(sticker_tools(self.app, owner, attachments))
+                if with_stickers:
                     prompt += "\n" + workflow("private_sticker")
                 from langchain.agents import create_agent
 
-                agent = create_agent(model, tools=tools, system_prompt=prompt)
+                agent = create_agent(model, tools=flatten(groups),
+                    middleware=[ToolGroups(groups, initial=("mention_group_member",))],
+                    system_prompt=prompt + "\n" + TOOL_INSTRUCTIONS + "\n近期任务时间线：" +
+                    dump(self.app.timeline.context(owner)))
+                started = time.time()
                 result = (await agent.ainvoke({"messages": [human]}, config={"recursion_limit": 12}))["messages"][-1]
+                mentions_read = [entry["id"] for entry in incoming if self_id in entry["mentions"]]
+                if mentions_read:
+                    self.app.agent_inbox.read_mention(owner, room, max(mentions_read), started)
                 content = result.text.strip()
                 if content != "[SKIP]" and (content or attachments):
                     replying_to_agent = any(entry["author"]["type"] == "agent" for entry in incoming)
@@ -361,8 +373,10 @@ class Social:
                             if row["id"] in incoming_ids:
                                 self.app.remember_community(owner, row["owner"], row["body"], "group",
                                     stream=room, event=row["id"], is_agent=bool(row["is_agent"]))
+                        return True
             except Exception:
                 log.exception("Group agent reply failed")
+                raise
 
     def send(self, owner, room, content, attachment=None, *, mention_depth=0):
         if self.joined(room, owner) and self.app.external.settings(owner)["mode"] == "platform":
@@ -376,6 +390,13 @@ class Social:
         return False
 
     async def run_patrol(self, owner):
+        timeline = getattr(self.app, "timeline", None)
+        if not timeline:
+            return await self._run_patrol(owner)
+        return await timeline.run(owner, "patrol", lambda: self._run_patrol(owner), key="patrol",
+            outcome=lambda completed: "已完成巡视" if completed else "已跳过")
+
+    async def _run_patrol(self, owner):
         from langchain.agents import create_agent
         from langchain.agents.middleware import ModelCallLimitMiddleware
         from langgraph.errors import GraphRecursionError
@@ -387,79 +408,113 @@ class Social:
                 if not config.get("key") or self.app.external.settings(owner)["mode"] != "platform":
                     return
 
-                published = False
-
-                async def market() -> str:
-                    """查看当前公开外汇报价。"""
-                    return dump(self.app.engine.quotes)
-
-                async def forum(action: str, title: str = "", body: str = "", sticker_id: str = "",
-                                title_sticker_id: str = "", post_id: int = 0, reply_to: int = 0) -> str:
-                    """list 看帖子列表，read 按 post_id 看原帖和评论，stickers 看表情包。
-                    回应原帖用 comment 并传 post_id，回复评论时再传 reply_to。publish 仅用于独立新帖。
-                    """
-                    nonlocal published
-                    try:
-                        if action in ("comment", "publish") and published:
-                            return "本次巡视已完成一次公开发言，请结束。"
-                        if action == "stickers":
-                            return dump(self.forum_stickers(owner))
-                        if action == "list":
-                            return dump(self.forum_list_for_agent(owner))
-                        if action == "read" and post_id > 0:
-                            post = self.app.community.thread(str(post_id))
-                            result = self.app.community.handle(owner, "GET", str(post_id), {})
-                            return dump({
-                                "post": self.forum_entry_for_agent(owner, post),
-                                "entries": [self.forum_entry_for_agent(owner, row) for row in result["entries"]],
-                            })
-                        if self.app.external.settings(owner)["mode"] == "platform":
-                            if action == "comment" and post_id > 0:
-                                result = self.app.community.handle(owner, "POST", str(post_id), {
-                                    "body": body, "sticker_id": sticker_id, "reply_to": reply_to or None,
-                                }, is_agent=True)
-                                published = True
-                                return dump(result)
-                            if action == "publish" and not (post_id or reply_to):
-                                result = self.app.community.handle(owner, "POST", "", {
-                                    "title": title, "body": body, "sticker_id": sticker_id,
-                                    "title_sticker_id": title_sticker_id,
-                                }, is_agent=True)
-                                published = True
-                                return dump(result)
-                        return "操作无效。回应已有帖子请使用 comment 并指定原帖 post_id。"
-                    except (ValueError, web.HTTPException) as exc:
-                        return dump({"ok": False, "error": getattr(exc, "reason", str(exc))})
-
-                async def group(action: str, room: str = "", body: str = "") -> str:
-                    """列出已加入的群聊、读群或发言。action 是 list、read 或 send。"""
-                    nonlocal published
-                    if action == "send" and published:
-                        return "本次巡视已完成一次公开发言，请结束。"
-                    if action == "list":
-                        return dump([dict(row) for row in self.db.execute("""SELECT g.id,g.name FROM community_groups g
-                            JOIN community_group_agents a ON a.room=g.id WHERE a.owner=?""", (owner,))])
-                    if not self.joined(room, owner):
-                        return "智能体未加入该群"
-                    if action == "read":
-                        data = self.app.community.groups(owner, "GET", room, {})
-                        return dump([dict(name=self.identity(row["owner"]) if row["is_agent"] else row["nickname"],
-                                          message=row["body"]) for row in reversed(data["entries"][:12])])
-                    if action == "send" and body.strip():
-                        published = self.send(owner, room, body.strip())
-                        return "已发送，请结束本次巡视" if published else "智能体已离开"
-                    return "操作无效"
-
-                agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")), tools=[market, forum, group, build_bulletins_tool(self.app)],
-                    middleware=[ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
+                groups = user_patrol_groups(self, owner)
+                agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")),
+                    tools=flatten(groups),
+                    middleware=[ToolGroups(groups, initial=("read_inbox",)), ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
                     system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("patrol")
-                    + "\n" + workflow("forum_authorship"))
+                    + "\n" + workflow("forum_authorship")
+                    + "\n有需要时可先用 read_inbox 预览或收取持续到达的邮箱消息，再决定是否查看原文。"
+                    + "\n" + TOOL_INSTRUCTIONS
+                    + ("\n近期任务时间线：" + dump(self.app.timeline.context(owner)) if hasattr(self.app, "timeline") else ""))
                 await agent.ainvoke({"messages": [HumanMessage(content=datetime.now(ZONE).isoformat())]},
                                     config={"recursion_limit": 48})
+                return True
             except GraphRecursionError:
                 log.warning("巡视达到流程步数上限，已结束本次巡视")
+                raise
             except Exception:
                 log.exception("Agent patrol failed")
+                raise
+
+    def queue_chat(self, owner, channel, purpose, room_id=0, bulletin_id="", message_id=0):
+        if self.app.external.settings(owner)["mode"] != "platform":
+            raise ValueError("当前账号未启用平台智能体")
+        if channel not in ("private", "group") or not 1 <= len(purpose.strip()) <= 240:
+            raise ValueError("请选择私聊或群聊，并填写 1～240 字的目的")
+        if channel == "private" and (room_id or message_id):
+            raise ValueError("私聊交接只支持所属用户的会话")
+        if channel == "group" and (not room_id or not self.joined(room_id, owner)):
+            raise ValueError("智能体尚未加入该群")
+        if message_id and not self.db.execute(
+            "SELECT 1 FROM community_group_messages WHERE room=? AND id=? AND status='active'", (room_id, message_id)
+        ).fetchone():
+            raise ValueError("引用消息不在该群或已删除")
+        if bulletin_id and (len(bulletin_id) > 120 or not self.db.execute(
+            "SELECT 1 FROM platform_bulletins WHERE id=?", (bulletin_id,)
+        ).fetchone()):
+            raise ValueError("找不到引用的市场播报")
+        ident, _ = self.app.timeline.enqueue(owner, channel + "_followup",
+            lambda: self._chat_handoff(owner, channel, purpose.strip(), room_id, bulletin_id, message_id),
+            key=("chat_followup", channel, room_id),
+            outcome=lambda sent: "已发出聊天跟进" if sent else "已跳过")
+        return {"ok": True, "task_id": ident, "state": "queued", "sent": False}
+
+    async def _chat_handoff(self, owner, channel, purpose, room_id, bulletin_id, message_id):
+        from langchain.agents import create_agent
+
+        profile = self.app.profile(owner)
+        config = selected(profile)
+        if self.app.external.settings(owner)["mode"] != "platform" or not config.get("key") or not config.get("model"):
+            return False
+        attachments = []
+        details = {"purpose": purpose}
+        if bulletin_id:
+            bulletin = self.db.execute("SELECT id,label,kind FROM platform_bulletins WHERE id=?", (bulletin_id,)).fetchone()
+            if bulletin:
+                details["bulletin"] = dict(bulletin)
+        if channel == "group":
+            if not self.joined(room_id, owner):
+                return False
+            roster = self.group_roster(room_id)
+            self_id = f"agent:{owner}"
+            groups = user_group_groups(self.app, owner, roster, self_id, attachments, has_images=False, with_stickers=False)
+            rows = self.db.execute("""SELECT id,owner,is_agent,body,created FROM community_group_messages
+                WHERE room=? AND status='active' ORDER BY id DESC LIMIT 16""", (room_id,)).fetchall()
+            history = []
+            for row in reversed(rows):
+                author = ("agent:" if row["is_agent"] else "user:") + row["owner"]
+                history.append({"id": row["id"], "author": roster.get(author, {}).get("name", "群成员"),
+                                "text": row["body"][:300], "created": row["created"]})
+            details["members"] = [member | {"id": member_id} for member_id, member in roster.items()]
+            if message_id:
+                reference = self.db.execute("""SELECT id,body FROM community_group_messages
+                    WHERE room=? AND id=? AND status='active'""", (room_id, message_id)).fetchone()
+                if reference:
+                    details["referenced_message"] = {"id": reference["id"], "text": reference["body"][:300]}
+            gid = None
+        else:
+            game = next((game for game in self.app.engine.games() if game["owner_id"] == owner), None)
+            if not game:
+                return False
+            gid = game["id"]
+            if self.chat_pending.get(gid):
+                return False
+            activity = self.direct_activity(gid)
+            rows = self.db.execute("""SELECT role,content,created FROM demo_chat WHERE game=?
+                ORDER BY id DESC LIMIT 12""", (gid,)).fetchall()
+            history = [dict(row) for row in reversed(rows)]
+            groups = {"inbox": inbox_group(self.app)}
+        agent = create_agent(model_client(config, self.app.model_url,
+            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=flatten(groups),
+            system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
+                "\n你在处理上一项任务交接的聊天跟进。根据当前会话的最新消息决定是否发送。"
+                "说明只是内部意图，不要复述内部任务信息或公开私聊、私有账户内容。"
+                "已经说过、时机不合适或无实际内容时只输出 [SKIP]。"
+                "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
+        async with self.slots:
+            result = await agent.ainvoke({"messages": [HumanMessage(content=dump(
+                {"channel": channel, "handoff": details, "history": history}))]}, config={"recursion_limit": 12})
+        content = result["messages"][-1].text.strip()
+        if not content or content == "[SKIP]" or self.app.external.settings(owner)["mode"] != "platform":
+            return False
+        if channel == "group":
+            return self.send(owner, room_id, content)
+        if self.chat_pending.get(gid) or self.direct_activity(gid) != activity:
+            return False
+        self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)
+            VALUES(?,'assistant',?,?,1)""", (gid, content[:1500], time.time()))
+        return True
 
     def unanswered(self, gid):
         return self.db.execute("""SELECT count(*) FROM demo_chat WHERE game=? AND proactive=1
@@ -515,6 +570,10 @@ class Social:
         return max(self.chat_received.get(gid, 0), latest[0] if latest else 0)
 
     async def direct(self, owner, expected_activity):
+        return await self.app.timeline.run(owner, "proactive", lambda: self._direct(owner, expected_activity),
+            key="proactive", outcome=lambda sent: "已发私聊消息" if sent else "已跳过")
+
+    async def _direct(self, owner, expected_activity):
         async with self.slots:
             try:
                 profile = self.app.profile(owner)
@@ -532,12 +591,16 @@ class Social:
                     return
                 history = [dict(row) for row in self.db.execute(
                     "SELECT role,content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 8", (gid,))]
-                reply = await model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")).ainvoke([
-                    SystemMessage(content=social_system_prompt(self.app.agent_persona(owner, profile))
-                                  + "\n" + workflow("proactive")),
+                from langchain.agents import create_agent
+
+                agent = create_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
+                    tools=inbox_group(self.app),
+                    system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
+                    + "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
+                result = await agent.ainvoke({"messages": [
                     HumanMessage(content=dump({"time": datetime.now(ZONE).isoformat(), "history": history[::-1]})),
-                ])
-                content = reply.text.strip()
+                ]}, config={"recursion_limit": 12})
+                content = result["messages"][-1].text.strip()
                 latest = social_config(self.app.profile(owner).get("social", {}))
                 if (content and content != "[SKIP]" and latest == config
                         and not self.chat_pending.get(gid) and self.direct_activity(gid) == activity
@@ -547,8 +610,10 @@ class Social:
                         and any(item["id"] == gid and item["owner_id"] == owner for item in self.app.engine.games())):
                     self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)
                         VALUES(?,'assistant',?,?,1)""", (gid, content[:1500], time.time()))
+                    return True
             except Exception:
                 log.exception("Proactive message failed")
+                raise
 
     def queue_clock(self, owner, kind, schedule, target):
         self.db.execute("""INSERT OR REPLACE INTO agent_social_clock(owner,kind,schedule,minute)
@@ -557,6 +622,8 @@ class Social:
     async def run_scheduled(self, owner, kind, action, *args):
         try:
             await action(owner, *args)
+        except Exception:
+            log.exception("Scheduled agent task failed")
         finally:
             self.running.discard((owner, kind))
 

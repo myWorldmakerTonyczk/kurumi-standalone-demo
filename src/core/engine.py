@@ -110,7 +110,11 @@ class Engine:
             "INSERT INTO logs(game,created,data) VALUES (?,?,?)",
             (game["id"], entry["created"], dump(entry)),
         )
-        return dict(id=cursor.lastrowid, **entry)
+        result = dict(id=cursor.lastrowid, **entry)
+        callback = getattr(self, "on_log", None)
+        if callback:
+            callback(game, result)
+        return result
 
     def logs(self, gid, before=2**63 - 1, limit=50, pair=""):
         return [

@@ -1,14 +1,11 @@
-"""Read one account's long-term memories in private chat."""
-from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
-
+from datetime import date, datetime, time, timedelta
 from src.agent.memory import ranked_tags
 from src.core.engine import dump
-
 BEIJING = ZoneInfo("Asia/Shanghai")
 
 
-def build_tools(app, owner):
+def build(app, owner):
     async def search_memory(keyword: str = "", tags: list[str] | None = None,
                             person: str = "", start_date: str = "", end_date: str = "",
                             limit: int = 10, list_tags: bool = False) -> str:
@@ -70,4 +67,4 @@ def build_tools(app, owner):
             entries.append(entry)
         return dump({"entries": entries})
 
-    return [search_memory]
+    return search_memory

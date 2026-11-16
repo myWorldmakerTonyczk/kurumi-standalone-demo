@@ -3,7 +3,7 @@ from src.core.engine import dump
 from src.notifications.settings import validate
 
 
-def build_tools(app, gid):
+def build(app, gid):
     async def set_notifications(settings: str) -> str:
         """修改当前用户的汇报配置，settings 为 JSON 对象。"""
         game = app.engine.get(gid)
@@ -17,4 +17,4 @@ def build_tools(app, gid):
         except (TypeError, ValueError) as exc:
             return dump({"ok": False, "error": str(exc)})
 
-    return [set_notifications]
+    return set_notifications

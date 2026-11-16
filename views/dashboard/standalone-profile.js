@@ -9,7 +9,7 @@ export function mountProfile(gameId, {container, general = false}) {
     <form class="persona-card">
       <label><input name="split_reply" type="checkbox">按换行、句末标点或连续空格切分短句</label>
       <div class="persona-identity">
-        <label><span>我是（</span><input name="agent_name" maxlength="40" aria-label="智能体名称" required disabled><span>）</span></label>
+        <label><span>我是（</span><input name="agent_real_name" maxlength="40" aria-label="智能体真实姓名" required disabled><span>）</span></label>
       </div>
       <label class="persona-body">你的关系称呼（选填）<input name="user_relationship" maxlength="40" placeholder="朋友" disabled></label>
       <label class="persona-body">当前人格<textarea name="persona" rows="14" maxlength="4000" disabled></textarea></label>
@@ -87,9 +87,9 @@ export function mountProfile(gameId, {container, general = false}) {
       form.elements.split_reply.checked = data.split_reply !== false;
       form.elements.split_pattern.value = data.split_pattern || form.elements.split_pattern.placeholder;
     } else {
-      form.elements.agent_name.value = data.agent_name || "久留美";
+      form.elements.agent_real_name.value = data.agent_real_name || data.agent_name || "久留美";
       form.elements.persona.value = profile.persona || await loadDefaultPersona();
-      form.elements.agent_name.disabled = form.elements.user_relationship.disabled =
+      form.elements.agent_real_name.disabled = form.elements.user_relationship.disabled =
         form.elements.persona.disabled = resetPersona.disabled = false;
     }
     save.disabled = false;
@@ -111,7 +111,7 @@ export function mountProfile(gameId, {container, general = false}) {
         status.textContent = "已保存";
         return;
       }
-      await request("profile", {agent_name: payload.agent_name, persona: payload.persona,
+      await request("profile", {agent_real_name: payload.agent_real_name, persona: payload.persona,
         user_relationship: payload.user_relationship});
       window.dispatchEvent(new Event("kurumi-identity"));
       await refresh();
@@ -1069,6 +1069,106 @@ function mountImageLibrary(panel) {
   return () => load();
 }
 
+function mountAgentInbox(panel) {
+  const toggle = h("input", {type: "checkbox"});
+  const status = h("p", {role: "status", class: "caption"});
+  const source = h("select", {"aria-label": "邮件来源"}, ...Object.entries({
+    "": "全部来源", forum: "论坛", group: "群聊", market: "市场播报", system: "系统",
+  }).map(([value, label]) => h("option", {value}, label)));
+  const unread = h("input", {type: "checkbox"});
+  const items = h("ul", {class: "agent-inbox-items"});
+  const logs = h("ul", {class: "agent-inbox-items"});
+  const more = h("button", {type: "button", hidden: true}, "加载更早邮件");
+  const refresh = h("button", {type: "button"}, "刷新");
+  const content = h("section", {hidden: true},
+    h("div", {class: "agent-inbox-filters"}, source, h("label", {class: "check"}, unread, "只看未读"), refresh),
+    items, more, h("details", {}, h("summary", {}, "邮箱操作日志"), logs));
+  panel.className = "profile-settings agent-inbox-settings";
+  panel.append(h("h3", {}, "智能体邮箱"), h("label", {class: "check"}, toggle, "显示智能体邮箱与日志"),
+    h("p", {class: "caption"}, "查看邮件不会改变智能体的未读状态。"), status, content);
+  let next, busy = false;
+  async function load(options = {}) {
+    if (busy) return;
+    busy = true;
+    toggle.disabled = refresh.disabled = more.disabled = true;
+    status.textContent = "";
+    try {
+      const data = await api("agent-inbox", {...options, query: {
+        source: source.value, unread: unread.checked ? 1 : "", before: options.before,
+      }});
+      toggle.checked = data.enabled;
+      content.hidden = !data.enabled;
+      if (!options.before) items.replaceChildren();
+      next = data.next_before;
+      more.hidden = !next;
+      const labels = {read: "收取邮件", preview: "预览未读", mark_unread: "标回未读", mention_read: "处理群聊提及", history: "查看历史"};
+      for (const item of data.items || []) {
+        const detail = item.preview ? (item.reference.author ? item.reference.author + " · " : "") + item.preview : "";
+        items.append(h("li", {}, h("strong", {}, item.title),
+          h("small", {}, source.querySelector('option[value="' + item.source + '"]').textContent + " · " +
+            (item.unread ? "未读 · " : "已读 · ") + formatTime(item.created)),
+          detail ? h("p", {}, detail) : null));
+      }
+      if (data.enabled && !items.childElementCount) items.append(h("li", {}, "暂无邮件"));
+      logs.replaceChildren(...(data.logs || []).map(entry => h("li", {},
+        h("strong", {}, labels[entry.action] || entry.action), " · " + entry.total + " 条",
+        h("small", {}, formatTime(entry.created) + (entry.batch ? " · 批次 " + entry.batch.slice(0, 8) : "")))));
+      if (data.enabled && !logs.childElementCount) logs.append(h("li", {}, "暂无操作记录"));
+    } catch (error) {
+      if (options.method === "POST") toggle.checked = content.hidden === false;
+      status.textContent = error.message;
+    } finally {
+      busy = false;
+      toggle.disabled = refresh.disabled = more.disabled = false;
+    }
+  }
+  toggle.onchange = () => load({method: "POST", body: {enabled: toggle.checked}});
+  source.onchange = unread.onchange = refresh.onclick = () => load();
+  more.onclick = () => load({before: next});
+  return () => load();
+}
+
+function mountAgentTimeline(panel) {
+  const toggle = h("input", {type: "checkbox"});
+  const refresh = h("button", {type: "button"}, "刷新");
+  const status = h("p", {role: "status", class: "caption"});
+  const tasks = h("ul", {class: "agent-inbox-items"});
+  const logs = h("ul", {class: "agent-inbox-items"});
+  const content = h("section", {hidden: true}, refresh, tasks, h("details", {}, h("summary", {}, "调试日志"), logs));
+  panel.className = "profile-settings";
+  panel.append(h("h3", {}, "智能体任务时间线"),
+    h("label", {class: "check"}, toggle, "测试开关：记录并显示任务日志"),
+    h("p", {class: "caption"}, "关闭时仍为智能体保留简短任务记录。"), status, content);
+  const labels = {queued: "排队中", running: "执行中", completed: "已完成", skipped: "已跳过",
+    failed: "失败", interrupted: "已中断"};
+  async function load(enabled) {
+    toggle.disabled = refresh.disabled = true;
+    try {
+      const data = await api("agent-timeline", enabled === undefined ? {} : {method: "POST", body: {enabled}});
+      toggle.checked = data.enabled;
+      content.hidden = !data.enabled;
+      tasks.replaceChildren(...data.tasks.map(task => h("li", {},
+        h("strong", {}, task.label + " · " + labels[task.state]),
+        h("small", {}, "#" + task.id + " · " + formatTime(task.created)),
+        task.outcome ? h("p", {}, task.outcome) : null)));
+      logs.replaceChildren(...data.logs.map(entry => h("li", {},
+        "#" + entry.task + " · " + labels[entry.state] + (entry.error_type ? " · " + entry.error_type : ""),
+        h("small", {}, formatTime(entry.created)))));
+      if (!tasks.childElementCount) tasks.append(h("li", {}, "暂无任务"));
+      if (!logs.childElementCount) logs.append(h("li", {}, "暂无调试日志"));
+      status.textContent = "";
+    } catch (error) {
+      toggle.checked = !content.hidden;
+      status.textContent = error.message;
+    } finally {
+      toggle.disabled = refresh.disabled = false;
+    }
+  }
+  toggle.onchange = () => load(toggle.checked);
+  refresh.onclick = () => load();
+  return () => load();
+}
+
 export function mountAdvanced(container) {
   const navigation = document.createElement("nav");
   navigation.className = "workspace-switch advanced-settings-tabs";
@@ -1078,7 +1178,13 @@ export function mountAdvanced(container) {
   const logs = document.createElement("section");
   const images = document.createElement("section");
   const debounce = document.createElement("div");
-  container.append(navigation, stickers, memory, logs, images, debounce);
+  const inbox = document.createElement("section");
+  const inboxTab = h("button", {type: "button"}, "智能体邮箱");
+  const loadInbox = mountAgentInbox(inbox);
+  const timeline = document.createElement("section");
+  const timelineTab = h("button", {type: "button"}, "任务时间线");
+  const loadTimeline = mountAgentTimeline(timeline);
+  container.append(navigation, stickers, memory, logs, images, debounce, inbox, timeline);
   const debounceTab = accountSettings(debounce, "消息防抖", "chat-debounce", `
     <label>消息防抖<select name="enabled"><option value="true">开启</option><option value="false">关闭</option></select></label>
     <label>私聊静默时间（秒）<input name="private_quiet" type="number" min="0.1" max="15" step="0.1" required></label>
@@ -1103,7 +1209,8 @@ export function mountAdvanced(container) {
   const loadImages = mountImageLibrary(images);
   const tabs = [[stickerTab, stickers, loadStickers], [memoryTab, memory, () => {
     loadMemory().catch(error => { memory.querySelector(".sticker-status").textContent = error.message; });
-  }], [logTab, logs, loadLogs], [imageTab, images, loadImages], [debounceTab, debounce, debounceTab.onclick]];
+  }], [logTab, logs, loadLogs], [imageTab, images, loadImages], [debounceTab, debounce, debounceTab.onclick],
+      [inboxTab, inbox, loadInbox], [timelineTab, timeline, loadTimeline]];
   let active = 0;
   function select() {
     tabs.forEach(([button, panel], i) => {
@@ -1215,12 +1322,13 @@ export function mountUserSettings(container) {
     });
   const agent = accountSettings(container, "智能体资料", "agent-identity", `
     <img class="account-avatar" width="60" height="60" alt="当前智能体头像">
-    <label>智能体名称<input name="agent_name" maxlength="40" required></label>
+    <label>智能体名称（真实姓名）<input name="agent_real_name" maxlength="40" required></label>
+    <label>智能体昵称（群聊、论坛显示）<input name="agent_name" maxlength="40" required></label>
     <div><button type="button" data-choose-avatar>选择并裁剪头像</button>
       <input name="picture" type="file" accept="image/png,image/jpeg,image/webp" hidden></div>
     <label class="check"><input name="reset_avatar" type="checkbox">恢复默认头像</label>`, {},
     (_, values, avatar) => ({
-      agent_name: values.agent_name, agent_avatar: values.reset_avatar ? "" : avatar || undefined,
+      agent_name: values.agent_name, agent_real_name: values.agent_real_name, agent_avatar: values.reset_avatar ? "" : avatar || undefined,
     }));
   const openAccount = account.onclick;
   account.onclick = () => { openAccount(); agent.onclick(); };
