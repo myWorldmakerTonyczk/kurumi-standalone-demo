@@ -50,6 +50,7 @@ from src.diary.settings import settings as diary_settings, bounds, due_before
 from src.notifications.settings import validate as notice_settings, delivery_time
 from src.portal.server import ASSETS, SECURITY_HEADERS
 
+PERSONA_MAX_LENGTH = 10_000
 DEFAULT_PERSONA = (Path(__file__).resolve().parent / "config" / "default_persona.md").read_text(encoding="utf-8").strip()
 MODEL_PRESETS = [
     dict(name="DeepSeek", url="https://api.deepseek.com", model="deepseek-flash"),
@@ -767,6 +768,13 @@ class Demo:
         return value.strip() or "朋友"
 
     @staticmethod
+    def validated_persona(value):
+        text = str(value).strip()
+        if len(text) > PERSONA_MAX_LENGTH:
+            raise ValueError(f"人格设定最多 {PERSONA_MAX_LENGTH:,} 字符")
+        return persona_body(text)
+
+    @staticmethod
     def validated_agent_real_name(value):
         if not isinstance(value, str) or not 1 <= len(value.strip()) <= 40 or not value.isprintable():
             raise ValueError("智能体真实姓名须为 1～40 字的单行文字")
@@ -1201,11 +1209,11 @@ class Demo:
                     raise ValueError("请输入 1～40 字的昵称")
                 avatar = self.avatar_value(avatar)
                 identity = self.agent_identity(body, owner)
-                setup = {key: str(body.get(key, "")).strip() for key in ("persona", "url", "model", "key")}
+                setup = {key: str(body.get(key, "")).strip() for key in ("url", "model", "key")}
                 if any(len(value) > 4000 for value in setup.values()):
                     raise ValueError("配置内容过长")
                 setup["user_relationship"] = self.validated_user_relationship(body.get("user_relationship", ""))
-                setup["persona"] = persona_body(setup["persona"])
+                setup["persona"] = self.validated_persona(body.get("persona", ""))
                 if setup["persona"] == DEFAULT_PERSONA:
                     setup["persona"] = ""
                 setup.update(self.mode_values(body, setup))
@@ -1379,7 +1387,7 @@ class Demo:
             if action == "profile" and request.method == "POST":
                 if "models" in current and ({"url", "model", "key", "clear"} & body.keys()):
                     raise ValueError("请在模型与 API 中更新模型连接")
-                settings = {k: str(body.get(k, ""))[:4000].strip() for k in ("persona", "url", "model", "key") if k in body}
+                settings = {k: str(body.get(k, ""))[:4000].strip() for k in ("url", "model", "key") if k in body}
                 if "agent_name" in body:
                     settings["agent_name"] = self.validated_agent_name(body["agent_name"], owner)
                     settings["agent_real_name"] = agent_real_name(current)
@@ -1387,8 +1395,8 @@ class Demo:
                     settings["agent_real_name"] = self.validated_agent_real_name(body["agent_real_name"])
                 if "user_relationship" in body:
                     settings["user_relationship"] = self.validated_user_relationship(body["user_relationship"])
-                if "persona" in settings:
-                    settings["persona"] = persona_body(settings["persona"])
+                if "persona" in body:
+                    settings["persona"] = self.validated_persona(body["persona"])
                     if settings["persona"] == self.default_persona:
                         settings["persona"] = ""
                 if "url" in settings:

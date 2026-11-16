@@ -51,15 +51,22 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
                             state = await (await user.get("/api/state")).json()
                             self.assertEqual(state["state"]["game"]["name"], name)
                             self.assertFalse(state["has_key"])
-                            saved = await user.post("/api/profile", json=dict(persona=name+"的人格",
+                            persona = name + "的人格" + "个" * 9995 + "。"
+                            self.assertEqual(len(persona), 10000)
+                            saved = await user.post("/api/profile", json=dict(persona=persona,
                                 url=url, model="local-test", key="test-key-"+name.encode().hex()))
                             self.assertEqual(saved.status, 200, await saved.text())
+                            too_long = await user.post("/api/profile", json=dict(persona=persona + "超"))
+                            self.assertEqual(too_long.status, 400, await too_long.text())
                             for message in ("第一条", "第二条"):
                                 reply = await user.post("/api/chat", json=dict(message=message))
                                 self.assertEqual(reply.status, 200, await reply.text())
                             self.assertIn("第一条", str(requests[-1][1]["messages"]))
                             state = await (await user.get("/api/state")).json()
                             self.assertNotIn("test-key", str(state))
+                            self.assertEqual(state["profile"]["persona"], persona)
+                            self.assertTrue(any(persona in message["content"] for message in requests[-1][1]["messages"]
+                                                if isinstance(message.get("content"), str)))
                             self.assertEqual(len(state["chat"]), 4)
                             if name == "乙":
                                 gid = state["state"]["game"]["id"]

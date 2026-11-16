@@ -13,7 +13,7 @@ export function mountProfile(gameId, {container, general = false}) {
       </div>
       <label class="persona-body">智能体昵称（群聊、论坛显示）<input name="agent_name" maxlength="40" required disabled></label>
       <label class="persona-body">你的关系称呼（选填）<input name="user_relationship" maxlength="40" placeholder="朋友" disabled></label>
-      <label class="persona-body">当前人格<textarea name="persona" rows="14" maxlength="4000" disabled></textarea></label>
+      <label class="persona-body">当前人格<textarea name="persona" rows="14" maxlength="10000" disabled></textarea></label>
       <div class="persona-actions">
         <button class="primary" type="submit" disabled>保存人格</button>
         <button type="button" data-reset-persona disabled>恢复默认人格</button>
