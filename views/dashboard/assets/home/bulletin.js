@@ -117,6 +117,7 @@ export function mountBulletinAdmin(root, bridge) {
   const status = h("p", {role: "status", class: "bulletin-feedback"});
   const signal = h("span", {class: "bulletin-signal"});
   const schedule = h("div", {class: "bulletin-task-list"});
+  const sources = h("div", {class: "bulletin-source-list"});
   const searchStatus = h("p", {class: "bulletin-muted"});
   const calendar = h("div", {class: "bulletin-task-list"});
   const reports = h("div");
@@ -154,6 +155,9 @@ export function mountBulletinAdmin(root, bridge) {
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "管理员模型"),
       label("模型预设", preset), label("API Base URL", endpoint), label("模型 ID", model), label("API Key", key),
       h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。"), searchStatus),
+    h("section", {class: "bulletin-admin-card bulletin-source-card"}, h("h3", {}, "订阅来源"),
+      h("p", {class: "bulletin-muted"}, "可替换任一来源的公网 HTTPS 地址。官方订阅留空会恢复默认地址，补充媒体留空则关闭。"),
+      sources),
     h("div", {class: "bulletin-admin-footer"}, submit));
   root.className = "bulletin-admin";
   root.append(
@@ -166,10 +170,7 @@ export function mountBulletinAdmin(root, bridge) {
       h("section", {class: "bulletin-admin-card"}, h("h3", {}, "Agent 唤起任务"), schedule),
       h("section", {class: "bulletin-admin-card"}, h("h3", {}, "近期官方日历"), calendar)),
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "已发布播报"), reports));
-  for (const kind of ["scan", "day", "week", "month"]) {
-    operations.append(h("button", {type: "button", onClick: () => request({action: kind})},
-      kind === "scan" ? "立即采集" : "发布" + PERIODS[kind]));
-  }
+  operations.append(h("button", {type: "button", onClick: () => request({action: "scan"})}, "立即采集"));
   operations.append(h("button", {type: "button", onClick: () => request()}, "刷新记录"));
 
   function render(data, fill) {
@@ -189,6 +190,25 @@ export function mountBulletinAdmin(root, bridge) {
       pairs.replaceChildren(...data.available_pairs.map(pair => {
         const input = h("input", {type: "checkbox", value: pair, checked: config.pairs.includes(pair)});
         return label(pair, input);
+      }));
+      sources.replaceChildren(...data.sources.map(source => {
+        const input = h("input", {type: "url", value: config.sources[source.id],
+          placeholder: source.default_url, dataset: {source: source.id}});
+        const feedback = h("small", {role: "status"});
+        const test = h("button", {type: "button", onClick: async () => {
+          if (!input.reportValidity()) return;
+          const url = input.value.trim();
+          test.disabled = true;
+          feedback.textContent = "正在检查…";
+          try {
+            const result = await bridge.apiPost("market-bulletin", {action: "check-source", source: source.id, url});
+            if (input.value.trim() === url) feedback.textContent = result.message;
+          } catch (error) {
+            if (input.value.trim() === url) feedback.textContent = error.message;
+          } finally { test.disabled = false; }
+        }}, "检查连通性");
+        input.addEventListener("input", () => { feedback.textContent = ""; });
+        return h("div", {class: "bulletin-source-row"}, label(source.label + " · " + source.format, input), test, feedback);
       }));
       dirty = false;
     }
@@ -240,6 +260,8 @@ export function mountBulletinAdmin(root, bridge) {
     event.preventDefault();
     request({action: "save", enabled: enabled.checked, interval: Number(interval.value), time: publishAt.value,
       model: model.value, url: endpoint.value, key: key.value,
+      sources: Object.fromEntries([...sources.querySelectorAll("input[data-source]")].map(input =>
+        [input.dataset.source, input.value.trim()])),
       periods: periods.filter(([, input]) => input.checked).map(([kind]) => kind),
       pairs: [...pairs.querySelectorAll(":checked")].map(input => input.value)}, true);
   }

@@ -1,18 +1,21 @@
 """Shared, administrator-owned market bulletin and durable release wakeups."""
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html import unescape
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
-from aiohttp import ClientError, ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector
+from aiohttp.resolver import ThreadedResolver
 from langchain_core.messages import HumanMessage, SystemMessage
 from yarl import URL
 
@@ -31,12 +34,53 @@ BEA = "https://apps.bea.gov/rss/rss.xml"
 NEWS_SEARCH = "https://api.search.brave.com/res/v1/news/search"
 MEDIA_PREFIX = "非官方 · "
 BEA_CALENDAR = "https://www.bea.gov/news/schedule/ics/online-calendar-subscription.ics"
-FEEDS = {"美联储": FED, "欧洲央行": ECB, "美国劳工统计局": BLS, "美国经济分析局": BEA}
-CALENDARS = {"美国劳工统计局": CALENDAR, "美国经济分析局": BEA_CALENDAR}
+SOURCES = {
+    "fed": ("美联储", FED, False, "federalreserve.gov"),
+    "ecb": ("欧洲央行", ECB, False, "ecb.europa.eu"),
+    "bls": ("美国劳工统计局", BLS, False, "bls.gov"),
+    "bea": ("美国经济分析局", BEA, False, "bea.gov"),
+    "bls_calendar": ("美国劳工统计局", CALENDAR, True, "bls.gov"),
+    "bea_calendar": ("美国经济分析局", BEA_CALENDAR, True, "bea.gov"),
+    "media": ("补充媒体", "", False, ""),
+}
 KINDS = {"live": "实时报告", "day": "日报", "week": "周报", "month": "月报", "event": "指标跟踪"}
 DEFAULT = {"enabled": True, "interval": 60, "time": "08:30", "periods": ["day", "week", "month"],
            "pairs": list(PAIRS)[:4], "url": "", "model": "", "key": ""}
 log = logging.getLogger("kurumi")
+
+
+class PublicSourceResolver(ThreadedResolver):
+    async def resolve(self, host, port=0, family=0):
+        addresses = await super().resolve(host, port, family)
+        if any(not ipaddress.ip_address(record["host"].split("%")[0]).is_global for record in addresses):
+            raise OSError("来源指向非公网地址")
+        return addresses
+
+
+def source_url(value):
+    if not isinstance(value, str) or len(value) > 1500:
+        raise ValueError("来源地址无效")
+    url = URL(value.strip())
+    if url.scheme != "https" or not url.host or url.user is not None or url.port != 443 or url.fragment:
+        raise ValueError("请输入公网 HTTPS 订阅地址")
+    try:
+        address = ipaddress.ip_address(url.host)
+    except ValueError:
+        if ("." not in url.host or re.fullmatch(r"[\d.]+", url.host)
+                or url.host.lower().rstrip(".").endswith((".localhost", ".local", ".internal"))):
+            raise ValueError("请输入公网 HTTPS 订阅地址") from None
+    else:
+        if not address.is_global:
+            raise ValueError("请输入公网 HTTPS 订阅地址")
+    return str(url)
+
+
+def source_details(source_id, address):
+    name, _, calendar, domain = SOURCES[source_id]
+    host = URL(address).host.lower().rstrip(".")
+    official = bool(domain) and (host == domain or host.endswith("." + domain))
+    source = name if official else MEDIA_PREFIX + host.removeprefix("www.")
+    return name + ("日历" if calendar else ""), source, calendar
 
 
 def model_ready(config):
@@ -131,11 +175,21 @@ class MarketBulletin:
 
     def config(self):
         row = self.db.execute("SELECT data FROM platform_bulletin_config WHERE id=1").fetchone()
-        return DEFAULT | (json.loads(row[0]) if row else {})
+        config = DEFAULT | (json.loads(row[0]) if row else {})
+        config["sources"] = {key: url for key, (_, url, _, _) in SOURCES.items()} | config.get("sources", {})
+        return config
 
     def save(self, body):
         old = self.config()
         config = {key: body.get(key, old[key]) for key in DEFAULT}
+        overrides = body.get("sources", {})
+        if not isinstance(overrides, dict) or set(overrides) - SOURCES.keys():
+            raise ValueError("订阅来源设置无效")
+        config["sources"] = {
+            key: source_url(address) if address else ""
+            for key in SOURCES
+            for address in [overrides.get(key, old["sources"][key]) or SOURCES[key][1]]
+        }
         if type(config["enabled"]) is not bool:
             raise ValueError("请设置启用状态")
         if type(config["interval"]) is not int or not 1 <= config["interval"] <= 1440:
@@ -160,6 +214,13 @@ class MarketBulletin:
             self.app.model_url(config["url"])
         self.db.execute("INSERT OR REPLACE INTO platform_bulletin_config VALUES(1,?)", (json.dumps(config),))
         if config["enabled"] and model_ready(config) and (not old["enabled"] or not model_ready(old)):
+            self.db.execute("UPDATE platform_bulletin_runs SET attempted=0 WHERE kind='scan'")
+        for key, (_, _, calendar, _) in SOURCES.items():
+            if calendar and config["sources"][key] != old["sources"][key]:
+                _, source, _ = source_details(key, old["sources"][key])
+                self.db.execute("UPDATE platform_bulletin_events SET active=0 WHERE source=? AND due>?",
+                                (source, time.time()))
+        if config["sources"] != old["sources"]:
             self.db.execute("UPDATE platform_bulletin_runs SET attempted=0 WHERE kind='scan'")
         self.generation += 1
 
@@ -210,6 +271,9 @@ class MarketBulletin:
         next_events = self.db.execute("SELECT title,due,source FROM platform_bulletin_events WHERE active=1 AND due>=? ORDER BY due LIMIT 8", (time.time(),))
         return {"config": config | {"has_key": bool(key), "model_ready": ready}, "available_pairs": list(PAIRS),
                 "tasks": [dict(row) for row in tasks], "agenda": [dict(row) for row in next_events],
+                "sources": [dict(id=key, label=name + ("日历" if calendar else ""),
+                                 default_url=default, format="ICS" if calendar else "RSS")
+                            for key, (name, default, calendar, _) in SOURCES.items()],
                 "search_ready": bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()),
                 "runs": [dict(row) for row in self.db.execute("SELECT * FROM platform_bulletin_runs")],
                 "reports": self.reports(8)}
@@ -238,6 +302,50 @@ class MarketBulletin:
                 if len(data) > 1_000_000:
                     raise ValueError("来源返回内容过大")
             return data.decode("utf-8-sig")
+
+    @staticmethod
+    @asynccontextmanager
+    async def source_session():
+        resolver = PublicSourceResolver()
+        try:
+            async with ClientSession(connector=TCPConnector(resolver=resolver), timeout=ClientTimeout(total=20),
+                                     headers={"User-Agent": "KurumiMarketBulletin/1.0"}) as session:
+                yield session
+        finally:
+            await resolver.close()
+
+    async def check_source(self, source_id, address):
+        if not isinstance(source_id, str) or source_id not in SOURCES:
+            raise ValueError("请选择要检查的订阅来源")
+        address = address or SOURCES[source_id][1]
+        if not address:
+            raise ValueError("请先填写订阅地址")
+        address = source_url(address)
+        _, source, calendar = source_details(source_id, address)
+        try:
+            async with self.source_session() as session:
+                payload = await self.fetch(session, address)
+            count = len(list(parse_calendar(payload, source) if calendar else parse_rss(payload, source)))
+        except Exception as error:
+            return {"ok": False, "message": self.source_error(error)}
+        if not count:
+            return {"ok": False, "message": "可访问，但未解析到有效条目"}
+        return {"ok": True, "message": f"连接成功，解析到 {count} 条"}
+
+    @staticmethod
+    def source_error(error):
+        status = getattr(error, "status", 0)
+        if status:
+            return f"HTTP {status}" + ("，来源拒绝访问" if status in (401, 403) else "")
+        if isinstance(error, TimeoutError):
+            return "连接超时"
+        if isinstance(error, ClientError):
+            return "连接失败"
+        if isinstance(error, (ElementTree.ParseError, UnicodeError)):
+            return "来源格式无法解析"
+        if type(error) is ValueError:
+            return str(error)
+        return "采集失败"
 
     async def search_news(self, query):
         key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
@@ -293,26 +401,14 @@ class MarketBulletin:
                     raise ValueError("RSS 暂无可解析条目")
                 return items, ""
             except Exception as error:
-                status = getattr(error, "status", 0)
-                if status:
-                    reason = f"HTTP {status}" + ("，来源拒绝访问" if status in (401, 403) else "")
-                elif isinstance(error, TimeoutError):
-                    reason = "连接超时"
-                elif isinstance(error, ClientError):
-                    reason = "连接失败"
-                elif isinstance(error, (ElementTree.ParseError, UnicodeError)):
-                    reason = "来源格式无法解析"
-                elif type(error) is ValueError:
-                    reason = str(error)
-                else:
-                    reason = "采集失败"
+                reason = self.source_error(error)
                 log.info("Bulletin source unavailable: %s (%s)", label, reason)
                 return [], reason
 
-        async with ClientSession(timeout=ClientTimeout(total=20), headers={"User-Agent": "KurumiMarketBulletin/1.0"}) as session:
-            sources = [(name, name, url, False) for name, url in FEEDS.items()]
-            sources += [(name + "日历", name, url, True) for name, url in CALENDARS.items()]
-            results = await asyncio.gather(*(read(session, *source) for source in sources))
+        sources = [(*source_details(key, address), address) for key, address in self.config()["sources"].items() if address]
+        async with self.source_session() as session:
+            results = await asyncio.gather(*(read(session, label, source, address, calendar)
+                                             for label, source, calendar, address in sources))
         failed = [f"{source[0]}（{error}）" for source, (_, error) in zip(sources, results) if error]
         media, search_error = await self.search_news("forex dollar euro yen central banks inflation jobs economic data markets")
         issues = failed + ([search_error] if search_error else [])
@@ -587,6 +683,8 @@ class MarketBulletin:
         if generation != self.generation:
             return
         await self.collect_if_due(config, generation, stamp)
+        if now.strftime("%H:%M") < config["time"]:
+            return
         for kind in config["periods"]:
             if generation != self.generation:
                 return

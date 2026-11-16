@@ -2377,6 +2377,12 @@ body.community-groups-collapsed .workspace > main { grid-column: 1; }
 .bulletin-admin-card legend { padding-inline: 4px; }
 .bulletin-checks, .bulletin-actions { display: flex; flex-wrap: wrap; gap: 8px 12px; }
 .bulletin-admin label:has(input[type=checkbox]) { display: inline-flex; align-items: center; gap: 6px; }
+.bulletin-source-card { grid-column: 1 / -1; }
+.bulletin-source-list { display: grid; gap: 12px; }
+.bulletin-source-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+.bulletin-source-row label { display: grid; gap: 4px; flex: 1 1 16rem; min-width: 0; }
+.bulletin-source-row small { flex-basis: 100%; }
+.bulletin-source-row small:empty { display: none; }
 .bulletin-admin-footer { grid-column: 1 / -1; display: flex; justify-content: flex-end; align-items: center; gap: 12px; }
 .bulletin-runs { display: grid; grid-template-columns: minmax(80px, 1fr) 2fr; gap: 6px 10px; margin-bottom: 0; }
 .bulletin-runs dd { margin: 0; }

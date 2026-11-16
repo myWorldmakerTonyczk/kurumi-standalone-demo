@@ -880,7 +880,10 @@ class Demo:
                         operation = body.get("action", "save")
                         if operation == "save":
                             self.market_bulletin.save(body)
-                        elif operation in ("scan", "day", "week", "month"):
+                        elif operation == "check-source":
+                            result = await self.market_bulletin.check_source(body.get("source"), body.get("url"))
+                            return web.json_response(result, headers={"Cache-Control": "no-store"})
+                        elif operation == "scan":
                             if not self.market_bulletin.config()["enabled"]:
                                 raise ValueError("请先启用市场播报")
                             await self.market_bulletin.run(operation)

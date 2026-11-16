@@ -118,6 +118,26 @@ class MarketBulletinTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["details"]["links"], [["【非官方 · media.example】Economy update", url]])
         self.assertEqual(report["details"]["media_count"], 1)
 
+    async def test_configurable_sources_and_check_without_importing(self):
+        agent = self.agent
+        default = agent.config()["sources"]["bls"]
+        media = "https://media.example/rss"
+        agent.save({"sources": {"bls": "https://blsmon1.bls.gov/feed/bls_latest.rss", "media": media}})
+        self.assertEqual(agent.config()["sources"]["media"], media)
+        self.assertEqual(agent.config()["sources"]["bls"], "https://blsmon1.bls.gov/feed/bls_latest.rss")
+        for bad in ("http://media.example/rss", "https://127.0.0.1/rss", "https://127.1/rss"):
+            with self.assertRaisesRegex(ValueError, "公网 HTTPS"):
+                await agent.check_source("media", bad)
+        agent.fetch = AsyncMock(return_value="""<rss><channel><item><title>Indicator</title>
+            <link>https://example.gov/release</link><pubDate>Tue, 10 Nov 2026 13:30:00 GMT</pubDate>
+            </item></channel></rss>""")
+        self.assertEqual(await agent.check_source("media", media), {"ok": True, "message": "连接成功，解析到 1 条"})
+        self.assertFalse((await agent.check_source("bls_calendar", ""))["ok"])
+        self.assertFalse(agent.reports(10))
+        agent.save({"sources": {"bls": "", "media": ""}})
+        self.assertEqual(agent.config()["sources"]["bls"], default)
+        self.assertEqual(agent.config()["sources"]["media"], "")
+
     def test_official_formats_and_timezone(self):
         rss = """<rss><channel><item><title>Indicator</title><link>https://example.gov/release</link>
           <pubDate>Tue, 10 Nov 2026 13:30:00 GMT</pubDate><description>Summary</description></item></channel></rss>"""
