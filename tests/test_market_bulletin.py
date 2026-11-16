@@ -6,7 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from src.agent.market_bulletin import BEA_CALENDAR_JSON, FOREX_FACTORY_CALENDAR, MarketBulletin, ZONE, parse_calendar, parse_rss, parse_source, period_window
+from src.agent.market_bulletin import BEA_CALENDAR_JSON, DOL_BLS_RELEASES, DOL_BLS_SOURCE, FOREX_FACTORY_CALENDAR, MarketBulletin, ZONE, parse_calendar, parse_rss, parse_source, period_window
 
 
 from src.agent.tool.bulletins import build_tool
@@ -160,6 +160,16 @@ END:VCALENDAR"""
         event, = parse_source(calendar, "Forex Factory", True, FOREX_FACTORY_CALENDAR)
         self.assertEqual(event[1], "Non-Farm Employment Change")
         self.assertEqual(datetime.fromtimestamp(event[2], ZONE).hour, 21)
+
+    def test_department_of_labor_reports_keep_official_pdf_links(self):
+        html = '''
+          <a href="/newsroom/economicdata/cpi_11102026.pdf"><b>Consumer Price Index</b></a>
+          <a href="https://example.com/newsroom/economicdata/cpi_11102026.pdf">Ignored</a>
+          <a href="/newsroom/economicdata/cpi_99999999.pdf">Invalid date</a>
+        '''
+        report, = parse_source(html, DOL_BLS_SOURCE, False, DOL_BLS_RELEASES)
+        self.assertEqual(report[:3], ("https://www.dol.gov/newsroom/economicdata/cpi_11102026.pdf",
+                                     DOL_BLS_SOURCE, "Consumer Price Index"))
 
     def test_official_formats_and_timezone(self):
         rss = """<rss><channel><item><title>Indicator</title><link>https://example.gov/release</link>

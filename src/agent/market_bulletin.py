@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html import unescape
+from html.parser import HTMLParser
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
@@ -43,13 +44,15 @@ SOURCES = {
     "bea_calendar": ("美国经济分析局", BEA_CALENDAR, True, "bea.gov"),
     "media": ("补充媒体", "", False, ""),
 }
+DOL_BLS_RELEASES = "https://www.dol.gov/index.php/newsroom/economicdata"
+DOL_BLS_SOURCE = "美国劳工部 · BLS 报告转载"
 CNBC_ECONOMY = "https://www.cnbc.com/id/20910258/device/rss/rss.html"
 FOREX_FACTORY_CALENDAR = "https://nfs.faireconomy.media/ff_calendar_thisweek.ics"
 BEA_CALENDAR_JSON = "https://apps.bea.gov/API/signup/release_dates.json"
 SOURCE_ALTERNATIVES = {
     "fed": ("美联储全部新闻稿", "https://www.federalreserve.gov/feeds/press_all.xml"),
     "ecb": ("欧洲央行统计新闻稿", "https://www.ecb.europa.eu/rss/statpress.html"),
-    "bls": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
+    "bls": ("美国劳工部转载的 BLS 正式报告", DOL_BLS_RELEASES),
     "bls_calendar": ("Forex Factory 美国周历（非官方）", FOREX_FACTORY_CALENDAR),
     "bea": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
     "bea_calendar": ("BEA 官方 JSON 日历", BEA_CALENDAR_JSON),
@@ -99,6 +102,8 @@ def source_details(source_id, address):
     source = name if official else MEDIA_PREFIX + host.removeprefix("www.")
     if address == FOREX_FACTORY_CALENDAR:
         source = MEDIA_PREFIX + "Forex Factory"
+    elif address == DOL_BLS_RELEASES:
+        source = DOL_BLS_SOURCE
     return name + ("日历" if calendar else ""), source, calendar
 
 
@@ -167,7 +172,47 @@ def parse_calendar(payload, source=""):
         yield (event_id, clean(title.replace(chr(92) + ",", ","))[:240], int(stamp.timestamp()))
 
 
+def parse_dol_bls_reports(payload):
+    class ReportLinks(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.link = None
+            self.title = []
+            self.items = {}
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "a":
+                href = dict(attrs).get("href") or ""
+                self.link = re.fullmatch(r"(/newsroom/economicdata/[a-z0-9]+_(\d{8})\.pdf)", href, re.I)
+                self.title = []
+
+        def handle_data(self, data):
+            if self.link:
+                self.title.append(data)
+
+        def handle_endtag(self, tag):
+            if tag != "a" or not self.link:
+                return
+            path, date = self.link.groups()
+            self.link = None
+            title = clean(" ".join(self.title))[:250]
+            try:
+                published = datetime.strptime(date, "%m%d%Y").replace(tzinfo=EASTERN).timestamp()
+            except ValueError:
+                return
+            if title:
+                url = "https://www.dol.gov" + path
+                self.items[url] = (url, DOL_BLS_SOURCE, title, "美国劳工部转载的 BLS 正式报告。仅有美国东部发布日期和 PDF 原文，未提供具体发布时间。", published)
+
+    parser = ReportLinks()
+    parser.feed(payload)
+    parser.close()
+    return list(parser.items.values())
+
+
 def parse_source(payload, source, calendar, address):
+    if not calendar and address == DOL_BLS_RELEASES:
+        return parse_dol_bls_reports(payload)
     if not calendar:
         return list(parse_rss(payload, source))
     if address == FOREX_FACTORY_CALENDAR:
@@ -323,7 +368,8 @@ class MarketBulletin:
                 "tasks": [dict(row) for row in tasks], "agenda": [dict(row) for row in next_events],
                 "sources": [dict(id=key, label=name + ("日历" if calendar else ""),
                                  default_url=default, format=("ICS / JSON" if key == "bea_calendar" else "ICS")
-                                 if calendar else "RSS", alternative=SOURCE_ALTERNATIVES.get(key))
+                                 if calendar else "RSS / 官方报告" if key == "bls" else "RSS",
+                                 alternative=SOURCE_ALTERNATIVES.get(key))
                             for key, (name, default, calendar, _) in SOURCES.items()],
                 "search_ready": bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()),
                 "runs": [dict(row) for row in self.db.execute("SELECT * FROM platform_bulletin_runs")],
@@ -359,8 +405,7 @@ class MarketBulletin:
     async def source_session(*, builtin=False):
         resolver = None if builtin else PublicSourceResolver()
         try:
-            async with ClientSession(connector=TCPConnector(resolver=resolver), timeout=ClientTimeout(total=20),
-                                     headers={"User-Agent": "KurumiMarketBulletin/1.0"}) as session:
+            async with ClientSession(connector=TCPConnector(resolver=resolver), timeout=ClientTimeout(total=20)) as session:
                 yield session
         finally:
             if resolver:
@@ -513,8 +558,9 @@ class MarketBulletin:
                 ident = "live:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:24]
                 paragraphs = []
                 for _, source, title, excerpt, published in fresh[:12]:
-                    stamp = datetime.fromtimestamp(published, ZONE).strftime("%m-%d %H:%M")
-                    paragraphs.append(f"**{title}**\n\n{source} · {stamp}（北京时间）" + (f"\n\n{excerpt}" if excerpt else ""))
+                    stamp = (datetime.fromtimestamp(published, EASTERN).strftime("%m-%d（美国东部日期）")
+                             if source == DOL_BLS_SOURCE else datetime.fromtimestamp(published, ZONE).strftime("%m-%d %H:%M（北京时间）"))
+                    paragraphs.append(f"**{title}**\n\n{source} · {stamp}" + (f"\n\n{excerpt}" if excerpt else ""))
                 if len(fresh) > 12:
                     paragraphs.append(f"另有 {len(fresh) - 12} 条，见下方来源。")
                 self.save_report(ident, "live", label, "\n\n".join(paragraphs),
@@ -575,6 +621,11 @@ class MarketBulletin:
         news = [dict(row) for row in self.db.execute("""SELECT * FROM platform_bulletin_news
             WHERE published>=? AND published<? AND (? IS NULL OR source=?) ORDER BY published,url""",
             (start.timestamp(), end.timestamp(), event["source"] if event else None, event["source"] if event else None))]
+        if event and event["source"] in ("美国劳工统计局", MEDIA_PREFIX + "Forex Factory"):
+            date = datetime.fromtimestamp(event["due"], EASTERN).replace(hour=0, minute=0, second=0, microsecond=0)
+            news.extend(dict(row) for row in self.db.execute(
+                "SELECT * FROM platform_bulletin_news WHERE source=? AND published=? ORDER BY url",
+                (DOL_BLS_SOURCE, date.timestamp())))
         known_urls = {item["url"] for item in news}
         news.extend(dict(url=url, source=source, title=title, excerpt=excerpt, published=published)
                     for url, source, title, excerpt, published in event_media
