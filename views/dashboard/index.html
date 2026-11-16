@@ -37,6 +37,7 @@
           <button data-settings-anchor="api">行情连接</button>
           <button data-settings-anchor="portal">用户面板</button>
           <button data-settings-anchor="bulletin">市场播报</button>
+          <button data-settings-anchor="platform-funds">平台资金</button>
           <button data-settings-anchor="workspace-controls">工作区权限</button>
         </nav>
         <div class="aside-note">
@@ -156,7 +157,7 @@
                   <p class="caption" id="loan-info"></p>
                   <form id="loan">
                     <label
-                      >借还金额（USD）<input
+                      >借还金额（日元）<input
                         name="amount"
                         type="number"
                         min="0.01"
@@ -301,7 +302,7 @@
                       </select></label
                     >
                     <label id="margin-label"
-                      >投入保证金（USD）
+                      >投入保证金（日元）
                       <div class="amount-row">
                         <input
                           id="order-margin"
@@ -385,7 +386,7 @@
                   </p>
                   <form id="deposit">
                     <label
-                      >追加虚拟美元<input
+                      >追加虚拟日元<input
                         name="amount"
                         type="number"
                         min="0.01"
@@ -482,6 +483,7 @@
             <button type="button" data-settings-tab="api">行情连接</button>
             <button type="button" data-settings-tab="portal">用户面板</button>
             <button type="button" data-settings-tab="bulletin">市场播报</button>
+            <button type="button" data-settings-tab="platform-funds">平台资金</button>
             <button type="button" data-settings-tab="workspace-controls">工作区权限</button>
           </nav>
           <div data-settings-page="users">
@@ -646,6 +648,21 @@
             </section>
           </div>
           <div data-settings-page="bulletin" hidden></div>
+          <section data-settings-page="platform-funds" class="panel" hidden>
+            <form id="initial-funds-form">
+              <h3>新用户初始资金</h3>
+              <label>默认初始资金（日元）<input name="initial" type="number" min="1" max="1000000000000" step="1" required></label>
+              <button type="submit" class="primary">保存初始资金</button>
+              <p role="status"></p>
+            </form>
+            <form id="platform-grant-form">
+              <h3>全员加款</h3>
+              <label>每名用户增加（日元）<input name="amount" type="number" min="1" max="1000000000000" step="1" required></label>
+              <p class="caption">每名用户只发一份。优先存入最早创建的进行中账户，其次是已结束账户。没有账户的用户开户时到账。</p>
+              <button type="submit">给全员加款</button>
+              <p role="status"></p>
+            </form>
+          </section>
           <section data-settings-page="workspace-controls" class="panel" hidden>
             <form id="workspace-controls-settings">
               <h3>用户可用操作</h3>
@@ -744,9 +761,9 @@
           /></label>
           <div class="form-grid">
             <label
-              >初始虚拟美元<input
+              >初始虚拟日元<input
                 name="initial"
-                value="10000"
+                value="200000"
                 type="number"
                 min="1"
                 required /></label
@@ -767,7 +784,7 @@
               id="allow-deposit"
               type="checkbox"
               checked
-            />允许本局中途追加虚拟美元（与借款分开控制）</label
+            />允许本局中途追加虚拟日元（与借款分开控制）</label
           >
           <fieldset class="loan-options">
             <legend>本局虚拟借款规则</legend>
@@ -779,13 +796,13 @@
                 checked
               />允许本局借用虚拟资金</label
             ><label
-              >最大借款本金（USD）<input
+              >最大借款本金（日元）<input
                 id="loan-limit"
                 name="loan_limit"
                 type="number"
                 min="0.01"
                 step="0.01"
-                value="20000"
+                value="400000"
                 required
             /></label>
             <p class="caption">
@@ -816,13 +833,13 @@
                 min="0.01"
                 step="any" /></label
             ><label
-              >累计净亏上限（美元）<input
+              >累计净亏上限（日元）<input
                 name="loss"
                 type="number"
                 min="0.01"
                 step="any" /></label
             ><label
-              >净值底线（美元）<input
+              >净值底线（日元）<input
                 name="floor"
                 type="number"
                 min="0.01"

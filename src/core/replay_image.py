@@ -213,7 +213,7 @@ def render_png(data, kind):
             draw.line((left, yy, right, yy), fill=color)
             draw.ellipse((xx - 6, yy - 6, xx + 6, yy + 6), fill=color, outline=PAPER, width=2)
             last = points[-1][1]
-            unit = "%" if kind in {"return", "drawdown"} else " USD"
+            unit = "%" if kind in {"return", "drawdown"} else " JPY"
             label(1080, 30, f"{last:,.2f}" + unit, heading, color, "rt")
             caption = "最新采样" if zh else "Latest sample"
             if kind in {"fees", "realized"}:

@@ -64,6 +64,44 @@ async function loadWorkspaceControls() {
     button.disabled = false;
   } catch (error) { status.textContent = error.message; }
 }
+const initialFundsForm = document.getElementById("initial-funds-form");
+const grantForm = document.getElementById("platform-grant-form");
+let pendingGrant;
+if (!remote && initialFundsForm && grantForm) {
+  initialFundsForm.onsubmit = async event => {
+    event.preventDefault();
+    const status = initialFundsForm.querySelector("[role=status]");
+    const button = initialFundsForm.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      const result = await bridge.apiPost("platform-funds", {action: "save", initial: initialFundsForm.elements.initial.value});
+      initialFundsForm.elements.initial.value = result.initial;
+      initialFundsForm.elements.initial.defaultValue = result.initial;
+      if (state) state.initial_funds = result.initial;
+      status.textContent = "已保存新用户默认资金";
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+  grantForm.onsubmit = async event => {
+    event.preventDefault();
+    const button = grantForm.querySelector("button[type=submit]");
+    if (button.disabled) return;
+    const status = grantForm.querySelector("[role=status]");
+    const amount = grantForm.elements.amount.value;
+    button.disabled = true;
+    try {
+      if (!await confirmAction({title: "给全员加款", message: "给每名现有用户增加 ¥" + money(amount) + " 虚拟资金。",
+        confirmText: "确认全员加款"})) return;
+      if (pendingGrant?.amount !== amount) pendingGrant = {amount, request_id: requestId()};
+      const result = await bridge.apiPost("platform-funds", {action: "grant", ...pendingGrant});
+      pendingGrant = null;
+      grantForm.reset();
+      status.textContent = "已到账 " + result.credited + " 人，待开户到账 " + result.pending + " 人";
+      await load();
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+}
 function showSettings(page) {
   if (page !== settingsPage && !confirmLeavingApiSettings()) return;
   settingsPage = page;
@@ -72,6 +110,7 @@ function showSettings(page) {
     api: ["行情连接", "这里保存的报价与历史数据来源供所有工作区使用。"],
     portal: ["用户面板", "配置用户访问工作区的对外地址。"],
     bulletin: ["市场播报", "管理平台共享的市场简报和指标跟踪任务。"],
+    "platform-funds": ["平台资金", "设置开户本金和全员加款。"],
     "workspace-controls": ["工作区权限", "设置用户可以使用的交易工作区操作。"],
   }[page];
   if (copy) {
@@ -85,6 +124,13 @@ function showSettings(page) {
     button.classList.toggle("selected",active);button.setAttribute("aria-pressed",String(active));
   }
   if (page === "bulletin") openBulletinSettings?.();
+  if (page === "platform-funds" && initialFundsForm && state) {
+    const input = initialFundsForm.elements.initial;
+    if (!input.value || (input.value === input.defaultValue && input !== document.activeElement)) {
+      input.value = state.initial_funds;
+      input.defaultValue = state.initial_funds;
+    }
+  }
   if (page === "workspace-controls" && !remote && workspaceControls) loadWorkspaceControls();
 }
 for (const button of document.querySelectorAll("[data-settings-tab]")) button.onclick=()=>showSettings(button.dataset.settingsTab);
@@ -635,12 +681,12 @@ function render() {
   renderDecision();
   $("metrics").replaceChildren();
   for (const [label, value] of [
-    ["当前净值", v ? "$" + money(v.equity) : "等待行情"],
-    ["可用保证金", v ? "$" + money(v.free) : "—"],
-    ["浮动盈亏", v ? "$" + money(v.floating) : "—"],
-    ["已用保证金", v ? "$" + money(v.margin) : "—"],
-    ["待还贷款（含息）", v ? "$" + money(v.debt || 0) : "—"],
-    ["本局净收益", v ? "$" + money(v.profit) : "—"],
+    ["当前净值", v ? "¥" + money(v.equity) : "等待行情"],
+    ["可用保证金", v ? "¥" + money(v.free) : "—"],
+    ["浮动盈亏", v ? "¥" + money(v.floating) : "—"],
+    ["已用保证金", v ? "¥" + money(v.margin) : "—"],
+    ["待还贷款（含息）", v ? "¥" + money(v.debt || 0) : "—"],
+    ["本局净收益", v ? "¥" + money(v.profit) : "—"],
     ["收益率", v ? Number(v.return_rate).toFixed(2) + "%" : "—"],
     ["最大回撤", Number(g.drawdown).toFixed(2) + "%"],
   ]) {
@@ -711,7 +757,7 @@ function render() {
     ? "本局允许借用虚拟资金"
     : "本局未开启虚拟借款";
   $("loan-info").textContent =
-    `待还 $${money(v?.debt || 0)} · 本金上限 $${money(g.loan_limit || Number(g.initial) * 2)} · 日利率 ${(Number(g.loan_rate || 0.0001) * 100).toFixed(2)}%（真实时间）`;
+    `待还 ¥${money(v?.debt || 0)} · 本金上限 ¥${money(g.loan_limit || Number(g.initial) * 2)} · 日利率 ${(Number(g.loan_rate || 0.0001) * 100).toFixed(2)}%（真实时间）`;
   $("trade")
     .querySelectorAll("button[type=submit]")
     .forEach((b) => (b.disabled = g.status === "ended" || !v));
@@ -896,7 +942,7 @@ function renderPositions(g, v, error) {
       ),
       node(
         "strong",
-        v ? `$${money(p.pnl)}` : "等待估值",
+        v ? `¥${money(p.pnl)}` : "等待估值",
         v ? (Number(p.pnl) >= 0 ? "positive" : "negative") : "caption",
       ),
     );
@@ -949,7 +995,7 @@ function renderPositions(g, v, error) {
       row,
       node(
         "p",
-        `止损 ${p.sl || "未设置"} · 止盈 ${p.tp || "未设置"}${v ? " · 保证金 $" + money(p.margin) : ""}`,
+        `止损 ${p.sl || "未设置"} · 止盈 ${p.tp || "未设置"}${v ? " · 保证金 ¥" + money(p.margin) : ""}`,
         "caption",
       ),
     );
@@ -980,7 +1026,7 @@ function renderPositions(g, v, error) {
     target.append(
       node(
         "p",
-        `余额 $${money(g.balance)} · 净值已扣除债务 · 累计交易费 $${money(g.fees)}`,
+        `余额 ¥${money(g.balance)} · 净值已扣除债务 · 累计交易费 ¥${money(g.fees)}`,
         "caption",
       ),
     );
@@ -998,15 +1044,16 @@ function estimate() {
   $("units-label").hidden = marginMode;
   form.elements.margin.disabled = !marginMode;
   form.elements.units.disabled = marginMode;
-  let unitUSD = q ? (Number(q.bid) + Number(q.ask)) / 2 : NaN;
-  if (pair.startsWith("USD/")) unitUSD = 1;
+  const mid = quote => quote?.tradeable ? (Number(quote.bid) + Number(quote.ask)) / 2 : NaN;
+  const yenPerDollar = mid(state.current.quotes["USD/JPY"]);
+  const unitJPY = pair.startsWith("USD/") ? yenPerDollar : mid(q) * yenPerDollar;
   const notional = marginMode
     ? Number(form.elements.margin.value) * lev
-    : Number(form.elements.units.value) * unitUSD;
+    : Number(form.elements.units.value) * unitJPY;
   $("order-estimate").replaceChildren(
-    node("div", `名义仓位　$${money(notional)}`),
-    node("div", `预计保证金　$${money(notional / lev)}`),
-    node("div", `预计开仓手续费　$${money(notional * Number(g.fee_rate))}`),
+    node("div", `名义仓位　¥${money(notional)}`),
+    node("div", `预计保证金　¥${money(notional / lev)}`),
+    node("div", `预计开仓手续费　¥${money(notional * Number(g.fee_rate))}`),
   );
 }
 $("trade").addEventListener("input", estimate);
@@ -1356,6 +1403,8 @@ function openCreateInstance(group = null, quick = false) {
   $("create-owner").textContent = user ? "所属用户：" + user.name : "";
   options($("create-persona"), [{ id: "", name: "请选择人格" }, ...(state?.personas || [])], "");
   $("create-auto").checked = true;
+  $("create").elements.initial.value = state?.initial_funds ?? "200000";
+  $("loan-limit").value = Number($("create").elements.initial.value) * 2;
   quickCreateOwner = "";
   $("quick-create-status").hidden = !quick;
   $("create-caption").hidden = quick;

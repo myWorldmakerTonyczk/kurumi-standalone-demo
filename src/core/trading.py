@@ -33,7 +33,7 @@ def public_snapshot(plugin, gid, log_limit=30, include_details=False):
     result["quotes"] = {p: q for p, q in result["quotes"].items() if p in PAIRS}
     if not include_details:
         game = result["game"]
-        keys = ("id", "name", "initial", "balance", "invested", "fees", "pairs", "leverage",
+        keys = ("id", "name", "currency", "initial", "balance", "invested", "fees", "pairs", "leverage",
                 "fee_rate", "rules", "status", "drawdown", "loan_enabled", "loan_limit",
                 "loan_principal", "loan_interest", "interval", "action_revision")
         result["game"] = {key: game[key] for key in keys if key in game}
@@ -82,7 +82,7 @@ async def execute(plugin, gid, action, body, *, already_locked=False):
         result = plugin.engine.action(gid, action, body, "ai")
         # The synchronous action appends its audit entry before returning.
         entry = plugin.engine.logs(gid, limit=1)[0]
-        receipt = dict(action=action, revision=result["revision"], log_id=entry["id"])
+        receipt = dict(action=action, revision=result["revision"], log_id=entry["id"], currency=plugin.engine.get(gid)["currency"])
         if action not in {"plan", "observe"}:
             receipt.update(balance=entry["balance"], detail=entry["detail"])
         return receipt

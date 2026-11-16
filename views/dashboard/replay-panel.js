@@ -9,7 +9,7 @@ const states = {
 const stamp = (value, zone = "Asia/Shanghai") => new Date(value * 1000).toLocaleString("zh-CN", {timeZone: zone, hour12: false});
 const number = (value, digits = 2) => Number(value).toLocaleString("zh-CN", {maximumFractionDigits: digits, minimumFractionDigits: digits});
 const metrics = {
-  equity: {name: "净值", hint: "此刻账户值多少美元", color: "#187d71", fill: "#dceee5", value: row => row.equity},
+  equity: {name: "净值", hint: "此刻账户值多少日元", color: "#187d71", fill: "#dceee5", value: row => row.equity},
   drawdown: {name: "回撤", hint: "较历史峰值的跌幅", color: "#a44a65", fill: "#efdce2", value: row => -row.drawdown},
   return_rate: {name: "收益率", hint: "扣除资金流影响后的累计收益", color: "#315da4", value: row => row.return_rate},
 };
@@ -166,7 +166,7 @@ export class ReplayPanel {
       button.dataset.pair = pair;
       button.setAttribute("aria-pressed", String(pair === (selected || (pairs.length === 1 ? pairs[0] : ""))));
       const sign = Math.round(net * 100) === 0 ? "flat" : net > 0 ? "gain" : "loss";
-      const pnl = el("span", fills ? (sign === "loss" ? "−" : sign === "gain" ? "+" : "") + "$" + number(Math.abs(net)) : "—", "replay-pair-pnl");
+      const pnl = el("span", fills ? (sign === "loss" ? "−" : sign === "gain" ? "+" : "") + "¥" + number(Math.abs(net)) : "—", "replay-pair-pnl");
       pnl.dataset.sign = sign;
       button.dataset.sign = sign;
       button.style.setProperty("--pnl-strength", (8 + 24 * Math.abs(net) / maxPnl) + "%");
@@ -264,7 +264,7 @@ export class ReplayPanel {
     for (const [key, value] of [
       ["成交次数", trades.length + (data.truncated ? "+" : "")],
       ["看盘任务", jobs.length + (data.truncated ? "+" : "")],
-      ["期末净值", latest ? "$" + number(latest.equity) : "—"],
+      ["期末净值", latest ? "¥" + number(latest.equity) : "—"],
       ["时段最深回撤", marks.length ? number(Math.max(...marks.map(m => m.drawdown))) + "%" : "—"],
     ]) {
       const box = el("div");
@@ -402,7 +402,7 @@ export class ReplayPanel {
     for (const metric of ["equity", "return_rate", "drawdown"]) {
       const spec = metrics[metric];
       const signed = value => (metric === "return_rate" && value > 0 ? "+" : "") + number(value === 0 ? 0 : value) + "%";
-      const format = metric === "equity" ? value => "$" + number(value) : signed;
+      const format = metric === "equity" ? value => "¥" + number(value) : signed;
       const card = el("article", null, "replay-performance-card");
       card.style.setProperty("--curve-color", spec.color);
       const current = el("strong", format(spec.value(latest)), "replay-performance-value");
@@ -824,13 +824,13 @@ export class ReplayPanel {
     const position = event.position;
     if (position?.pair) {
       const fields = [["品种", position.pair], ["方向", position.side === "buy" ? "做多" : "做空"], ["数量", position.units + " 单位"]];
-      if (event.price != null) fields.push(["成交价", event.price], ["手续费", "$" + number(event.fee)]);
+      if (event.price != null) fields.push(["成交价", event.price], ["手续费", "¥" + number(event.fee)]);
       if (position.sl) fields.push(["止损", position.sl]);
       if (position.tp) fields.push(["止盈", position.tp]);
       if (event.action === "close" && position.pnl != null) {
         const entry = this.data.events.find(e => e.action === "open" && fill(e) && e.position.id === position.id);
         const pnl = Number(position.pnl) - (entry ? event.fee + entry.fee : 0);
-        fields.push([entry ? "扣双边费后" : "平仓毛盈亏", (pnl < 0 ? "−" : pnl > 0 ? "+" : "") + "$" + number(Math.abs(pnl))]);
+        fields.push([entry ? "扣双边费后" : "平仓毛盈亏", (pnl < 0 ? "−" : pnl > 0 ? "+" : "") + "¥" + number(Math.abs(pnl))]);
         if (position.created) fields.push(["持仓时间", Math.max(0, Math.round((event.time - position.created) / 60)) + " 分钟"]);
       }
       const facts = el("dl", null, "replay-inspector-facts");
@@ -844,7 +844,7 @@ export class ReplayPanel {
     if (event.reason && event.reason !== title(event)) root.append(this.textSection(event.actor === "ai" ? "操作理由" : "触发原因", event.reason));
     if (event.text) root.append(this.textSection(event.action === "plan" ? "策略内容" : event.status === "failed" ? "失败详情" : "任务记录", event.text, true));
     const mark = this.data.marks.findLast(m => m.time < Math.floor(event.time));
-    if (mark) root.append(el("p", "此前最近采样 · 回撤 " + number(mark.drawdown) + "% · 净值 $" + number(mark.equity), "replay-muted replay-inspector-sample"));
+    if (mark) root.append(el("p", "此前最近采样 · 回撤 " + number(mark.drawdown) + "% · 净值 ¥" + number(mark.equity), "replay-muted replay-inspector-sample"));
     const related = this.data.events.filter(e => e !== event && (
       (position?.id && e.position?.id === position.id) || (event.job && e.job === event.job) ||
       event.related?.includes(e.id) || e.related?.includes(event.id)));
@@ -874,7 +874,7 @@ export class ReplayPanel {
     const root = this.root.querySelector(".replay-detail");
     root.replaceChildren(el("h3", "这一段账户变化"));
     if (!mark) { root.append(el("p", "这根 K 线范围内没有净值采样。")); return; }
-    root.append(el("p", stamp(mark.time)), el("p", "净值 $" + number(mark.equity) + " · 回撤 " + number(mark.drawdown) + "%"));
+    root.append(el("p", stamp(mark.time)), el("p", "净值 ¥" + number(mark.equity) + " · 回撤 " + number(mark.drawdown) + "%"));
     const marks = this.data.marks;
     const index = marks.indexOf(mark);
     let first = time;

@@ -7,7 +7,7 @@ from aiohttp import web
 
 from src.core.alerts import notices
 from src.core.availability import status
-from src.core.engine import PAIRS, dump
+from src.core.engine import DEFAULT_INITIAL, PAIRS, dump, positive
 from src.core.journal import journal
 from src.core.replay import review
 from src.core.trading import lock_for
@@ -136,7 +136,7 @@ class Dashboard:
         settings = demo.settings()
         return dict(demo=demo.demo, portal=dict(enabled=True, active=True, bind="127.0.0.1",
                     origin=demo.public_url(), port=8791, error=""),
-                    games=games, pairs=PAIRS, missing_instance=bool(gid and not game),
+                    games=games, pairs=PAIRS, initial_funds=self.initial_funds(), missing_instance=bool(gid and not game),
                     workspace=dict(users=users, mode=self.get("workspace_mode",
                                    dict(multiplayer=True, main_user_id=users[0]["id"] if users else "")),
                                    dashboard_admin=True, ownership_enforced=True),
@@ -151,7 +151,24 @@ class Dashboard:
     def workspace_controls(self):
         return dict(pause=True, decision=True, loan=True) | self.get("workspace_controls", {})
 
+    def initial_funds(self):
+        return self.get("initial_funds", DEFAULT_INITIAL)
+
     async def admin(self, request, action, body):
+        if action == "platform-funds":
+            if request.method == "GET":
+                return {"initial": self.initial_funds()}
+            if request.method != "POST":
+                raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
+            if body.get("action") == "grant":
+                return self.engine.grant_every_user(body.get("amount"), body.get("request_id"))
+            if body.get("action") != "save":
+                raise ValueError("未知资金操作")
+            value = positive(body.get("initial"))
+            if value != value.to_integral_value():
+                raise ValueError("初始资金须为整数日元")
+            self.put("initial_funds", str(value))
+            return {"initial": str(value)}
         if action == "workspace-controls":
             if request.method == "POST":
                 controls = self.workspace_controls()
@@ -196,6 +213,7 @@ class Dashboard:
         params = body.get("params") or {}
         if name == "create":
             options = dict(body.get("options", {}))
+            options.setdefault("initial", self.initial_funds())
             binding = ownership.normalize(options.get("user_binding", {"type": "random", "values": []}))
             if binding["type"] != "random":
                 raise ValueError("独立版使用网页用户账号")

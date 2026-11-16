@@ -1,10 +1,11 @@
 import tempfile
+import uuid
 import time
 import unittest
 from pathlib import Path
 from decimal import Decimal
 
-from src.core.engine import Engine, number
+from src.core.engine import USD_MIGRATION_RATE, Engine, number
 
 
 class LedgerTests(unittest.TestCase):
@@ -69,9 +70,9 @@ class LedgerTests(unittest.TestCase):
         self.buy()
         g = self.e.get(self.gid)
         v = self.e.valuation(g)
-        self.assertEqual(number(g["fees"]), Decimal("0.022004"))
-        self.assertEqual(number(v["floating"]), Decimal("-0.2"))
-        self.assertEqual(number(v["margin"]), Decimal("110"))
+        self.assertEqual(number(g["fees"]), Decimal("0.022004") * Decimal("150.01"))
+        self.assertEqual(number(v["floating"]), Decimal("-0.2") * Decimal("150.01"))
+        self.assertEqual(number(v["margin"]), Decimal("110") * Decimal("150.01"))
 
     def test_roundtrip_fees(self):
         self.buy()
@@ -79,21 +80,21 @@ class LedgerTests(unittest.TestCase):
         self.quote("EUR/USD", "1.1100", "1.1102")
         self.e.action(self.gid, "close", {"position": p["id"]})
         self.assertEqual(
-            number(self.e.get(self.gid)["balance"]), Decimal("10009.755796")
+            number(self.e.get(self.gid)["balance"]), Decimal("200000") + Decimal("9.755796") * Decimal("150.01")
         )
 
     def test_short_profit(self):
         self.buy(side="sell")
         self.quote("EUR/USD", "1.09", "1.0902")
         self.assertEqual(
-            number(self.e.valuation(self.e.get(self.gid))["floating"]), Decimal("9.8")
+            number(self.e.valuation(self.e.get(self.gid))["floating"]), Decimal("9.8") * Decimal("150.01")
         )
 
     def test_jpy_conversion(self):
         self.buy(pair="USD/JPY", units="1000")
         self.quote("USD/JPY", "151", "151.02")
         value = number(self.e.valuation(self.e.get(self.gid))["floating"])
-        self.assertAlmostEqual(float(value), 980 / 151.01)
+        self.assertEqual(value, 980)
 
     def test_deposit_not_profit(self):
         self.e.action(self.gid, "deposit", {"amount": "5000"})
@@ -114,13 +115,13 @@ class LedgerTests(unittest.TestCase):
     def test_idempotency(self):
         for _ in range(2):
             self.e.action(self.gid, "deposit", {"amount": "5000"}, key="same")
-        self.assertEqual(number(self.e.get(self.gid)["balance"]), 15000)
+        self.assertEqual(number(self.e.get(self.gid)["balance"]), 205000)
 
     def test_insufficient_margin_atomic_and_logged(self):
         with self.assertRaises(ValueError):
             self.buy(units="10000000")
         g = self.e.get(self.gid)
-        self.assertEqual(g["balance"], "10000")
+        self.assertEqual(g["balance"], "200000")
         self.assertEqual(g["positions"], [])
         self.assertEqual(self.e.logs(self.gid)[0]["status"], "rejected")
 
@@ -163,7 +164,7 @@ class LedgerTests(unittest.TestCase):
 
     def test_failure_wins_simultaneous_conditions(self):
         g = self.e.get(self.gid)
-        g["rules"] = {"profit": "0.01", "floor": "20000"}
+        g["rules"] = {"profit": "0.01", "floor": "220000"}
         self.e.save(g)
         self.buy()
         self.quote("EUR/USD", "1.2", "1.2002")
@@ -172,7 +173,7 @@ class LedgerTests(unittest.TestCase):
 
     def test_ended_cannot_recharge(self):
         g = self.e.get(self.gid)
-        g["rules"] = {"floor": "11000"}
+        g["rules"] = {"floor": "210000"}
         self.e.save(g)
         self.e.tick(self.gid)
         with self.assertRaises(ValueError):
@@ -199,13 +200,55 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.e.logs(self.gid)[0]["action"], "open")
 
     def test_low_margin_forces_close(self):
-        self.buy(units="80000")
+        self.buy(units="11000")
         self.quote("EUR/USD", "1.02", "1.0202")
         self.e.tick(self.gid)
         self.assertEqual(self.e.get(self.gid)["positions"], [])
         self.assertTrue(
             any("强平" in entry["reason"] for entry in self.e.logs(self.gid))
         )
+
+    def test_legacy_migration_scales_money_once_and_keeps_quote_prices(self):
+        game = self.e.get(self.gid)
+        game.pop("currency")
+        game.update(balance="1000", initial="1000", invested="1000", last_equity="1000",
+                    rules={"floor": "100", "profit": "10"})
+        self.e.save(game)
+        self.e.log(game, "human", "close", "旧记录", {"fee": "1", "position": {"entry": "1.1", "pnl": "5"}})
+        self.e.db.execute("UPDATE replay_equity SET equity=1000 WHERE game=?", (self.gid,))
+        self.e.db.close()
+        self.e = Engine(self.path)
+        migrated = self.e.get(self.gid)
+        self.assertEqual(migrated["currency"], "JPY")
+        self.assertEqual(number(migrated["balance"]), 1000 * USD_MIGRATION_RATE)
+        self.assertEqual(number(migrated["rules"]["floor"]), 100 * USD_MIGRATION_RATE)
+        self.assertEqual(migrated["rules"]["profit"], "10")
+        log = self.e.logs(self.gid)[0]["detail"]
+        self.assertEqual(log["position"]["entry"], "1.1")
+        self.assertEqual(number(log["position"]["pnl"]), 5 * USD_MIGRATION_RATE)
+        self.assertEqual(self.e.db.execute("SELECT equity FROM replay_equity WHERE game=?", (self.gid,)).fetchone()[0], 159525)
+        self.e.migrate_account_currency()
+        self.assertEqual(self.e.get(self.gid), migrated)
+
+    def test_platform_grant_once_per_user_and_pending_onboarding(self):
+        active = self.e.create_virtual_user("现有用户")
+        waiting = self.e.create_virtual_user("待开户")
+        binding = {"type": "random", "values": [active["public_id"]]}
+        first = self.e.create({"user_binding": binding, "allow_deposit": False})
+        second = self.e.create({"user_binding": binding})
+        self.e.quotes.clear()
+        key = uuid.uuid4().hex
+        for _ in range(2):
+            self.assertEqual(self.e.grant_every_user("5000", key), {"credited": 1, "pending": 1})
+        self.assertEqual(number(self.e.get(first["id"])["balance"]), 205000)
+        self.assertEqual(number(self.e.get(second["id"])["balance"]), 200000)
+        with self.assertRaises(ValueError):
+            self.e.grant_every_user("8000", key)
+        opened = self.e.create({"user_binding": {"type": "random", "values": [waiting["public_id"]]}})
+        self.assertEqual(number(opened["balance"]), 205000)
+        self.assertEqual(number(opened["invested"]), 205000)
+        self.assertEqual(opened["index"], "1")
+        self.assertEqual(self.e.logs(opened["id"])[0]["action"], "deposit")
 
 
 if __name__ == "__main__":

@@ -34,11 +34,11 @@ def notices(engine, gid, after=None, limit=100):
             level = "danger"
         elif action == "deposit":
             title = "虚拟资金已追加"
-            body = f"追加 ${money(detail['amount'])}，可用于保证金，不计入盈利。"
+            body = f"追加 ¥{money(detail['amount'])}，可用于保证金，不计入盈利。"
             level = "success"
         elif action in ("borrow", "repay"):
             title = "已借入虚拟资金" if action == "borrow" else "虚拟贷款已偿还"
-            body = f"本次 ${money(detail['amount'])}；待还贷款 ${money(detail.get('debt', 0))}。"
+            body = f"本次 ¥{money(detail['amount'])}；待还贷款 ¥{money(detail.get('debt', 0))}。"
             level = "success"
         elif action == "margin_call":
             title = "保证金不足提醒"
@@ -49,7 +49,7 @@ def notices(engine, gid, after=None, limit=100):
         ):
             position = detail.get("position", {})
             title = "模拟强平 / 爆仓提醒"
-            body = f"{position.get('pair', '')} 持仓已被系统强制平仓。\n{event.get('reason', '')}\n本笔盈亏 ${money(position.get('pnl', 0))}；平仓费 ${money(detail.get('fee', 0))}。"
+            body = f"{position.get('pair', '')} 持仓已被系统强制平仓。\n{event.get('reason', '')}\n本笔盈亏 ¥{money(position.get('pnl', 0))}；平仓费 ¥{money(detail.get('fee', 0))}。"
             level = "danger"
         elif action == "end":
             title = (

@@ -6,7 +6,7 @@ const boards = {
   weekly: ["周盈利", "本周盈利", "北京时间周一开始，已平仓盈亏减去本周开仓和平仓成交费。"],
   return: ["累计收益率", "累计收益率", "用总净值减去累计投入，再除以累计投入。"],
 };
-const usd = new Intl.NumberFormat("zh-CN", {style: "currency", currency: "USD"});
+const yen = new Intl.NumberFormat("zh-CN", {style: "currency", currency: "JPY"});
 const percent = new Intl.NumberFormat("zh-CN", {style: "percent", maximumFractionDigits: 2});
 
 function avatarPath(avatar) {
@@ -25,7 +25,7 @@ export function mountLeaderboard() {
   const status = h("p", {class: "wealth-status", role: "status"});
   const list = h("div", {class: "wealth-list"});
   const footer = h("footer", {class: "wealth-footer"});
-  dialog.append(h("header", {}, h("div", {}, title, h("small", {}, "模拟交易 · USD")), close),
+  dialog.append(h("header", {}, h("div", {}, title, h("small", {}, "模拟交易 · JPY")), close),
     nav, details, status, list, footer);
   document.body.append(launch, dialog);
   let board = "wealth";
@@ -60,7 +60,7 @@ export function mountLeaderboard() {
         h("span", {}, "名次"), h("span", {}, "智能体"), h("span", {}, metric)));
       for (const item of data.entries) {
         const value = Number(item.value);
-        const formatted = selected === "return" ? percent.format(value / 100) : usd.format(value);
+        const formatted = selected === "return" ? percent.format(value / 100) : yen.format(value);
         list.append(h("div", {class: "wealth-row" + (item.mine ? " wealth-mine" : "")},
           h("span", {class: "wealth-rank" + (item.rank <= 3 ? " top-rank" : "")}, item.rank),
           h("span", {class: "wealth-agent"}, h("img", {src: avatarPath(item.avatar), alt: "", loading: "lazy"}),

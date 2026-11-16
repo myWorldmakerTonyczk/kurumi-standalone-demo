@@ -9,6 +9,10 @@ from decimal import Decimal, InvalidOperation
 from ..users import ownership
 from .replay_records import decision_scope, initialize as initialize_replay, sample
 
+ACCOUNT_CURRENCY = "JPY"
+DEFAULT_INITIAL = "200000"
+# Bank of Japan's USD/JPY midpoint at 17:00 JST on 2026-11-16.
+USD_MIGRATION_RATE = Decimal("159.525")
 PAIRS = ("EUR/USD", "GBP/USD", "AUD/USD", "USD/JPY", "USD/CHF", "USD/CAD")
 
 
@@ -59,10 +63,47 @@ class Engine:
             game TEXT NOT NULL, created REAL NOT NULL, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS requests(game TEXT, key TEXT, result TEXT,
             PRIMARY KEY(game,key));
+          CREATE TABLE IF NOT EXISTS platform_grants(
+            id TEXT PRIMARY KEY, amount TEXT NOT NULL, credited INTEGER NOT NULL, pending INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS pending_platform_grants(
+            grant_id TEXT NOT NULL, owner TEXT NOT NULL REFERENCES sim_users(id) ON DELETE CASCADE,
+            amount TEXT NOT NULL, PRIMARY KEY(grant_id,owner));
         """)
         ownership.initialize(self.db)
         initialize_replay(self.db)
         self.quotes = {}
+        self.migrate_account_currency()
+
+    def migrate_account_currency(self):
+        def scale(record, keys):
+            for key in keys:
+                if key in record and record[key] not in ("", None):
+                    record[key] = str(Decimal(str(record[key])) * USD_MIGRATION_RATE)
+
+        with self.transaction():
+            rows = self.db.execute(
+                "SELECT id,data FROM games WHERE json_extract(data,'$.currency') IS NULL "
+                "OR json_extract(data,'$.currency')='USD'").fetchall()
+            for gid, raw in rows:
+                game = json.loads(raw)
+                scale(game, ("initial", "balance", "invested", "fees", "last_equity",
+                             "loan_limit", "loan_principal", "loan_interest", "loan_cost"))
+                scale(game.get("rules", {}), ("floor", "loss"))
+                for position in game["positions"] + game.get("orders", []):
+                    scale(position, ("pnl", "margin", "fee"))
+                logs = self.db.execute("SELECT seq,data FROM logs WHERE game=?", (gid,))
+                for seq, raw_log in logs:
+                    event = json.loads(raw_log)
+                    scale(event, ("balance",))
+                    detail = event.get("detail") or {}
+                    scale(detail, ("initial", "amount", "fee", "debt", "interest_paid",
+                                   "total_interest", "shortfall", "equity", "balance"))
+                    scale(detail.get("position") or {}, ("pnl", "margin", "fee"))
+                    self.db.execute("UPDATE logs SET data=? WHERE seq=?", (dump(event), seq))
+                self.db.execute("UPDATE replay_equity SET equity=equity*? WHERE game=?",
+                                (float(USD_MIGRATION_RATE), gid))
+                game["currency"] = ACCOUNT_CURRENCY
+                self.save(game)
 
     @contextmanager
     def transaction(self):
@@ -147,7 +188,7 @@ class Engine:
         return {"ok": True}
 
     def create(self, options):
-        initial = positive(options.get("initial", "10000"))
+        initial = positive(options.get("initial", DEFAULT_INITIAL))
         pairs = self.validate_pairs(options.get("pairs", ["EUR/USD"]))
         leverage = positive(options.get("leverage", 100))
         if leverage > 100:
@@ -173,6 +214,7 @@ class Engine:
             id=uuid.uuid4().hex,
             name=str(options.get("name", "小澪的外汇日记"))[:80],
             initial=str(initial),
+            currency=ACCOUNT_CURRENCY,
             balance=str(initial),
             invested=str(initial),
             created=time.time(),
@@ -245,9 +287,65 @@ class Engine:
                 game["notifications"] = notice_defaults(self.db, game["owner_id"])
             game["last_equity"] = str(initial)
             self.save(game)
-            sample(self.db, game, force=True)
             self.log(game, "human", "create", "创建交易实例", {"initial": str(initial)})
+            owner = game.get("owner_id")
+            if owner:
+                grants = self.db.execute(
+                    "SELECT grant_id,amount FROM pending_platform_grants WHERE owner=? ORDER BY rowid", (owner,),
+                ).fetchall()
+                for grant, amount in grants:
+                    self.credit_grant(game, number(amount), grant)
+                if grants:
+                    self.db.execute("DELETE FROM pending_platform_grants WHERE owner=?", (owner,))
+                    self.save(game)
+            sample(self.db, game, force=True)
         return game
+
+    @staticmethod
+    def add_principal(game, amount):
+        for key in ("balance", "invested", "last_equity"):
+            game[key] = str(number(number(game[key]) + amount))
+
+    def credit_grant(self, game, amount, grant):
+        self.add_principal(game, amount)
+        game["revision"] += 1
+        game["action_revision"] = game.get("action_revision", 0) + 1
+        self.log(game, "system", "deposit", "管理员全员加款", {"amount": str(amount), "grant_id": grant})
+
+    def grant_every_user(self, value, grant):
+        amount = positive(value)
+        if amount != amount.to_integral_value():
+            raise ValueError("全员加款金额须为整数日元")
+        if not isinstance(grant, str) or len(grant) != 32:
+            raise ValueError("加款请求编号无效")
+        try:
+            if uuid.UUID(hex=grant).hex != grant:
+                raise ValueError
+        except ValueError:
+            raise ValueError("加款请求编号无效") from None
+        with self.transaction():
+            prior = self.db.execute("SELECT amount,credited,pending FROM platform_grants WHERE id=?", (grant,)).fetchone()
+            if prior:
+                if number(prior["amount"]) != amount:
+                    raise ValueError("加款请求已处理，金额不能变更")
+                return {"credited": prior["credited"], "pending": prior["pending"]}
+            owners = [row[0] for row in self.db.execute("SELECT id FROM sim_users ORDER BY ordinal")]
+            primary = {}
+            for game in sorted(self.games(), key=lambda item: (item["status"] == "ended", item["created"], item["id"])):
+                if game.get("owner_id"):
+                    primary.setdefault(game["owner_id"], game)
+            credited = pending = 0
+            for owner in owners:
+                if game := primary.get(owner):
+                    self.credit_grant(game, amount, grant)
+                    self.save(game)
+                    sample(self.db, game, force=True)
+                    credited += 1
+                else:
+                    self.db.execute("INSERT INTO pending_platform_grants VALUES(?,?,?)", (grant, owner, str(amount)))
+                    pending += 1
+            self.db.execute("INSERT INTO platform_grants VALUES(?,?,?,?)", (grant, str(amount), credited, pending))
+        return {"credited": credited, "pending": pending}
 
     def users(self):
         return ownership.users(self.db)
@@ -315,10 +413,14 @@ class Engine:
         return q
 
     def convert(self, amount, currency):
-        if currency == "USD":
+        if currency == ACCOUNT_CURRENCY:
             return amount
+        yen = self.quote("USD/JPY")
+        yen_per_dollar = (number(yen["bid"]) + number(yen["ask"])) / 2
+        if currency == "USD":
+            return amount * yen_per_dollar
         q = self.quote("USD/" + currency)
-        return amount / ((number(q["bid"]) + number(q["ask"])) / 2)
+        return amount * yen_per_dollar / ((number(q["bid"]) + number(q["ask"])) / 2)
 
     def valuation(self, game):
         floating, margin = Decimal(0), Decimal(0)
@@ -550,9 +652,7 @@ class Engine:
                 if source != "human" or not game["allow_deposit"]:
                     raise ValueError("不允许 AI 自行追加本金")
                 amount = positive(body.get("amount"))
-                game["balance"] = str(number(game["balance"]) + amount)
-                game["invested"] = str(number(game["invested"]) + amount)
-                game["last_equity"] = str(number(game["last_equity"]) + amount)
+                self.add_principal(game, amount)
                 self.log(game, source, action, reason, {"amount": str(amount)})
             elif action in ("pause", "resume"):
                 if source != "human":

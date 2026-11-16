@@ -205,6 +205,7 @@ class Demo:
             user = self.db.execute("SELECT nickname FROM sim_users WHERE id=?", (owner,)).fetchone()
             username = user["nickname"] if user else owner
         return (f"你最好的{relation}是「{username}」（用户 ID：{owner}）。\n\n"
+                "模拟账户的余额、净值、盈亏、保证金、费用与借还款均以日元（JPY）计。货币对的报价单位照常。\n\n"
                 + character_persona(profile, self.default_persona))
 
     def preferences(self, owner, game=None):
@@ -618,8 +619,9 @@ class Demo:
 
     async def refresh(self):
         if self.demo:
-            self.engine.quotes["EUR/USD"] = dict(bid="1.1000", ask="1.1002",
-                                                  timestamp=time.time(), tradeable=True)
+            timestamp = time.time()
+            self.engine.quotes["EUR/USD"] = dict(bid="1.1000", ask="1.1002", timestamp=timestamp, tradeable=True)
+            self.engine.quotes["USD/JPY"] = dict(bid="159.52", ask="159.53", timestamp=timestamp, tradeable=True)
         else:
             await self.market.refresh(self.settings())
         self.dashboard.history.record(self.settings())
@@ -916,7 +918,7 @@ class Demo:
                     return web.json_response({"id": owner, "username": self.accounts.username(owner)})
                 if request.method == "POST" and action == "create":
                     game = self.engine.create(dict(name=str(body.get("name") or "模拟账户"),
-                        user_nickname=str(body.get("nickname", "")), user_binding={"type": "random", "values": []},
+                        initial=self.dashboard.initial_funds(), user_nickname=str(body.get("nickname", "")), user_binding={"type": "random", "values": []},
                         _issue_user_token=False, auto=body.get("auto") is True))
                     username, password = await self.accounts.issue(game["owner_id"])
                     self.accounts.allow_trade(game["id"], True)
@@ -1207,7 +1209,8 @@ class Demo:
                     days=request.query.get("days", 1), pair=request.query.get("pair", ""),
                     end=request.query.get("end", 0)))
             if action == "model-presets" and request.method == "GET":
-                return web.json_response(dict(presets=MODEL_PRESETS, persona=DEFAULT_PERSONA, agent_name="久留美", agent_real_name="福贺久留美", user_relationship="朋友"))
+                return web.json_response(dict(presets=MODEL_PRESETS, persona=DEFAULT_PERSONA, agent_name="久留美", agent_real_name="福贺久留美", user_relationship="朋友",
+                                              initial_funds=self.dashboard.initial_funds()))
             if action == "onboarding" and request.method == "POST":
                 if games:
                     return web.json_response({"id": games[0]["id"]})
@@ -1232,7 +1235,7 @@ class Demo:
                 row = self.db.execute("SELECT token FROM sim_user_tokens WHERE user_id=?", (owner,)).fetchone()
                 user_token = row[0] if row else issue_id(self.db, owner)
                 self.db.execute("UPDATE sim_users SET nickname=? WHERE id=?", (self.unique_name(nickname.strip(), owner), owner))
-                game = self.engine.create(dict(name="外汇日记", initial="1000", pairs=list(PAIRS), auto=True,
+                game = self.engine.create(dict(name="外汇日记", initial=self.dashboard.initial_funds(), pairs=list(PAIRS), auto=True,
                     user_binding={"type": "random", "values": [user_token]}))
                 self.accounts.allow_trade(game["id"], True)
                 self.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)",

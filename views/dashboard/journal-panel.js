@@ -114,7 +114,7 @@ export class JournalPanel {
     if (position?.pair) {
       const fields = [position.pair, position.side === "sell" ? "空" : "多", position.units + " 单位"];
       if (position.entry != null) fields.push("入场 " + position.entry);
-      if (position.pnl != null) fields.push("平仓毛盈亏 $" + Number(position.pnl).toFixed(2));
+      if (position.pnl != null) fields.push("平仓毛盈亏 ¥" + Number(position.pnl).toFixed(2));
       body.append(element("p", fields.join(" · "), "journal-position"));
     }
     if (row.reason) {

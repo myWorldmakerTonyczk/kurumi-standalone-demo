@@ -13,8 +13,8 @@ const SOURCE = {ai: "AI", human: "人类", system: "系统"};
 const LEVEL = {high: ["需处理", 0], warn: ["注意", 1], info: ["提示", 2]};
 
 const num = value => { const n = Number(value); return value === "" || value === null || value === undefined || !Number.isFinite(n) ? null : n; };
-const usd = value => num(value) === null ? "—" : "$" + money(value);
-const signedUsd = value => { const n = num(value); return n === null ? "—" : (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + money(Math.abs(n)); };
+const yen = value => num(value) === null ? "—" : "¥" + money(value);
+const signedYen = value => { const n = num(value); return n === null ? "—" : (n > 0 ? "+" : n < 0 ? "-" : "") + "¥" + money(Math.abs(n)); };
 const signedPct = value => { const n = num(value); return n === null ? "—" : (n > 0 ? "+" : "") + n.toFixed(2) + "%"; };
 const tone = value => { const n = num(value); return n > 0 ? "positive" : n < 0 ? "negative" : ""; };
 
@@ -36,7 +36,7 @@ export function computeRisks(state, selected) {
       if (ratio >= 80) add("high", `保证金占用 ${ratio.toFixed(1)}%`, "可用空间很小，价格不利时可能触发保证金不足或强平。考虑降低仓位或追加本金。");
       else if (ratio >= 50) add("warn", `保证金占用 ${ratio.toFixed(1)}%`, "超过净值的一半，继续加仓前先确认能承受的波动。");
     }
-    if (num(v.debt) > 0) add("warn", `有待还贷款 ${usd(v.debt)}`, "含利息，利息按真实时间累积，可在交易工作台的「周转小金库」偿还。");
+    if (num(v.debt) > 0) add("warn", `有待还贷款 ${yen(v.debt)}`, "含利息，利息按真实时间累积，可在交易工作台的「周转小金库」偿还。");
   }
   const noStop = positions.filter(p => !num(p.sl));
   if (noStop.length) add("warn", `${noStop.length} 笔持仓未设置止损`, "价格反向波动时没有自动保护。" + noStop.slice(0, 3).map(p => p.pair).join("、") + (noStop.length > 3 ? " 等" : ""));
@@ -133,7 +133,7 @@ export function createHome(root, ctx) {
         h("dt", {}, "品种"), h("dd", {}, st.pair || "—"),
         h("dt", {}, "成交次数"), h("dd", {}, String(st.fills ?? 0)),
         h("dt", {}, "胜率"), h("dd", {}, noFills ? "样本不足" : (Number(st.win_rate) * 100).toFixed(0) + "%"),
-        h("dt", {}, "净结果"), h("dd", {class: tone(st.net)}, signedUsd(st.net)),
+        h("dt", {}, "净结果"), h("dd", {class: tone(st.net)}, signedYen(st.net)),
         h("dt", {}, "最大回撤"), h("dd", {}, Number(st.max_drawdown).toFixed(2) + "%")),
       data.risk_points?.length ? h("ul", {class: "ai-risks"}, data.risk_points.map(point => h("li", {}, point))) : null,
       h("div", {class: "ai-actions"},
@@ -187,13 +187,13 @@ export function createHome(root, ctx) {
     const row = (label, value, cls = "", lead = false) =>
       h("div", {class: "hm-fig" + (lead ? " hm-fig-lead" : "")}, h("dt", {}, label), h("dd", {class: cls}, value));
     clear(figures).append(
-      row("当前净值", v ? usd(v.equity) : "—", "", true),
-      row("可用保证金", v ? usd(v.free) : "—"),
-      row("已用保证金", v ? usd(v.margin) : "—"),
-      row("浮动盈亏", v ? signedUsd(v.floating) : "—", v ? tone(v.floating) : ""),
-      row("本局净收益", v ? signedUsd(v.profit) : "—", v ? tone(v.profit) : ""),
+      row("当前净值", v ? yen(v.equity) : "—", "", true),
+      row("可用保证金", v ? yen(v.free) : "—"),
+      row("已用保证金", v ? yen(v.margin) : "—"),
+      row("浮动盈亏", v ? signedYen(v.floating) : "—", v ? tone(v.floating) : ""),
+      row("本局净收益", v ? signedYen(v.profit) : "—", v ? tone(v.profit) : ""),
       row("收益率", v ? signedPct(v.return_rate) : "—", v ? tone(v.return_rate) : ""),
-      row("待还贷款（含息）", v ? usd(v.debt || 0) : "—"),
+      row("待还贷款（含息）", v ? yen(v.debt || 0) : "—"),
       row("最大回撤", num(g.drawdown) === null ? "—" : Number(g.drawdown).toFixed(2) + "%"));
     clear(meter);
     const equity = v ? num(v.equity) : null, margin = v ? num(v.margin) : null;
@@ -222,7 +222,7 @@ export function createHome(root, ctx) {
         h("th", {scope: "row"}, p.pair), cell(SIDE[p.side] || p.side),
         cell(num(p.units) === null ? "—" : Number(p.units).toLocaleString("en-US", {maximumFractionDigits: 2}), "num"),
         cell(String(p.entry ?? "—"), "num"), cell(v ? String(p.current ?? "—") : "—", "num"),
-        cell(v ? signedUsd(p.pnl) : "—", "num " + (v ? tone(p.pnl) : "")),
+        cell(v ? signedYen(p.pnl) : "—", "num " + (v ? tone(p.pnl) : "")),
         cell(num(p.sl) ? String(p.sl) : "未设置", "num" + (num(p.sl) ? "" : " hm-unset")),
         cell(num(p.tp) ? String(p.tp) : "未设置", "num" + (num(p.tp) ? "" : " hm-unset"))))))));
   }

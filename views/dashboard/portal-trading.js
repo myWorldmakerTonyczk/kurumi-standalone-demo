@@ -176,7 +176,7 @@ export class PortalTrading {
     totals.replaceChildren();
     for (const [label, field] of [["净值", "equity"], ["可用保证金", "free"], ["浮动盈亏", "floating"]]) {
       const item = el("div");
-      item.append(el("span", label), el("strong", data.valuation ? "$" + number(data.valuation[field]) : "—"));
+      item.append(el("span", label), el("strong", data.valuation ? "¥" + number(data.valuation[field]) : "—"));
       totals.append(item);
     }
     this.order.hidden = false;
@@ -197,7 +197,7 @@ export class PortalTrading {
       const direction = position.side === "buy" ? "多仓" : "空仓";
       card.append(el("h4", `${position.pair} · ${direction}`),
         el("p", `${number(position.units)} 单位 · 入场 ${position.entry} · 杠杆 ${position.leverage}×`),
-        el("p", `止损 ${position.sl || "—"} · 止盈 ${position.tp || "—"} · 浮盈亏 ${position.pnl == null ? "—" : "$" + number(position.pnl)}`));
+        el("p", `止损 ${position.sl || "—"} · 止盈 ${position.tp || "—"} · 浮盈亏 ¥{position.pnl == null ? "—" : "¥" + number(position.pnl)}`));
       if (allowed) this.positionForm(card, position);
       list.append(card);
     }
