@@ -1034,7 +1034,7 @@ submit("loan", async (p, button) => {
 });
 function sourceFields() {
   const selected = $("market-source").value;
-  for (const row of document.querySelectorAll("[data-source]")) {
+  for (const row of $("connection").querySelectorAll("[data-source]")) {
     row.hidden = row.dataset.source !== selected;
     for (const input of row.querySelectorAll("input"))
       input.disabled = row.hidden;
