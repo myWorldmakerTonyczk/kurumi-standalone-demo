@@ -102,7 +102,7 @@ class TaskSchedule:
             event = trigger.get("event")
             if mode == "account" and event not in ACCOUNT_EVENTS:
                 raise ValueError("账户事件无效")
-            if mode == "bulletin" and event not in (None, "", "day", "week", "month", "event"):
+            if mode == "bulletin" and event not in (None, "", "live", "day", "week", "month", "event"):
                 raise ValueError("市场播报类型无效")
             if mode == "mention" and event not in (None, "", "group"):
                 raise ValueError("提及事件仅支持群聊")

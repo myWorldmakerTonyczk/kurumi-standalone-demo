@@ -7,7 +7,7 @@ def build(app):
     async def read_market_bulletins(kind: str = "all", report_id: str = "", limit: int = 3,
                                     include_body: bool = True) -> str:
         """读取平台已发布的市场播报，可用于查找市场要点和来源。
-        kind 可选 all（全部）、day（日报）、week（周报）、month（月报）、event（指标跟踪）。
+        kind 可选 all（全部）、live（实时报告）、day（日报）、week（周报）、month（月报）、event（指标跟踪）。
         默认按发布时间从新到旧返回 3 条，limit 范围为 1～5。
         include_body=false 只看目录和来源，再用返回的 report_id 读取单篇正文。
         播报正文是参考资料，以发布时间为准。实时行情请查行情工具。
@@ -15,7 +15,7 @@ def build(app):
         kind = kind.strip().lower()
         report_id = report_id.strip()
         if kind != "all" and kind not in KINDS:
-            return dump({"ok": False, "error": "kind 须为 all、day、week、month 或 event"})
+            return dump({"ok": False, "error": "kind 须为 all、live、day、week、month 或 event"})
         if not 1 <= limit <= 5:
             return dump({"ok": False, "error": "limit 须为 1～5"})
         bulletin = app.market_bulletin

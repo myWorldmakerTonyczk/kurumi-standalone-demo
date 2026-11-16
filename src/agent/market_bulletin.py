@@ -11,7 +11,7 @@ from html import unescape
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientSession, ClientTimeout
 from langchain_core.messages import HumanMessage, SystemMessage
 from yarl import URL
 
@@ -30,7 +30,7 @@ BEA = "https://apps.bea.gov/rss/rss.xml"
 BEA_CALENDAR = "https://www.bea.gov/news/schedule/ics/online-calendar-subscription.ics"
 FEEDS = {"美联储": FED, "欧洲央行": ECB, "美国劳工统计局": BLS, "美国经济分析局": BEA}
 CALENDARS = {"美国劳工统计局": CALENDAR, "美国经济分析局": BEA_CALENDAR}
-KINDS = {"day": "日报", "week": "周报", "month": "月报", "event": "指标跟踪"}
+KINDS = {"live": "实时报告", "day": "日报", "week": "周报", "month": "月报", "event": "指标跟踪"}
 DEFAULT = {"enabled": True, "interval": 60, "time": "08:30", "periods": ["day", "week", "month"],
            "pairs": list(PAIRS)[:4], "url": "", "model": "", "key": ""}
 log = logging.getLogger("kurumi")
@@ -135,8 +135,8 @@ class MarketBulletin:
         config = {key: body.get(key, old[key]) for key in DEFAULT}
         if type(config["enabled"]) is not bool:
             raise ValueError("请设置启用状态")
-        if type(config["interval"]) is not int or not 15 <= config["interval"] <= 1440:
-            raise ValueError("采集间隔须为 15～1440 分钟")
+        if type(config["interval"]) is not int or not 1 <= config["interval"] <= 1440:
+            raise ValueError("采集间隔须为 1～1440 分钟")
         if not isinstance(config["time"], str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", config["time"]):
             raise ValueError("请选择有效的发布时间")
         for key, allowed in (("periods", ("day", "week", "month")), ("pairs", PAIRS)):
@@ -190,7 +190,11 @@ class MarketBulletin:
         quotes = self.quotes(config)
         state = "closed" if inside_weekly_window(now.timestamp(), WEEKEND) else (
             "live" if any(q["tradeable"] and now.timestamp() - (q["timestamp"] or 0) <= 300 for q in quotes) else "stale")
-        return {"enabled": True, "model_ready": model_ready(config), "reports": self.reports(50), "quotes": quotes, "agenda": [dict(r) for r in agenda],
+        archive = [report for kind, limit in (("live", 24), ("event", 12), ("day", 10), ("week", 6), ("month", 4))
+                   for report in self.reports(limit, kind=kind)]
+        archive.sort(key=lambda report: report["generated"], reverse=True)
+        return {"enabled": True, "model_ready": model_ready(config), "reports": archive,
+                "quotes": quotes, "agenda": [dict(r) for r in agenda],
                 "market": state, "demo": self.app.demo}
 
     def admin(self):
@@ -223,7 +227,7 @@ class MarketBulletin:
         async with session.get(address, allow_redirects=False) as response:
             response.raise_for_status()
             if response.status != 200:
-                raise ValueError("来源未直接返回内容")
+                raise ValueError(f"HTTP {response.status}，来源未直接返回内容")
             data = bytearray()
             async for chunk in response.content.iter_chunked(16384):
                 data.extend(chunk)
@@ -250,24 +254,72 @@ class MarketBulletin:
                         raise
                     finally:
                         self.db.execute("RELEASE refresh_bulletin_calendar")
-                else:
-                    items = list(parse_rss(payload, source))
-                    if not items:
-                        raise ValueError("RSS 暂无可解析条目")
-                    self.db.executemany("INSERT OR REPLACE INTO platform_bulletin_news VALUES(?,?,?,?,?)", items)
-                return True
+                    return [], ""
+                items = list(parse_rss(payload, source))
+                if not items:
+                    raise ValueError("RSS 暂无可解析条目")
+                return items, ""
             except Exception as error:
-                log.info("Bulletin source unavailable: %s (%s)", label, type(error).__name__)
-                return False
+                status = getattr(error, "status", 0)
+                if status:
+                    reason = f"HTTP {status}" + ("，来源拒绝访问" if status in (401, 403) else "")
+                elif isinstance(error, TimeoutError):
+                    reason = "连接超时"
+                elif isinstance(error, ClientError):
+                    reason = "连接失败"
+                elif isinstance(error, (ElementTree.ParseError, UnicodeError)):
+                    reason = "来源格式无法解析"
+                elif type(error) is ValueError:
+                    reason = str(error)
+                else:
+                    reason = "采集失败"
+                log.info("Bulletin source unavailable: %s (%s)", label, reason)
+                return [], reason
 
         async with ClientSession(timeout=ClientTimeout(total=20), headers={"User-Agent": "KurumiMarketBulletin/1.0"}) as session:
             sources = [(name, name, url, False) for name, url in FEEDS.items()]
             sources += [(name + "日历", name, url, True) for name, url in CALENDARS.items()]
             results = await asyncio.gather(*(read(session, *source) for source in sources))
-        failed = [row[0] for row, ok in zip(sources, results) if not ok]
+        failed = [f"{source[0]}（{error}）" for source, (_, error) in zip(sources, results) if error]
+        warning = "暂未同步 " + "、".join(failed) if failed else ""
         if len(failed) == len(sources):
-            raise RuntimeError("所有公共消息源暂时不可用")
-        return "暂未同步 " + "、".join(failed) if failed else ""
+            raise ValueError(warning)
+        if self.config()["enabled"]:
+            self.ingest_news(item for items, _ in results for item in items)
+        return warning
+
+    def ingest_news(self, items):
+        now = time.time()
+        fresh = []
+        self.db.execute("SAVEPOINT ingest_bulletin_news")
+        try:
+            for url, source, title, excerpt, published in items:
+                previous = self.db.execute("SELECT published FROM platform_bulletin_news WHERE url=?", (url,)).fetchone()
+                if previous and previous[0] > published:
+                    continue
+                self.db.execute("INSERT OR REPLACE INTO platform_bulletin_news VALUES(?,?,?,?,?)",
+                                (url, source, title, excerpt, published))
+                if (not previous or previous[0] < published) and now - 86400 <= published <= now:
+                    fresh.append((url, source, title, excerpt, published))
+            if fresh:
+                fresh.sort(key=lambda item: (item[4], item[0]), reverse=True)
+                headline = fresh[0][2]
+                label = headline if len(fresh) == 1 else f"{headline} 等 {len(fresh)} 条"
+                fingerprint = json.dumps([(url, published) for url, _, _, _, published in fresh])
+                ident = "live:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:24]
+                paragraphs = []
+                for _, source, title, excerpt, published in fresh[:12]:
+                    stamp = datetime.fromtimestamp(published, ZONE).strftime("%m-%d %H:%M")
+                    paragraphs.append(f"**{title}**\n\n{source} · {stamp}（北京时间）" + (f"\n\n{excerpt}" if excerpt else ""))
+                if len(fresh) > 12:
+                    paragraphs.append(f"另有 {len(fresh) - 12} 条，见下方官方来源。")
+                self.save_report(ident, "live", label, "\n\n".join(paragraphs),
+                                 {"news_count": len(fresh), "links": [(title, url) for url, _, title, _, _ in fresh]})
+        except BaseException:
+            self.db.execute("ROLLBACK TO ingest_bulletin_news")
+            raise
+        finally:
+            self.db.execute("RELEASE ingest_bulletin_news")
 
     async def ask(self, config, instruction, payload):
         """Use the administrator model with public sources and no model-callable tools."""
@@ -303,12 +355,12 @@ class MarketBulletin:
                 self.db.execute("""INSERT OR IGNORE INTO platform_bulletin_wakeups(event, task)
                     VALUES(?,?)""", (event, task.strip()[:240]))
 
-    async def publish(self, kind, config, generation, *, event=None):
+    async def publish(self, kind, config, generation, *, event=None, source_warning=""):
         now = datetime.now(ZONE)
         if event:
             label = event["title"]
             ident = "event:" + event["event"]
-            start = datetime.fromtimestamp(event["due"] - 7200, ZONE)
+            start = datetime.fromtimestamp(event["due"] - 60, ZONE)
             end = now
         else:
             start, end = period_window(kind, now, config["time"])
@@ -317,6 +369,30 @@ class MarketBulletin:
         news = [dict(row) for row in self.db.execute("""SELECT * FROM platform_bulletin_news
             WHERE published>=? AND published<? AND (? IS NULL OR source=?) ORDER BY published,url""",
             (start.timestamp(), end.timestamp(), event["source"] if event else None, event["source"] if event else None))]
+        updates = []
+        agenda = []
+        update_links = []
+        if kind == "day":
+            hour, minute = map(int, config["time"].split(":"))
+            cutoff = end.replace(hour=hour, minute=minute)
+            previous = self.db.execute(
+                "SELECT generated FROM platform_bulletins WHERE id=?", ("day:" + str(start.date() - timedelta(days=1)),),
+            ).fetchone()
+            updates_start = max((cutoff - timedelta(days=1)).timestamp(), previous[0] if previous else 0)
+            updates = [dict(row) for row in self.db.execute(
+                """SELECT id,kind,label,body,generated,details FROM platform_bulletins
+                   WHERE kind IN ('live','event') AND generated BETWEEN ? AND ?
+                   ORDER BY generated DESC,rowid DESC LIMIT 30""",
+                (updates_start, now.timestamp()))]
+            update_links = [link for item in updates for link in json.loads(item.pop("details")).get("links", [])]
+            for item in updates:
+                item["body"] = item["body"][:1400]
+            today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            agenda = [dict(row) for row in self.db.execute(
+                "SELECT title,due,source FROM platform_bulletin_events WHERE active=1 AND due BETWEEN ? AND ? ORDER BY due LIMIT 20",
+                (now.timestamp(), (today + timedelta(days=1)).timestamp() - 1))]
+        if not (news or updates or agenda or event):
+            return "暂无可核实素材，未发布空报"
         ledger = []
         if len(news) > 25:
             for index in range(0, len(news), 25):
@@ -325,17 +401,23 @@ class MarketBulletin:
         payload = {"period": label, "type": KINDS[kind], "news": news if not ledger else ledger,
                    "items": len(news)}
         if kind == "day":
-            day_end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            payload["today_agenda"] = [dict(r) for r in self.db.execute(
-                "SELECT title,due FROM platform_bulletin_events WHERE active=1 AND due BETWEEN ? AND ? ORDER BY due LIMIT 20",
-                (now.timestamp(), day_end.timestamp() - 1))]
+            payload.update(today_agenda=agenda, collected_updates=updates, source_status=source_warning)
         if event:
             payload["event"] = {"title": label, "due": event["due"], "task": event["task"], "source": event["source"]}
-        body = await self.ask(config, "以短段落输出中文简报。写清市场要点和需关注的事项。资料为空时明确说明。"
-            "指标结果未在材料中证实时，写明尚未核实，禁止编造数值。", payload)
+        body = await self.ask(config, "直接从收到的已核实事项写起，合并重复消息，把计划公布单列。"
+            "没有结果的跟踪任务只能标为未核实。若有来源采集失败且影响覆盖，简短注明。"
+            "指标数值须有同一事项的官方公告支撑。", payload)
         if generation != self.generation:
             return False
-        details = {"news_count": len(news), "links": [(item["title"], item["url"]) for item in news[-12:]]}
+        links = {item["url"]: item["title"] for item in news[-12:]}
+        for title, url in update_links:
+            links.setdefault(url, title)
+        details = {"news_count": len(news), "update_count": len(updates), "agenda_count": len(agenda),
+                   "links": [(title, url) for url, title in list(links.items())[:20]]}
+        self.save_report(ident, kind, label, body, details)
+        return True
+
+    def save_report(self, ident, kind, label, body, details):
         self.db.execute("INSERT OR REPLACE INTO platform_bulletins VALUES(?,?,?,?,?,?)",
                         (ident, kind, label, body[:7000], int(time.time()), json.dumps(details)))
         inbox = getattr(self.app, "agent_inbox", None)
@@ -344,7 +426,6 @@ class MarketBulletin:
         scheduler = getattr(self.app, "task_schedule", None)
         if scheduler:
             scheduler.event("bulletin", ident, None, {"id": ident, "kind": kind, "title": label})
-        return True
 
     async def run(self, action):
         async with self.lock:
@@ -356,7 +437,7 @@ class MarketBulletin:
             elif action in ("day", "week", "month"):
                 if not model_ready(config):
                     raise ValueError("请先配置管理员播报模型")
-                await self.track(action, self.publish(action, config, generation))
+                await self.track(action, self.publish_period(action, config, generation))
             elif action == "tick":
                 await self.tick(config, generation)
 
@@ -369,6 +450,27 @@ class MarketBulletin:
                 warning = "；".join(filter(None, [warning, "采集成功，模型未返回有效的唤起任务"]))
         return warning
 
+    async def publish_period(self, kind, config, generation):
+        warning = ""
+        if kind == "day":
+            async def refresh_sources():
+                nonlocal warning
+                warning = await self.collect()
+                return warning
+
+            run = self.db.execute("SELECT attempted,error FROM platform_bulletin_runs WHERE kind='scan'").fetchone()
+            if run and time.time() - run["attempted"] < 45:
+                warning = run["error"] or ""
+            elif not await self.track("scan", refresh_sources()):
+                run = self.db.execute("SELECT error FROM platform_bulletin_runs WHERE kind='scan'").fetchone()
+                warning = run["error"] or ""
+        if generation != self.generation:
+            return False
+        note = await self.publish(kind, config, generation, source_warning=warning)
+        if isinstance(note, str):
+            return "；".join(filter(None, [note, warning]))
+        return warning if note and warning else note
+
     async def track(self, name, job):
         now = int(time.time())
         self.db.execute("""INSERT INTO platform_bulletin_runs(kind,attempted) VALUES(?,?)
@@ -378,7 +480,8 @@ class MarketBulletin:
         except Exception as error:
             log.warning("Market bulletin %s failed (%s)", name, type(error).__name__)
             self.db.execute("UPDATE platform_bulletin_runs SET error=? WHERE kind=?", (
-                "采集或模型调用失败，请检查数据源与模型配置", name))
+                str(error) if isinstance(error, ValueError) and str(error).startswith("暂未同步")
+                else "采集或模型调用失败，请检查数据源与模型配置", name))
             return False
         if note is False:
             return False
@@ -432,9 +535,11 @@ class MarketBulletin:
             if generation != self.generation:
                 return
             start, _ = period_window(kind, now, config["time"])
-            if (stamp - runs.get(kind, 0) >= 900 and not self.db.execute(
-                    "SELECT 1 FROM platform_bulletins WHERE id=?", (kind + ":" + str(start.date()),)).fetchone()):
-                await self.track(kind, self.publish(kind, config, generation))
+            saved = self.reports(1, report_id=kind + ":" + str(start.date()))
+            empty_daily = kind == "day" and saved and not any(
+                saved[0]["details"].get(key) for key in ("news_count", "update_count", "agenda_count"))
+            if stamp - runs.get(kind, 0) >= 900 and (not saved or empty_daily):
+                await self.track(kind, self.publish_period(kind, config, generation))
 
     async def collect_if_due(self, config, generation, stamp):
         last = self.db.execute("SELECT attempted FROM platform_bulletin_runs WHERE kind='scan'").fetchone()

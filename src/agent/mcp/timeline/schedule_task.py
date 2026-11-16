@@ -8,7 +8,7 @@ def build(app, owner, public):
         trigger: {type: immediate}、{type: delay, seconds}、{type: at, time: ISO8601 带时区}；
         quote 用 pair、side(bid/ask/mid)、condition(cross_up/cross_down/enter_range)、price 或 low/high；
         account 用 event(liquidation/stop_loss/take_profit/margin_call/deposit)；
-        bulletin 用 event(day/week/month/event，可省略)和可选 title_contains；mention 可用 room_id 限定群。群聊目的仅写可公开内容。
+        bulletin 用 event(live/day/week/month/event，可省略)和可选 title_contains；mention 可用 room_id 限定群。群聊目的仅写可公开内容。
         到期只入队，不等于已经执行。
         """
         try:

@@ -2,13 +2,13 @@ import {renderMarkdown} from "/assets/ui/markdown.js";
 import {api} from "/assets/ui/api.js";
 import {h, formatTime} from "/assets/ui/dom.js";
 
-const PERIODS = {day: "日报", week: "周报", month: "月报", event: "指标跟踪"};
+const PERIODS = {live: "实时报告", day: "日报", week: "周报", month: "月报", event: "指标跟踪"};
 const TASKS = {pending: "待唤起", done: "已发布", failed: "失败", cancelled: "已取消"};
 const RUNS = {scan: "消息采集", day: "日报", week: "周报", month: "月报", event: "指标唤起"};
 const time = stamp => stamp ? formatTime(stamp) : "尚未运行";
 
-function reportBody(content, preview = false) {
-  const body = h("div", {class: "bulletin-report-body" + (preview ? " bulletin-preview" : "")});
+function reportBody(content) {
+  const body = h("div", {class: "bulletin-report-body"});
   const markdown = (content || "").replace(/^(\*\*[^*\r\n]+)\r?\n[ \t]*\*\*[ \t]*(?=\r?$)/gm, "$1**");
   renderMarkdown(body, markdown);
   return body;
@@ -16,12 +16,16 @@ function reportBody(content, preview = false) {
 
 function reportList(reports) {
   if (!reports.length) return h("p", {class: "bulletin-muted"}, "尚无已发布的播报");
-  return h("div", {class: "bulletin-reports"}, reports.map(report => h("details", {},
+  return h("div", {class: "bulletin-reports"}, reports.map(report => h("details", {dataset: {report: report.id}},
     h("summary", {}, h("b", {}, PERIODS[report.kind]), " ", report.label,
       h("small", {}, time(report.generated))),
     reportBody(report.body),
-    h("small", {}, "汇总 " + report.details.news_count + " 条官方消息"),
-    report.details.links.length ? h("ul", {}, report.details.links.map(([title, url]) => {
+    h("small", {}, [
+      report.details.news_count ? report.details.news_count + " 条官方消息" : "",
+      report.details.update_count ? report.details.update_count + " 条实时或指标更新" : "",
+      report.details.agenda_count ? report.details.agenda_count + " 条待公布日程" : "",
+    ].filter(Boolean).join(" · ")),
+    report.details.links?.length ? h("ul", {}, report.details.links.map(([title, url]) => {
       if (!url.startsWith("https://")) return h("li", {}, title);
       return h("li", {}, h("a", {href: url, target: "_blank", rel: "noopener noreferrer"}, title));
     })) : null)));
@@ -54,10 +58,23 @@ export function marketBulletin({compact = false} = {}) {
       const statuses = {closed: "周末休市", live: "报价已更新", stale: "等待有效行情"};
       state.textContent = data.demo ? "模拟行情" : statuses[data.market];
       state.dataset.state = data.demo ? "demo" : data.market;
-      const latest = data.reports[0];
-      const preview = latest ? h("div", {class: "bulletin-lead"}, h("small", {}, PERIODS[latest.kind] + " · " + latest.label),
-        reportBody(latest.body, true), h("small", {}, "发布于 " + time(latest.generated)))
-        : h("p", {class: "bulletin-muted"}, data.model_ready ? "等待发布首份播报" : "等待管理员配置播报模型");
+      const latestUpdates = data.reports.filter(report => ["live", "event"].includes(report.kind)).slice(0, 3);
+      const latestDaily = data.reports.find(report => report.kind === "day");
+      function openReport(id) {
+        for (const item of archive.querySelectorAll("details")) item.open = item.dataset.report === id;
+        if (!dialog.open) dialog.showModal();
+        if (id) archive.querySelector("details[open]")?.scrollIntoView({block: "nearest"});
+      }
+      const reportRow = report => h("button", {type: "button",
+        class: "bulletin-headline", onClick: () => openReport(report.id)},
+        h("b", {}, report.label), h("small", {}, PERIODS[report.kind] + " · " + time(report.generated)));
+      const preview = h("div", {class: "bulletin-lead"},
+        h("h4", {}, "实时动态"),
+        latestUpdates.length ? latestUpdates.map(reportRow)
+          : h("p", {class: "bulletin-muted"}, "等待采集到新的官方公告"),
+        h("h4", {}, "最新日报"),
+        latestDaily ? reportRow(latestDaily)
+          : h("p", {class: "bulletin-muted"}, data.model_ready ? "暂无已发布的日报" : "等待管理员配置播报模型"));
       const quotes = h("div", {class: "bulletin-quotes"}, data.quotes.map(q => h("div", {},
         h("b", {}, q.pair), h("span", {}, q.bid + " / " + q.ask), h("small", {}, time(q.timestamp)))));
       const events = data.agenda.length
@@ -71,7 +88,13 @@ export function marketBulletin({compact = false} = {}) {
         data.quotes.length ? quotes : h("p", {class: "bulletin-muted"}, "暂无报价"),
         h("h4", {}, "今日关注 · 北京时间"), events,
         h("button", {type: "button", class: "ui-btn ui-btn-sm", onClick: () => dialog.showModal()}, "查看播报归档"));
-      archive.replaceChildren(reportList(data.reports));
+      const expanded = [...archive.querySelectorAll("details[open]")].map(item => item.dataset.report);
+      archive.replaceChildren(
+        h("h4", {}, "实时动态与指标跟踪"),
+        reportList(data.reports.filter(report => ["live", "event"].includes(report.kind))),
+        h("h4", {}, "日报、周报与月报"),
+        reportList(data.reports.filter(report => ["day", "week", "month"].includes(report.kind))));
+      for (const item of archive.querySelectorAll("details")) item.open = expanded.includes(item.dataset.report);
     } catch {
       // A failed refresh leaves the most recent bulletin available.
     } finally { busy = false; }
@@ -81,7 +104,7 @@ export function marketBulletin({compact = false} = {}) {
 
 export function mountBulletinAdmin(root, bridge) {
   const enabled = h("input", {type: "checkbox", name: "enabled", form: "bulletin-settings-form"});
-  const interval = h("input", {type: "number", name: "interval", min: 15, max: 1440, required: true});
+  const interval = h("input", {type: "number", name: "interval", min: 1, max: 1440, required: true});
   const publishAt = h("input", {type: "time", name: "time", required: true});
   const preset = h("select", {name: "preset", "aria-label": "模型预设"});
   let presets = [];
@@ -121,7 +144,8 @@ export function mountBulletinAdmin(root, bridge) {
   model.addEventListener("input", syncPreset);
   form.append(
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "采集与发布"),
-      label("采集间隔（分钟）", interval), label("发布时刻（北京时间）", publishAt),
+      label("采集间隔（分钟）", interval), label("日报、周报和月报发布时间（北京时间）", publishAt),
+      h("p", {class: "bulletin-muted"}, "采集到新公告时发布实时报告。日报发布前会再检查一次来源。"),
       h("fieldset", {}, h("legend", {}, "发布周期"), h("div", {class: "bulletin-checks"},
         periods.map(([kind, input]) => label(PERIODS[kind], input)))),
       h("fieldset", {}, h("legend", {}, "首页关注品种"), pairs)),
@@ -171,7 +195,7 @@ export function mountBulletinAdmin(root, bridge) {
     signal.dataset.state = config.enabled && config.model_ready ? "live" : "stale";
     runs.replaceChildren(...Object.entries(RUNS).flatMap(([kind, label]) => {
       const row = data.runs.find(run => run.kind === kind);
-      return [h("dt", {}, label), h("dd", {}, time(row?.success),
+      return [h("dt", {}, label), h("dd", {}, time(row?.attempted),
         row?.error ? h("small", {class: "bulletin-error"}, row.error) : null)];
     }));
     schedule.replaceChildren(...(data.tasks.length ? data.tasks.map(task => {

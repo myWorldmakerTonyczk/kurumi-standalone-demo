@@ -69,6 +69,40 @@ class MarketBulletinTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "配置管理员播报模型"):
             await self.agent.run("day")
 
+    async def test_daily_refresh_includes_new_live_and_indicator_updates(self):
+        agent = self.agent
+        agent.save({"url": "https://test.example/v1", "model": "model", "key": "test-key"})
+        now = time.time()
+        agent.save_report("event:jobs", "event", "就业指标", "官方跟踪结果", {"news_count": 1, "links": []})
+        item = ("https://example.gov/fresh", "机构", "新公告", "新数据摘要", now - 60)
+        async def collect():
+            agent.ingest_news([item])
+            return "暂未同步 BLS（HTTP 403）"
+        agent.collect = AsyncMock(side_effect=collect)
+        agent.ask = AsyncMock(return_value="日报正文")
+        await agent.run("day")
+        agent.collect.assert_awaited_once()
+        payload = agent.ask.await_args.args[2]
+        self.assertEqual({report["kind"] for report in payload["collected_updates"]}, {"live", "event"})
+        self.assertIn("HTTP 403", payload["source_status"])
+        daily = agent.reports(1, kind="day")[0]
+        self.assertEqual(daily["details"]["update_count"], 2)
+        self.assertIn(["新公告", "https://example.gov/fresh"], daily["details"]["links"])
+        agent.ingest_news([item])
+        self.assertEqual(len(agent.reports(10, kind="live")), 1)
+        read = build_tool(SimpleNamespace(market_bulletin=agent))
+        self.assertEqual(json.loads(await read(kind="live"))["reports"][0]["kind"], "live")
+
+    async def test_no_material_does_not_publish_an_empty_daily_report(self):
+        agent = self.agent
+        agent.save({"url": "https://test.example/v1", "model": "model", "key": "test-key"})
+        agent.collect = AsyncMock(return_value="")
+        agent.ask = AsyncMock()
+        await agent.run("day")
+        self.assertFalse(agent.reports(1, kind="day"))
+        agent.ask.assert_not_awaited()
+        self.assertIn("未发布空报", next(row for row in agent.admin()["runs"] if row["kind"] == "day")["error"])
+
     def test_official_formats_and_timezone(self):
         rss = """<rss><channel><item><title>Indicator</title><link>https://example.gov/release</link>
           <pubDate>Tue, 10 Nov 2026 13:30:00 GMT</pubDate><description>Summary</description></item></channel></rss>"""
