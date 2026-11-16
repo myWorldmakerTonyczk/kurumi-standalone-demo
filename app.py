@@ -51,6 +51,14 @@ from src.notifications.settings import validate as notice_settings, delivery_tim
 from src.portal.server import ASSETS, SECURITY_HEADERS
 
 PERSONA_MAX_LENGTH = 10_000
+def listen_port(admin):
+    name, default = ("KURUMI_ADMIN_PORT", 8790) if admin else ("KURUMI_USER_PORT", 8791)
+    port = int(os.getenv(name, str(default)))
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{name} must be between 1 and 65535")
+    return port
+
+
 DEFAULT_PERSONA = (Path(__file__).resolve().parent / "config" / "default_persona.md").read_text(encoding="utf-8").strip()
 MODEL_PRESETS = [
     dict(name="DeepSeek", url="https://api.deepseek.com", model="deepseek-flash"),
@@ -129,7 +137,7 @@ class Demo:
         return self.dashboard.get("market", {"history_source": "market"})
 
     def public_url(self):
-        return os.getenv("KURUMI_PUBLIC_URL") or self.dashboard.get("portal", {}).get("origin") or "http://127.0.0.1:8791"
+        return os.getenv("KURUMI_PUBLIC_URL") or self.dashboard.get("portal", {}).get("origin") or f"http://127.0.0.1:{listen_port(False)}"
 
     def record_account_event(self, game, entry):
         self.agent_inbox.system(game, entry)
@@ -923,7 +931,7 @@ class Demo:
             if action == "health" and request.method == "GET":
                 response = web.json_response({"service": "kurumi-user-portal", "ok": True})
                 if origin := request.headers.get("Origin"):
-                    if origin == "http://127.0.0.1:8790":
+                    if origin == f"http://127.0.0.1:{listen_port(True)}":
                         response.headers["Access-Control-Allow-Origin"] = origin
                 return response
             if action == "workspace" and request.method == "GET":
@@ -1500,19 +1508,20 @@ async def main():
     logger.addHandler(handler)
     demo = Demo(data / "ledger.sqlite3")
     demo.demo = os.getenv("KURUMI_LIVE", "1") != "1"
+    admin_port, user_port = listen_port(True), listen_port(False)
     runners = []
     tasks = []
     try:
-        for admin, port in [(True, 8790), (False, 8791)]:
+        for admin, port in [(True, admin_port), (False, user_port)]:
             runner = web.AppRunner(demo.app(admin), access_log=None)
             runners.append(runner)
             await runner.setup()
             await web.TCPSite(runner, "127.0.0.1", port).start()
-        print("管理员入口 http://127.0.0.1:8790/", flush=True)
+        print(f"管理员入口 http://127.0.0.1:{admin_port}/", flush=True)
         if demo.admin_setup:
-            print(f"管理员首次设置 http://127.0.0.1:8790/#setup={demo.admin_setup}", flush=True)
+            print(f"管理员首次设置 http://127.0.0.1:{admin_port}/#setup={demo.admin_setup}", flush=True)
             print(f"管理员首次设置 Token：{demo.admin_setup}", flush=True)
-        print("用户入口 http://127.0.0.1:8791/", flush=True)
+        print(f"用户入口 http://127.0.0.1:{user_port}/", flush=True)
         tasks = [asyncio.create_task(demo.prices()), asyncio.create_task(demo.jobs()), asyncio.create_task(demo.social.patrol()), asyncio.create_task(demo.market_bulletin.loop())]
         await asyncio.Event().wait()
     finally:
