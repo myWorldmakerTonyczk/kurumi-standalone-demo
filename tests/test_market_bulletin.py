@@ -1,10 +1,11 @@
 import json
+import os
 import sqlite3
 import time
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.agent.market_bulletin import BEA_CALENDAR_JSON, DOL_BLS_RELEASES, DOL_BLS_SOURCE, FOREX_FACTORY_CALENDAR, LEGACY_BLS_SOURCES, MarketBulletin, ZONE, parse_calendar, parse_rss, parse_source, period_window
 
@@ -187,6 +188,39 @@ END:VCALENDAR"""
         report, = parse_source(html, DOL_BLS_SOURCE, False, DOL_BLS_RELEASES)
         self.assertEqual(report[:3], ("https://www.dol.gov/newsroom/economicdata/cpi_11102026.pdf",
                                      DOL_BLS_SOURCE, "Consumer Price Index"))
+
+    async def test_optional_search_uses_deepseek_key_and_keeps_credentials_private(self):
+        agent = self.agent
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": ""}):
+            self.assertEqual(agent.config()["search_provider"], "off")
+            self.assertEqual(await agent.search_news("test"), ([], ""))
+            agent.save({"search_provider": "auto", "url": "https://api.deepseek.com/v1", "key": "test-model-secret",
+                        "brave_search_key": "test-brave-secret"})
+            now = datetime.fromtimestamp(time.time() - 5, ZONE).isoformat()
+            response = MagicMock(status=200)
+            response.json = AsyncMock(return_value={"results": [
+                {"title": "Release", "url": "https://media.example/report", "date": now, "snippet": "Summary"},
+                {"title": "Undated", "url": "https://media.example/undated", "date": None},
+            ]})
+            session = MagicMock()
+            session.request.return_value.__aenter__.return_value = response
+            client = MagicMock()
+            client.__aenter__.return_value = session
+            with patch("src.agent.market_bulletin.ClientSession", return_value=client):
+                items, warning = await agent.search_news("forex update")
+            self.assertFalse(warning)
+            self.assertEqual([item[:4] for item in items],
+                             [("https://media.example/report", "非官方 · media.example", "Release", "Summary")])
+            self.assertEqual(session.request.call_args.args, ("POST", "https://api.deepseek.com/v1/tools/search"))
+            self.assertEqual(session.request.call_args.kwargs["headers"], {"Authorization": "Bearer test-model-secret"})
+            self.assertNotIn("-secret", json.dumps(agent.admin()))
+            self.assertNotIn("-secret", json.dumps(agent.public()))
+            agent.save({"url": "https://proxy.example/v1", "key": "proxy-key"})
+            self.assertEqual(agent.search_credentials(agent.config()), ("brave", "test-brave-secret"))
+            agent.save({"search_provider": "deepseek", "deepseek_search_key": "test-search-secret"})
+            self.assertEqual(agent.admin()["search"]["active"], "deepseek")
+            agent.save({"search_provider": "off"})
+            self.assertEqual(await agent.search_news("test"), ([], ""))
 
     def test_official_formats_and_timezone(self):
         rss = """<rss><channel><item><title>Indicator</title><link>https://example.gov/release</link>

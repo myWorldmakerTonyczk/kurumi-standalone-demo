@@ -38,6 +38,9 @@ DOL_BLS_SOURCE = "美国劳工部 · BLS 报告转载"
 FOREX_FACTORY_CALENDAR = "https://nfs.faireconomy.media/ff_calendar_thisweek.ics"
 BEA = "https://apps.bea.gov/rss/rss.xml"
 NEWS_SEARCH = "https://api.search.brave.com/res/v1/news/search"
+DEEPSEEK_SEARCH = "https://api.deepseek.com/v1/tools/search"
+SEARCH_PROVIDERS = ("off", "auto", "deepseek", "brave")
+SEARCH_KEYS = ("deepseek_search_key", "brave_search_key")
 MEDIA_PREFIX = "非官方 · "
 BEA_CALENDAR = "https://www.bea.gov/news/schedule/ics/online-calendar-subscription.ics"
 SOURCES = {
@@ -284,15 +287,38 @@ class MarketBulletin:
         if replaced:
             self.db.execute("UPDATE platform_bulletin_runs SET attempted=0 WHERE kind='scan'")
 
+    @staticmethod
+    def search_credentials(config):
+        provider = config["search_provider"]
+        model_url = URL(config["url"])
+        official = (model_url.scheme == "https" and model_url.host == "api.deepseek.com"
+                    and model_url.port == 443 and model_url.user is None)
+        deepseek = config["deepseek_search_key"] or (config["key"] if official else "")
+        brave = config["brave_search_key"] or os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
+        if provider in ("auto", "deepseek") and deepseek:
+            return "deepseek", deepseek
+        if provider in ("auto", "brave") and brave:
+            return "brave", brave
+        return "", ""
+
     def config(self):
         row = self.db.execute("SELECT data FROM platform_bulletin_config WHERE id=1").fetchone()
-        config = DEFAULT | (json.loads(row[0]) if row else {})
+        search_defaults = dict.fromkeys(SEARCH_KEYS, "")
+        search_defaults["search_provider"] = "brave" if os.environ.get("BRAVE_SEARCH_API_KEY", "").strip() else "off"
+        config = DEFAULT | search_defaults | (json.loads(row[0]) if row else {})
         config["sources"] = {key: url for key, (_, url, _, _) in SOURCES.items()} | config.get("sources", {})
         return config
 
     def save(self, body):
         old = self.config()
-        config = {key: body.get(key, old[key]) for key in DEFAULT}
+        config = {key: body.get(key, old[key]) for key in (*DEFAULT, "search_provider", *SEARCH_KEYS)}
+        if config["search_provider"] not in SEARCH_PROVIDERS:
+            raise ValueError("请选择有效的搜索服务")
+        for field in SEARCH_KEYS:
+            value = config[field]
+            if not isinstance(value, str) or len(value) > 1500:
+                raise ValueError("搜索 API Key 格式无效")
+            config[field] = "" if body.get("clear_" + field) is True else value.strip() or old[field]
         overrides = body.get("sources", {})
         if not isinstance(overrides, dict) or set(overrides) - SOURCES.keys():
             raise ValueError("订阅来源设置无效")
@@ -376,7 +402,9 @@ class MarketBulletin:
     def admin(self):
         config = self.config()
         ready = model_ready(config)
+        provider, _ = self.search_credentials(config)
         key = config.pop("key")
+        search_keys = {"has_" + field: bool(config.pop(field)) for field in SEARCH_KEYS}
         tasks = self.db.execute("""SELECT w.*,e.title,e.due,e.active FROM platform_bulletin_wakeups w
             JOIN platform_bulletin_events e ON e.id=w.event
             ORDER BY (w.state='pending') DESC,CASE WHEN w.state='pending' THEN e.due ELSE -e.due END LIMIT 60""")
@@ -388,7 +416,8 @@ class MarketBulletin:
                                  if calendar else "RSS / 官方报告" if key == "bls" else "RSS",
                                  alternative=SOURCE_ALTERNATIVES.get(key))
                             for key, (name, default, calendar, _) in SOURCES.items()],
-                "search_ready": bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()),
+                "search": search_keys | {"active": provider,
+                    "brave_env": bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip())},
                 "runs": [dict(row) for row in self.db.execute("SELECT * FROM platform_bulletin_runs")],
                 "reports": self.reports(8)}
 
@@ -469,30 +498,44 @@ class MarketBulletin:
         return "采集失败"
 
     async def search_news(self, query):
-        key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
-        if not key:
+        provider, key = self.search_credentials(self.config())
+        if not provider:
             return [], ""
+        if provider == "deepseek":
+            method, endpoint = "POST", DEEPSEEK_SEARCH
+            options = {"headers": {"Authorization": "Bearer " + key},
+                       "json": {"query": query[:128], "count": 10}}
+            date_field, text_field = "date", "snippet"
+        else:
+            method, endpoint = "GET", NEWS_SEARCH
+            options = {"headers": {"X-Subscription-Token": key},
+                       "params": {"q": query[:300], "count": 10, "freshness": "pd"}}
+            date_field, text_field = "page_age", "description"
+        label = {"deepseek": "DeepSeek", "brave": "Brave"}[provider]
         try:
             async with ClientSession(timeout=ClientTimeout(total=12)) as session:
-                async with session.get(NEWS_SEARCH, params={"q": query[:300], "count": 10, "freshness": "pd"},
-                                       headers={"X-Subscription-Token": key}, allow_redirects=False) as response:
+                async with session.request(method, endpoint, **options, allow_redirects=False) as response:
                     if response.status != 200:
-                        return [], f"联网新闻搜索（HTTP {response.status}）"
-                    results = (await response.json()).get("results", [])
+                        return [], f"{label} 联网搜索（HTTP {response.status}）"
+                    result = await response.json()
+                    results = result.get("results", []) if isinstance(result, dict) else []
         except (TimeoutError, ClientError, ValueError):
-            return [], "联网新闻搜索暂不可用"
+            return [], f"{label} 联网搜索暂不可用"
+        if not isinstance(results, list):
+            return [], f"{label} 联网搜索返回格式无效"
+        now = time.time()
         items = []
         for result in results:
             try:
                 url = URL(result["url"])
-                when = datetime.fromisoformat(result["page_age"].replace("Z", "+00:00"))
+                when = datetime.fromisoformat(result[date_field].replace("Z", "+00:00"))
                 stamp = (when if when.tzinfo else when.replace(tzinfo=ZoneInfo("UTC"))).timestamp()
                 title = clean(result["title"])[:250]
-                if url.scheme != "https" or not url.host or url.user or not title:
+                if url.scheme != "https" or not url.host or url.user or not title or not now - 86400 <= stamp <= now:
                     continue
                 source = MEDIA_PREFIX + url.host.removeprefix("www.")
                 items.append((str(url.with_fragment(None)), source, title,
-                              clean(result.get("description"))[:450], stamp))
+                              clean(result.get(text_field))[:450], stamp))
             except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
                 continue
         return items, ""

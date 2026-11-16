@@ -118,6 +118,12 @@ export function mountBulletinAdmin(root, bridge) {
   const signal = h("span", {class: "bulletin-signal"});
   const schedule = h("div", {class: "bulletin-task-list"});
   const sources = h("div", {class: "bulletin-source-list"});
+  const searchProviders = {off: "关闭搜索", auto: "自动选择", deepseek: "DeepSeek Search", brave: "Brave News Search"};
+  const searchProvider = h("select", {name: "search_provider"}, Object.entries(searchProviders).map(([value, caption]) =>
+    h("option", {value}, caption)));
+  const searchKey = name => h("input", {type: "password", name, autocomplete: "new-password", maxlength: 1500});
+  const deepseekSearchKey = searchKey("deepseek_search_key");
+  const braveSearchKey = searchKey("brave_search_key");
   const searchStatus = h("p", {class: "bulletin-muted"});
   const calendar = h("div", {class: "bulletin-task-list"});
   const reports = h("div");
@@ -145,6 +151,13 @@ export function mountBulletinAdmin(root, bridge) {
   });
   endpoint.addEventListener("input", syncPreset);
   model.addEventListener("input", syncPreset);
+  const deepseekSearchField = label("DeepSeek Search API Key（选填）", deepseekSearchKey);
+  const braveSearchField = label("Brave Search API Key（选填）", braveSearchKey);
+  function showSearchFields() {
+    deepseekSearchField.hidden = !["auto", "deepseek"].includes(searchProvider.value);
+    braveSearchField.hidden = !["auto", "brave"].includes(searchProvider.value);
+  }
+  searchProvider.addEventListener("change", showSearchFields);
   form.append(
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "采集与发布"),
       label("采集间隔（分钟）", interval), label("日报、周报和月报发布时间（北京时间）", publishAt),
@@ -154,7 +167,11 @@ export function mountBulletinAdmin(root, bridge) {
       h("fieldset", {}, h("legend", {}, "首页关注品种"), pairs)),
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "管理员模型"),
       label("模型预设", preset), label("API Base URL", endpoint), label("模型 ID", model), label("API Key", key),
-      h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。"), searchStatus),
+      h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。")),
+    h("section", {class: "bulletin-admin-card bulletin-source-card"}, h("h3", {}, "联网新闻搜索（选填）"),
+      label("搜索服务", searchProvider), deepseekSearchField, braveSearchField,
+      h("p", {class: "bulletin-muted"}, "自动选择优先用 DeepSeek，其次用 Brave。DeepSeek 可复用官方模型密钥，Brave 可读取服务器环境变量。RSS 和日历可独立使用。"),
+      searchStatus),
     h("section", {class: "bulletin-admin-card bulletin-source-card"}, h("h3", {}, "订阅来源"),
       h("p", {class: "bulletin-muted"}, "可替换任一来源的公网 HTTPS 地址。已有默认地址的订阅留空会恢复默认地址，补充媒体留空则关闭。"),
       sources),
@@ -182,6 +199,9 @@ export function mountBulletinAdmin(root, bridge) {
       model.value = config.model;
       endpoint.value = config.url;
       key.value = "";
+      searchProvider.value = config.search_provider;
+      deepseekSearchKey.value = braveSearchKey.value = "";
+      showSearchFields();
       presets = data.presets;
       preset.replaceChildren(h("option", {value: ""}, "自定义"),
         ...presets.map((item, index) => h("option", {value: String(index)}, item.name)));
@@ -225,7 +245,11 @@ export function mountBulletinAdmin(root, bridge) {
       dirty = false;
     }
     key.placeholder = config.has_key ? "已配置，留空保留" : "请输入管理员 API Key";
-    searchStatus.textContent = data.search_ready ? "联网新闻搜索已配置" : "Brave 联网搜索未配置。RSS 和日历订阅仍可独立使用。";
+    deepseekSearchKey.placeholder = data.search.has_deepseek_search_key ? "已配置，留空保留" : "留空可复用 DeepSeek 官方模型密钥";
+    braveSearchKey.placeholder = data.search.has_brave_search_key ? "已配置，留空保留" :
+      data.search.brave_env ? "已设置服务器环境变量" : "留空可使用 BRAVE_SEARCH_API_KEY";
+    searchStatus.textContent = data.search.active ? "已保存的设置使用 " + searchProviders[data.search.active] :
+      config.search_provider === "off" ? "已关闭联网搜索" : "目前缺少所选服务的密钥";
     signal.textContent = !config.enabled ? "已停用" : config.model_ready ? "已启用" : "已启用 · 待配置模型";
     signal.dataset.state = config.enabled && config.model_ready ? "live" : "stale";
     runs.replaceChildren(...Object.entries(RUNS).flatMap(([kind, label]) => {
@@ -271,7 +295,8 @@ export function mountBulletinAdmin(root, bridge) {
   function save(event) {
     event.preventDefault();
     request({action: "save", enabled: enabled.checked, interval: Number(interval.value), time: publishAt.value,
-      model: model.value, url: endpoint.value, key: key.value,
+      model: model.value, url: endpoint.value, key: key.value, search_provider: searchProvider.value,
+      deepseek_search_key: deepseekSearchKey.value, brave_search_key: braveSearchKey.value,
       sources: Object.fromEntries([...sources.querySelectorAll("input[data-source]")].map(input =>
         [input.dataset.source, input.value.trim()])),
       periods: periods.filter(([, input]) => input.checked).map(([kind]) => kind),
