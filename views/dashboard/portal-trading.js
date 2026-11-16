@@ -168,9 +168,10 @@ export class PortalTrading {
 
   render(data) {
     this.data = data;
-    const allowed = data.game.trade && data.status === "running";
+    const active = data.status === "running" || data.status === "paused";
+    const allowed = data.game.trade && active;
     this.message(!data.game.trade ? "此实例为只读。网页交易权限由后台控制。" :
-      data.status !== "running" ? "本局当前不可交易。" : data.market_error || "已同步当前持仓。");
+      !active ? "本局当前不可交易。" : data.market_error || "已同步当前持仓。");
     const totals = this.root.querySelector(".desk-balances");
     totals.replaceChildren();
     for (const [label, field] of [["净值", "equity"], ["可用保证金", "free"], ["浮动盈亏", "floating"]]) {

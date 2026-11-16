@@ -83,7 +83,7 @@ class Operations:
             game = self.game(request, session)
             if not self.accounts.trade_allowed(game):
                 raise web.HTTPForbidden()
-            if game["status"] != "running":
+            if game["status"] not in {"running", "paused"}:
                 raise ValueError("本局当前不可交易")
             result = self.plugin.engine.action(
                 game["id"], action, dict(params, reason=redact(reason.strip())),

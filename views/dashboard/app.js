@@ -626,7 +626,7 @@ function render() {
   $("title").textContent =
     workspaceMode === "settings" ? "久留美 · 设置" : g.name;
   $("game-status").textContent =
-    ({ running: "运行中", paused: "实例已暂停", ended: "本局已结束" }[
+    ({ running: "运行中", paused: "智能体已暂停", ended: "本局已结束" }[
       g.status
     ] || g.status) +
     " · 第 " +
@@ -692,7 +692,7 @@ function render() {
     bind.elements.persona.required=true;
   }
   const paused = g.status === "paused";
-  $("pause-notice").textContent = "智能体操作已暂停 · 停止自动看盘与交易写入。仍可手动发起只读看盘，已有持仓继续检查止盈止损及强平。";
+  $("pause-notice").textContent = "智能体操作已暂停 · 自动看盘和智能体交易已停止。你仍可手动交易或发起只读看盘，已有持仓继续检查止盈止损及强平。";
   $("pause-automation").textContent = paused ? "恢复智能体操作" : "暂停智能体操作";
   $("pause-automation").hidden = remote && !state.controls?.pause;
   $("decide").hidden = remote && !state.controls?.decision;
@@ -768,7 +768,7 @@ $("pause-automation").onclick = async () => {
   const paused = state.current.game.status === "paused";
   const title = paused ? "恢复智能体操作" : "暂停智能体操作";
   if (!await confirmAction({title, message: paused ? "恢复自动看盘和智能体的交易权限。" :
-    "暂停自动看盘和交易工具。你仍可发起只读看盘。", confirmText: title})) return;
+    "暂停自动看盘和智能体交易。你仍可手动交易或发起只读看盘。", confirmText: title})) return;
   try {
     await action(paused ? "resume" : "pause", {});
     toast(paused ? "智能体操作已恢复" : "智能体操作已暂停", "success");

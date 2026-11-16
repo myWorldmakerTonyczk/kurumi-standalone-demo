@@ -45,6 +45,7 @@ from src.agent.model_registry import connections, model_client, public_models, r
 from src.agent.decision_settings import settings as rest_settings
 from src.core.availability import automatic_break
 from src.core.replay import review
+from src.core.replay_records import decision_scope
 from src.diary.settings import settings as diary_settings, bounds, due_before
 from src.notifications.settings import validate as notice_settings, delivery_time
 from src.portal.server import ASSETS, SECURITY_HEADERS
@@ -159,12 +160,15 @@ class Demo:
             "INSERT INTO decision_jobs(game,trigger,events,state,created,updated) VALUES(?,?,?,?,?,?)",
             (game["id"], "manual" if manual else "scheduled", "[]", "running", now, now),
         )
+        scope = decision_scope.set((game["id"], cursor.lastrowid))
         try:
             reply = await self._agent(game)
         except BaseException:
             self.db.execute("UPDATE decision_jobs SET state='failed',updated=?,error=? WHERE id=?",
                             (time.time(), "看盘任务未完成", cursor.lastrowid))
             raise
+        finally:
+            decision_scope.reset(scope)
         self.db.execute("UPDATE decision_jobs SET state='success',updated=?,result=? WHERE id=?",
                         (time.time(), dump({"summary": reply}), cursor.lastrowid))
         return reply

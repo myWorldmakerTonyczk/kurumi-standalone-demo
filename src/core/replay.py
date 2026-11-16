@@ -2,6 +2,7 @@
 
 import json
 import time
+from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -107,23 +108,32 @@ async def review(plugin, gid, pair="", days=1, end=0, *, private=True, include_c
            WHERE game=? AND created>=? AND created<=? ORDER BY created DESC,id DESC LIMIT 301""",
         (gid, start, end),
     ).fetchall()
+    job_operations = defaultdict(list)
+    if jobs:
+        for row in db.execute(
+            """SELECT json_extract(data,'$.decision_id'),json_extract(data,'$.action'),json_extract(data,'$.status')
+               FROM logs WHERE game=? AND created BETWEEN ? AND ?
+               AND json_extract(data,'$.source')='ai' AND json_extract(data,'$.decision_id') IS NOT NULL""",
+            (gid, start, end),
+        ):
+            jid, action, status = row
+            job_operations[jid].append((action, status))
     for jid, trigger, status, created, updated, result, error, risks in jobs[:300]:
-        operations = [item for item in events if item["job"] == jid]
+        operations = job_operations[jid]
         if status in {"success", "failed"} and updated > end:
             status, result, error = "running", "", ""
         completed = json.loads(result) if result else {}
         outcome = ""
         if status == "success":
-            calls = set(completed.get("tool_calls") or ())
-            actions = calls | {e["action"] for e in operations if e["status"] == "success"}
+            actions = {action for action, state in operations if state == "success"}
             if actions & {"open", "close"}:
                 outcome = "已成交"
+            elif any(state == "rejected" for _, state in operations):
+                outcome = "操作未执行"
             elif "observe" in actions:
                 outcome = "已记录观望"
-            elif any(e["status"] == "rejected" for e in operations):
-                outcome = "操作未执行"
-            elif "tool_calls" in completed:
-                outcome = "已完成，未成交"
+            else:
+                outcome = "已完成，无成交记录"
         summary = completed.get("summary", "")
         events.append(dict(
             id=f"job-{jid}", job=jid, time=created, bar=bucket(created, period, provider),
@@ -131,6 +141,8 @@ async def review(plugin, gid, pair="", days=1, end=0, *, private=True, include_c
             text=redact(error or summary), outcome=outcome,
             elapsed=round(max(0, updated - created)) if status in {"success", "failed"} else None,
             tools=completed.get("tool_calls") or [],
+            operations=sum(state == "success" and action in {"open", "close", "protect", "plan", "borrow", "repay"}
+                           for action, state in operations),
             related=[f"log-{x['id']}" for x in json.loads(risks) if "id" in x],
         ))
     baseline = db.execute(
