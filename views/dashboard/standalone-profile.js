@@ -1,6 +1,6 @@
 import {api} from "/assets/ui/api.js";
 import {h, formatTime} from "/assets/ui/dom.js";
-import {confirmAction} from "/assets/ui/feedback.js";
+import {confirmAction, toast} from "/assets/ui/feedback.js";
 import {cropAvatar} from "/assets/ui/avatar-crop.js";
 export function mountProfile(gameId, {container, general = false}) {
   const section = document.createElement("section");
@@ -1128,10 +1128,10 @@ export function mountAdvanced(container) {
 function accountSettings(container, title, endpoint, fields, defaults, convert) {
   const section = document.createElement("section");
   section.className = "profile-settings api-settings model-usage";
-  section.innerHTML = `<form><h3>${title}</h3>${fields}<button class="primary" disabled>保存设置</button><p role="status"></p></form>`;
+  section.innerHTML = `<form><h3>${title}</h3>${fields}<button type="submit" class="primary" disabled>保存设置</button><p role="status"></p></form>`;
   container.append(section);
   const form = section.querySelector("form");
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]');
   const sliders = [...form.querySelectorAll(".probability-slider input")].map(input => bindProbabilitySlider(form, input.name));
   const status = form.querySelector("[role=status]");
   const avatar = form.querySelector(".account-avatar");
@@ -1142,6 +1142,7 @@ function accountSettings(container, title, endpoint, fields, defaults, convert) 
     const value = reset?.checked ? "avatar.png" : draft || savedAvatar;
     avatar.src = value.startsWith("data:") ? value : "/assets/" + value;
   }
+  if (picture) form.querySelector("[data-choose-avatar]").onclick = () => picture.click();
   if (picture) picture.onchange = async () => {
     const file = picture.files[0];
     picture.value = "";
@@ -1185,9 +1186,12 @@ function accountSettings(container, title, endpoint, fields, defaults, convert) 
     try {
       await request(await convert(form, Object.fromEntries(new FormData(form)), draft));
       status.textContent = "已保存";
+      toast("设置已保存", "success");
       if (["user-settings", "agent-identity"].includes(endpoint)) window.dispatchEvent(new Event("kurumi-identity"));
-    } catch (error) { status.textContent = error.message; }
-    finally { button.disabled = false; }
+    } catch (error) {
+      status.textContent = error.message;
+      toast(error.message, "error");
+    } finally { button.disabled = false; }
   };
   const tab = document.createElement("button");
   tab.type = "button";
@@ -1201,7 +1205,8 @@ export function mountUserSettings(container) {
     <img class="account-avatar" width="60" height="60" alt="当前头像">
     <label>昵称<input name="nickname" maxlength="40" required></label>
     <label>登录用户名<input name="username" autocomplete="username" required></label>
-    <label>更换头像<input name="picture" type="file" accept="image/png,image/jpeg,image/webp"></label>
+    <div><button type="button" data-choose-avatar>选择并裁剪头像</button>
+      <input name="picture" type="file" accept="image/png,image/jpeg,image/webp" hidden></div>
     <label>当前密码<input name="password" type="password" autocomplete="current-password"></label>
     <label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128"></label>
     <small>修改用户名或密码时需验证当前密码。</small>`, {}, (_, values, avatar) => {
@@ -1211,7 +1216,8 @@ export function mountUserSettings(container) {
   const agent = accountSettings(container, "智能体资料", "agent-identity", `
     <img class="account-avatar" width="60" height="60" alt="当前智能体头像">
     <label>智能体名称<input name="agent_name" maxlength="40" required></label>
-    <label>更换头像<input name="picture" type="file" accept="image/png,image/jpeg,image/webp"></label>
+    <div><button type="button" data-choose-avatar>选择并裁剪头像</button>
+      <input name="picture" type="file" accept="image/png,image/jpeg,image/webp" hidden></div>
     <label class="check"><input name="reset_avatar" type="checkbox">恢复默认头像</label>`, {},
     (_, values, avatar) => ({
       agent_name: values.agent_name, agent_avatar: values.reset_avatar ? "" : avatar || undefined,

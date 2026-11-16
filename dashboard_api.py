@@ -112,6 +112,17 @@ class Dashboard:
             return dict(plan=game.get("plan", ""), diaries=[dict(row) for row in entries])
         return notices(self.engine, gid, int(query["after"]) if "after" in query else None)
 
+    def decision_state(self, gid):
+        import json
+
+        latest = self.engine.db.execute(
+            "SELECT state,error,result FROM decision_jobs WHERE game=? ORDER BY id DESC LIMIT 1", (gid,)
+        ).fetchone()
+        if latest:
+            return dict(state=latest[0], error=latest[1],
+                        last_summary=json.loads(latest[2] or "{}").get("summary", ""))
+        return None
+
     def admin_state(self, request):
         demo = self.demo
         users = [dict(user, portal_username=demo.accounts.username(user["id"])) for user in self.engine.users()]
@@ -121,15 +132,7 @@ class Dashboard:
         snapshot = self.engine.snapshot(gid) if game else None
         if snapshot:
             snapshot["game"]["portal_trade"] = demo.accounts.trade_allowed(game)
-        latest = self.engine.db.execute(
-            "SELECT state,error,result FROM decision_jobs WHERE game=? ORDER BY id DESC LIMIT 1", (gid,)
-        ).fetchone()
-        decision = None
-        if latest:
-            import json
-
-            decision = dict(state=latest[0], error=latest[1],
-                            last_summary=json.loads(latest[2] or "{}").get("summary", ""))
+        decision = self.decision_state(gid)
         settings = demo.settings()
         return dict(demo=demo.demo, portal=dict(enabled=True, active=True, bind="127.0.0.1",
                     origin=demo.public_url(), port=8791, error=""),
@@ -145,7 +148,19 @@ class Dashboard:
                     instance_access=policy.effective(self.engine, game) if game else None,
                     market_identity=identity(settings), decision=decision, **status(None))
 
+    def workspace_controls(self):
+        return dict(pause=True, decision=True, loan=True) | self.get("workspace_controls", {})
+
     async def admin(self, request, action, body):
+        if action == "workspace-controls":
+            if request.method == "POST":
+                controls = self.workspace_controls()
+                if any(type(body.get(key)) is not bool for key in controls):
+                    raise ValueError("工作区权限须为开关值")
+                self.put("workspace_controls", {key: body[key] for key in controls})
+            elif request.method != "GET":
+                raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
+            return self.workspace_controls()
         if request.method == "GET":
             if action == "dashboard":
                 return self.admin_state(request)
@@ -171,7 +186,7 @@ class Dashboard:
                 self.put("portal", config)
                 return {"ok": True}
             if action == "decision":
-                return {"message": await self.demo.run_decision(self.engine.get(body.get("game")))}
+                return {"message": await self.demo.run_decision(self.engine.get(body.get("game")), manual=True)}
             if action == "command":
                 return await self.command(body)
         raise web.HTTPNotImplemented(reason="该功能尚未接入独立版")

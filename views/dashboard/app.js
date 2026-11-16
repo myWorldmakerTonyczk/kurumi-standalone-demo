@@ -1,4 +1,6 @@
 import { mountAgentMode } from "/assets/agent-mode.js";
+import {confirmAction, toast} from "/assets/ui/feedback.js";
+import {renderMarkdown} from "/assets/ui/markdown.js";
 import {h, relativeTime} from "/assets/ui/dom.js";
 import {api} from "/assets/ui/api.js";
 import { mountCommunity } from "/assets/community.js";
@@ -39,6 +41,29 @@ const instanceNotices = new InstanceNotices(post, load);
 const portalSettings = new PortalSettings(post, load);
 let settingsPage = "users";
 const openBulletinSettings = remote ? null : mountBulletinAdmin(document.querySelector('[data-settings-page="bulletin"]'), bridge);
+const workspaceControls = document.getElementById("workspace-controls-settings");
+if (!remote && workspaceControls) {
+  workspaceControls.onsubmit = async event => {
+    event.preventDefault();
+    if (!await confirmAction({title: "保存工作区权限", message: "这些权限会应用到所有用户。", confirmText: "保存权限"})) return;
+    const values = Object.fromEntries(["pause", "decision", "loan"].map(key => [key, workspaceControls.elements[key].checked]));
+    try {
+      await post("workspace-controls", values);
+      toast("工作区权限已保存", "success");
+    } catch (error) { workspaceControls.querySelector("[role=status]").textContent = error.message; }
+  };
+}
+async function loadWorkspaceControls() {
+  const button = workspaceControls.querySelector("button");
+  const status = workspaceControls.querySelector("[role=status]");
+  button.disabled = true;
+  try {
+    const values = await bridge.apiGet("workspace-controls");
+    for (const key of ["pause", "decision", "loan"]) workspaceControls.elements[key].checked = values[key];
+    status.textContent = "";
+    button.disabled = false;
+  } catch (error) { status.textContent = error.message; }
+}
 function showSettings(page) {
   if (page !== settingsPage && !confirmLeavingApiSettings()) return;
   settingsPage = page;
@@ -47,6 +72,7 @@ function showSettings(page) {
     api: ["行情连接", "这里保存的报价与历史数据来源供所有工作区使用。"],
     portal: ["用户面板", "配置用户访问工作区的对外地址。"],
     bulletin: ["市场播报", "管理平台共享的市场简报和指标跟踪任务。"],
+    "workspace-controls": ["工作区权限", "设置用户可以使用的交易工作区操作。"],
   }[page];
   if (copy) {
     $("settings-section-title").textContent = copy[0];
@@ -59,6 +85,7 @@ function showSettings(page) {
     button.classList.toggle("selected",active);button.setAttribute("aria-pressed",String(active));
   }
   if (page === "bulletin") openBulletinSettings?.();
+  if (page === "workspace-controls" && !remote && workspaceControls) loadWorkspaceControls();
 }
 for (const button of document.querySelectorAll("[data-settings-tab]")) button.onclick=()=>showSettings(button.dataset.settingsTab);
 const requestId = () =>
@@ -473,13 +500,15 @@ async function post(route, body) {
   }
 }
 async function action(name, params) {
-  if (remote && (!state?.current?.game.trade || !["open", "close", "protect"].includes(name))) {
+  const control = {pause: "pause", resume: "pause", borrow: "loan", repay: "loan"}[name];
+  if (remote && (control ? !state?.controls?.[control]
+    : !state?.current?.game.trade || !["open", "close", "protect"].includes(name))) {
     message("管理员已禁止此操作", true);
     return;
   }
   if (remote) params = Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)]));
   try {
-    await post("command", {
+    await post(remote && control ? "workspace-control" : "command", {
       game: gid,
       action: name,
       params,
@@ -603,7 +632,7 @@ function render() {
     " · 第 " +
     (Math.floor((Date.now() / 1000 - g.created) / 86400) + 1) +
     " 天";
-  if (!remote) renderDecision();
+  renderDecision();
   $("metrics").replaceChildren();
   for (const [label, value] of [
     ["当前净值", v ? "$" + money(v.equity) : "等待行情"],
@@ -663,8 +692,11 @@ function render() {
     bind.elements.persona.required=true;
   }
   const paused = g.status === "paused";
-  $("pause-notice").textContent = "本实例已暂停 · 自动看盘、日记、主动通知和交易工具均暂停。已有持仓继续按行情检查止盈止损及强平。";
-  $("pause-automation").textContent = paused ? "恢复操作" : "暂停操作";
+  $("pause-notice").textContent = "智能体操作已暂停 · 停止自动看盘与交易写入。仍可手动发起只读看盘，已有持仓继续检查止盈止损及强平。";
+  $("pause-automation").textContent = paused ? "恢复智能体操作" : "暂停智能体操作";
+  $("pause-automation").hidden = remote && !state.controls?.pause;
+  $("decide").hidden = remote && !state.controls?.decision;
+  $("loan").closest(".loan-panel").hidden = remote && !state.controls?.loan;
   $("pause-automation").disabled = g.status === "ended";
   renderPositions(g, v, selected.market_error);
   renderWatch();
@@ -691,7 +723,7 @@ function render() {
           g.status === "ended" || (b.value === "borrow" && !g.loan_enabled)),
     );
   if (remote) {
-    for (const button of document.querySelectorAll("#trade button[type=submit], #loan button[type=submit], #deposit button[type=submit], #decide, #pause-automation")) {
+    for (const button of document.querySelectorAll("#trade button[type=submit], #deposit button[type=submit]")) {
       const prohibited = !button.closest("#trade") || !g.trade;
       button.title = prohibited ? "管理员已禁止此操作" : "";
       button.dataset.portalProhibited = String(prohibited);
@@ -733,32 +765,47 @@ $("pair").onchange = () => {
 };
 $("refresh").onclick = load;
 $("pause-automation").onclick = async () => {
-  if (remote) return message("管理员已禁止此操作", true);
+  const paused = state.current.game.status === "paused";
+  const title = paused ? "恢复智能体操作" : "暂停智能体操作";
+  if (!await confirmAction({title, message: paused ? "恢复自动看盘和智能体的交易权限。" :
+    "暂停自动看盘和交易工具。你仍可发起只读看盘。", confirmText: title})) return;
   try {
-    await action(state.current.game.status === "paused" ? "resume" : "pause", {});
+    await action(paused ? "resume" : "pause", {});
+    toast(paused ? "智能体操作已恢复" : "智能体操作已暂停", "success");
   } catch {}
 };
 $("decide").onclick = async () => {
-  if (remote) return message("管理员已禁止此操作", true);
+  if (remote && !state.controls?.decision) return;
   try {
     message("正在提交看盘任务…");
-    await post("decision", { game: gid });
+    const result = await post(remote ? "workspace-control" : "decision", {game: gid, action: "decision"});
     await load();
+    if (remote && result.summary) {
+      state.decision = {state: "success", last_summary: result.summary};
+      renderDecision();
+    }
+    toast("看盘已完成", "success");
   } catch {}
 };
 function renderDecision() {
   const d=state?.decision || {state:"idle",next_allowed:0};
   const active=["pending","running"].includes(d.state);
-  const paused=state?.current?.game.status==="paused";
-  const seconds=Math.max(0,Math.ceil(d.next_allowed-Date.now()/1000));
-  $("decide").disabled=posting||paused||active||seconds>0;
-  $("decide").dataset.permissionDisabled=String(active||seconds>0);
+  const ended=state?.current?.game.status==="ended";
+  const seconds=Math.max(0,Math.ceil((d.next_allowed || 0)-Date.now()/1000));
+  $("decide").disabled=posting||ended||active||seconds>0;
+  $("decide").dataset.permissionDisabled=String(ended||active||seconds>0);
   $("decide").textContent=d.state==="running"?"她正在看盘…":d.state==="pending"?"看盘已排队":seconds>0?`冷却中 ${Math.ceil(seconds/60)} 分钟`:"让她看一次盘";
   $("decision-progress").textContent=d.state==="running"?"正在读取账户、聊天和日志并调用模型。":d.state==="pending"?`等待队列与频率额度${seconds?`，约 ${Math.ceil(seconds/60)} 分钟后可开始`:""}。`:d.state==="failed"?`上次看盘失败：${d.error}`:d.state==="success"?"上次看盘已完成，结果与操作理由已保存。":"点击后异步排队，可在此查看进度和结果。";
-  $("decision-result").hidden=!d.last_summary;
-  $("decision-summary").textContent=d.last_summary||"";
+  $("decision-progress").hidden = remote && !state?.controls?.decision;
+  $("decision-result").hidden = !d.last_summary || (remote && !state?.controls?.decision);
+  const summary = $("decision-summary");
+  if (summary.dataset.rendered !== (d.last_summary || "")) {
+    summary.dataset.rendered = d.last_summary || "";
+    summary.replaceChildren();
+    if (d.last_summary) renderMarkdown(summary, d.last_summary);
+  }
 }
-setInterval(()=>{if(!remote&&state?.current&&gid)renderDecision();},1000);
+setInterval(()=>{if(state?.current&&gid)renderDecision();},1000);
 function submit(id, handler) {
   $(id).onsubmit = async (event) => {
     event.preventDefault();
@@ -979,12 +1026,12 @@ $("order-max").onclick = () => {
   );
   estimate();
 };
-submit("loan", async (p, button) =>
-  action(button?.value || "borrow", {
-    amount: p.amount,
-    reason: "人类手动借还虚拟资金",
-  }),
-);
+submit("loan", async (p, button) => {
+  const operation = button?.value || "borrow";
+  const title = operation === "repay" ? "偿还贷款" : "借入虚拟资金";
+  if (!await confirmAction({title, message: `确认${title} $ ${p.amount}？`, confirmText: title})) return;
+  await action(operation, {amount: p.amount, reason: "人类手动借还虚拟资金"});
+});
 function sourceFields() {
   const selected = $("market-source").value;
   for (const row of document.querySelectorAll("[data-source]")) {

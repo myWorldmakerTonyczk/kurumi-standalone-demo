@@ -1,8 +1,8 @@
 import {h} from "/assets/ui/dom.js";
 
 export async function cropAvatar(file) {
-  if (file.size > 5 * 1024 * 1024 || !["image/png", "image/jpeg", "image/webp"].includes(file.type))
-    throw Error("请选择不超过 5 MB 的 PNG、JPEG 或 WebP 图片。");
+  if (file.type && !["image/png", "image/jpeg", "image/webp"].includes(file.type))
+    throw Error("请选择 PNG、JPEG 或 WebP 图片。");
   const photo = await createImageBitmap(file);
   return new Promise(resolve => {
     const title = h("h2", {id: "avatar-crop-title"}, "裁剪头像");
@@ -73,7 +73,10 @@ export async function cropAvatar(file) {
       const scaleX = photo.width / crop.width;
       const scaleY = photo.height / crop.height;
       draw.drawImage(photo, (x-radius)*scaleX, (y-radius)*scaleY, 2*radius*scaleX, 2*radius*scaleY, 0, 0, 96, 96);
-      value = output.toDataURL("image/webp", 0.68);
+      for (const quality of [0.78, 0.62, 0.45, 0.25]) {
+        value = output.toDataURL("image/webp", quality);
+        if (value.length <= 24000) break;
+      }
       editor.close();
     };
     editor.onclose = () => {

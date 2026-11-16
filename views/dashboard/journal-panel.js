@@ -1,3 +1,4 @@
+import {renderMarkdown} from "/assets/ui/markdown.js";
 import { renderNotebookText } from "./notebook.js";
 
 const sources = { ai: "AI", human: "人类", system: "系统" };
@@ -116,7 +117,11 @@ export class JournalPanel {
       if (position.pnl != null) fields.push("平仓毛盈亏 $" + Number(position.pnl).toFixed(2));
       body.append(element("p", fields.join(" · "), "journal-position"));
     }
-    if (row.reason) body.append(element("p", row.reason));
+    if (row.reason) {
+      const reason = element("div", null, "markdown-copy");
+      renderMarkdown(reason, row.reason);
+      body.append(reason);
+    }
     if (rejected && data.error) body.append(element("p", data.error, "negative"));
     if (Object.keys(data).length) {
       const details = element("details");

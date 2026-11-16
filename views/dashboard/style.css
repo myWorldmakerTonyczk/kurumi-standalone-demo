@@ -1987,6 +1987,9 @@ input[type="checkbox"]:disabled { opacity: .55; cursor: default; }
 .persona-card > .persona-body {
   gap: 8px; font-weight: 600;
 }
+.markdown-copy { min-width: 0; overflow-wrap: anywhere; }
+.markdown-copy > :first-child { margin-top: 0; }
+.markdown-copy > :last-child { margin-bottom: 0; }
 .persona-body textarea {
   box-sizing: border-box; width: 100%; min-height: 240px; max-height: 65vh; resize: vertical;
   padding: 14px; border: 1px solid #e3d2e1; border-radius: 10px;

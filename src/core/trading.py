@@ -54,10 +54,9 @@ def public_snapshot(plugin, gid, log_limit=30, include_details=False):
 
 async def execute(plugin, gid, action, body, *, already_locked=False):
     from .availability import require_active
-    require_active(plugin.engine.get(gid))
+    game = plugin.engine.get(gid)
     if action == "state":
         return public_snapshot(plugin, gid, body.get("log_limit", 30), body.get("include_details", False))
-    plugin.engine.get(gid)
     if action == "logs":
         return journal(plugin.engine, gid, **body)
     if action == "history":
@@ -66,6 +65,7 @@ async def execute(plugin, gid, action, body, *, already_locked=False):
         return diary_view(plugin.diary.store, gid, **body)
     if action not in WRITE_ACTIONS:
         raise ValueError("无此操作权限；不能自行充值、改规则或修改笔记")
+    require_active(game)
     if not str(body.get("reason", "")).strip():
         raise ValueError("请填写简短操作理由概要")
     if action == "plan" and (

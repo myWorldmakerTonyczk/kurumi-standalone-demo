@@ -121,11 +121,15 @@ class Demo:
     def public_url(self):
         return os.getenv("KURUMI_PUBLIC_URL") or self.dashboard.get("portal", {}).get("origin") or "http://127.0.0.1:8791"
 
-    async def run_decision(self, game):
+    async def run_decision(self, game, *, manual=False):
+        if game["status"] == "ended":
+            raise ValueError("本局已结束")
+        if manual and lock_for(self, game["id"]).locked():
+            raise ValueError("智能体正在处理任务，请稍后再试")
         now = time.time()
         cursor = self.db.execute(
             "INSERT INTO decision_jobs(game,trigger,events,state,created,updated) VALUES(?,?,?,?,?,?)",
-            (game["id"], "scheduled", "[]", "running", now, now),
+            (game["id"], "manual" if manual else "scheduled", "[]", "running", now, now),
         )
         try:
             reply = await self.agent(game)
@@ -302,6 +306,7 @@ class Demo:
         gid, owner = game["id"], game["owner_id"]
         lock = lock_for(self, gid)
         async with lock:
+            game = self.engine.get(gid)
             settings = self.profile(owner)
             persona = self.agent_persona(owner, settings)
             if received_at is not None:
@@ -456,6 +461,8 @@ class Demo:
             elif self.demo:
                 if diary_prompt is not None:
                     reply = "离线演示日记：" + diary_prompt[:180]
+                elif message is None and game["status"] == "paused":
+                    reply = "离线演示：已读取账户和行情，当前为只读看盘。"
                 elif message is None:
                     reply = "离线演示：" + (await open_trade("buy", 100, "离线演示定时任务")
                                            if not game["positions"] else "已有持仓，继续观察")
@@ -492,7 +499,7 @@ class Demo:
                         self.memory.include_private_history(owner, gid)
                         self.memory.last_seen[key] = asyncio.get_running_loop().time()
                         self.memory.start(*key, chosen, self.model_url)
-            else:
+            elif game["status"] == "running":
                 await execute(self, gid, "observe", {"reason": reply[:500] or "完成定时看盘"}, already_locked=True)
             return reply
 
@@ -636,14 +643,28 @@ class Demo:
     def avatar_value(avatar):
         if avatar not in ("avatar.png", "neutral.png", "laugh.png", "user-avatar.svg"):
             prefix = "data:image/webp;base64,"
-            if not isinstance(avatar, str) or not avatar.startswith(prefix) or len(avatar) > 24000:
-                raise ValueError("头像格式无效或图片过大")
+            if not isinstance(avatar, str) or not avatar.startswith(prefix):
+                raise ValueError("头像格式无效")
             try:
                 picture = base64.b64decode(avatar[len(prefix):], validate=True)
             except (ValueError, binascii.Error):
                 raise ValueError("头像格式无效") from None
             if picture[:4] != b"RIFF" or picture[8:12] != b"WEBP":
                 raise ValueError("头像格式无效")
+            if len(avatar) > 24000:
+                from io import BytesIO
+                from PIL import Image, ImageOps
+
+                try:
+                    with Image.open(BytesIO(picture), formats=["WEBP"]) as image:
+                        if image.width * image.height > 32_000_000:
+                            raise ValueError("请先在浏览器中裁剪头像")
+                        thumbnail = ImageOps.fit(image.convert("RGBA"), (96, 96))
+                        output = BytesIO()
+                        thumbnail.save(output, format="WEBP", quality=55)
+                except (OSError, Image.DecompressionBombError):
+                    raise ValueError("头像格式无效") from None
+                return prefix + base64.b64encode(output.getvalue()).decode("ascii")
         return avatar
 
     def unique_name(self, name, owner, *, agent=False):
@@ -753,7 +774,7 @@ class Demo:
                 action = "ai-" + request.match_info["subaction"]
             if not action and request.match_info.get("subroute"):
                 action = "forum-" + request.match_info["subroute"]
-            if action == "forum" and request.method == "POST":
+            if action in {"forum", "onboarding", "user-settings", "agent-identity"} and request.method == "POST":
                 request = request.clone(client_max_size=160 * 1024)
             body = await request.json() if request.method in {"POST", "DELETE"} and request.content_type == "application/json" else {}
             if admin:
@@ -810,7 +831,27 @@ class Demo:
                     if origin == "http://127.0.0.1:8790":
                         response.headers["Access-Control-Allow-Origin"] = origin
                 return response
-            portal_routes = {"session": portal.session, "workspace": portal.workspace_state,
+            if action == "workspace" and request.method == "GET":
+                return await portal.workspace_state(request, controls=self.dashboard.workspace_controls())
+            if action == "workspace-control" and request.method == "POST":
+                session = portal.identity(request)
+                if session["mode"] != "account":
+                    raise web.HTTPForbidden()
+                game = portal.game(request, session)
+                operation = body.get("action")
+                if not isinstance(operation, str):
+                    raise ValueError("操作无效")
+                control = {"pause": "pause", "resume": "pause", "decision": "decision",
+                           "borrow": "loan", "repay": "loan"}.get(operation)
+                if not control or not self.dashboard.workspace_controls()[control]:
+                    raise web.HTTPForbidden(reason="管理员已停用此操作")
+                if game["status"] == "ended":
+                    raise ValueError("本局已结束")
+                if operation == "decision":
+                    task = await self.run_decision(game, manual=True)
+                    return web.json_response({"message": "看盘已完成", "summary": task})
+                return web.json_response(await self.dashboard.command(body | {"game": game["id"]}))
+            portal_routes = {"session": portal.session,
                              "review": portal.review, "history": portal.history, "journal": portal.journal,
                              "notebook": portal.notebook, "diaries": portal.diaries, "account": portal.account_state}
             if request.method == "GET" and action in portal_routes:

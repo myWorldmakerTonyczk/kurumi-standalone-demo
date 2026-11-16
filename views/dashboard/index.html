@@ -37,6 +37,7 @@
           <button data-settings-anchor="api">行情连接</button>
           <button data-settings-anchor="portal">用户面板</button>
           <button data-settings-anchor="bulletin">市场播报</button>
+          <button data-settings-anchor="workspace-controls">工作区权限</button>
         </nav>
         <div class="aside-note">
           真实行情<br />虚拟资金<br /><strong>让她自己试试看。</strong>
@@ -131,12 +132,12 @@
             <div class="account-top">
               <span id="game-status"></span>
               <div>
-                <button type="button" id="pause-automation">暂停操作</button>
+                <button type="button" id="pause-automation">暂停智能体操作</button>
                 <button id="decide" class="primary">让她看一次盘</button>
               </div>
             </div>
             <p id="decision-progress" role="status" class="caption"></p>
-            <details id="decision-result" class="panel" hidden><summary>最近一次看盘结果</summary><pre id="decision-summary"></pre></details>
+            <details id="decision-result" class="panel" hidden><summary>最近一次看盘结果</summary><div id="decision-summary" class="markdown-copy"></div></details>
             <div class="metrics" id="metrics"></div>
             <div class="trading-grid">
               <div class="watch-column">
@@ -481,6 +482,7 @@
             <button type="button" data-settings-tab="api">行情连接</button>
             <button type="button" data-settings-tab="portal">用户面板</button>
             <button type="button" data-settings-tab="bulletin">市场播报</button>
+            <button type="button" data-settings-tab="workspace-controls">工作区权限</button>
           </nav>
           <div data-settings-page="users">
             <section class="panel" id="access-scaffold">
@@ -644,6 +646,16 @@
             </section>
           </div>
           <div data-settings-page="bulletin" hidden></div>
+          <section data-settings-page="workspace-controls" class="panel" hidden>
+            <form id="workspace-controls-settings">
+              <h3>用户可用操作</h3>
+              <label class="check"><input type="checkbox" name="pause">暂停和恢复智能体操作</label>
+              <label class="check"><input type="checkbox" name="decision">手动发起看盘</label>
+              <label class="check"><input type="checkbox" name="loan">周转小金库（借款与还款）</label>
+              <button type="submit" class="primary" disabled>保存权限</button>
+              <p role="status"></p>
+            </form>
+          </section>
           <div data-settings-page="diary" hidden>
               <section class="panel" id="diary-settings-panel">
                 <h3>她的每日小记</h3>

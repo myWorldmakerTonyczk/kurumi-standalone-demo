@@ -335,7 +335,7 @@ class Portal(Operations):
         }[Path(path).suffix]
         return web.FileResponse(ROOT / path, headers={"Content-Type": content_type})
 
-    async def workspace_state(self, request):
+    async def workspace_state(self, request, *, controls=None):
         game = self.records_game(request)
         session = self.identity(request)
         snapshot = self.plugin.engine.snapshot(game["id"], log_limit=0)
@@ -359,6 +359,8 @@ class Portal(Operations):
                          market_error="行情暂不可用" if snapshot["market_error"] else "",
                          logs=[self.public_log(row) for row in self.plugin.engine.logs(game["id"], limit=4)]),
             **availability_status(config.get("decision_limits")),
+            controls=controls if controls and session["mode"] == "account" else {},
+            decision=self.plugin.dashboard.decision_state(game["id"]) if controls else None,
             pairs=PAIRS, connection=dict(history_source=config.get("history_source", "frankfurter")),
             market_identity=identity(config),
             history_feeds={kind: identity(dict(config, history_source=kind)) for kind in ("market", "frankfurter")},

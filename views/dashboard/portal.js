@@ -1,5 +1,4 @@
 import { signalPortalSessionChange } from "./portal-bridge.js";
-import { encodeAgentAvatar } from "/assets/workspace-chat.js";
 import {cropAvatar} from "/assets/ui/avatar-crop.js";
 import { ReplayPanel } from "./replay-panel.js";
 import { PortalTrading } from "./portal-trading.js";
@@ -306,7 +305,10 @@ byId("first-game-form").onsubmit = async event => {
     delete payload.model;
     if (payload.key.trim()) Object.assign(payload, {url: preset.url, model});
     payload.avatar = savedAvatar;
-    payload.agent_avatar = await encodeAgentAvatar(form.elements.agent_picture.files[0]);
+    if (form.elements.agent_picture.files[0]) {
+      payload.agent_avatar = await cropAvatar(form.elements.agent_picture.files[0]);
+      if (!payload.agent_avatar) return;
+    }
     delete payload.agent_picture;
     await api("onboarding", payload);
     location.replace(external ? "/workspace/#agent-settings" : "/workspace/");

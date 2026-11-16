@@ -41,6 +41,7 @@
 .hm-logs li:first-child { border-top: 0; padding-top: 0; }
 .hm-log-top { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 14px; }
 .hm-log-top time { margin-left: auto; font-size: 12px; }
+.hm-log-reason { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .hm-log-reason { margin: 0; color: #4d4558; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
 .hm-risks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .hm-risk { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: start; }

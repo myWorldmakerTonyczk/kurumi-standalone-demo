@@ -3,6 +3,7 @@
 import {h, clear, append, formatTime, money, uid, isAbort} from "/assets/ui/dom.js";
 import {aiApi, communityApi} from "/assets/ui/api.js";
 import {stateBlock, skeleton} from "/assets/ui/feedback.js";
+import {renderMarkdown} from "/assets/ui/markdown.js";
 import {marketBulletin} from "/assets/home/bulletin.js";
 import {loadProfile} from "/assets/ui/session.js";
 
@@ -16,7 +17,6 @@ const usd = value => num(value) === null ? "—" : "$" + money(value);
 const signedUsd = value => { const n = num(value); return n === null ? "—" : (n > 0 ? "+" : n < 0 ? "-" : "") + "$" + money(Math.abs(n)); };
 const signedPct = value => { const n = num(value); return n === null ? "—" : (n > 0 ? "+" : "") + n.toFixed(2) + "%"; };
 const tone = value => { const n = num(value); return n > 0 ? "positive" : n < 0 ? "negative" : ""; };
-const cut = (text, length) => (text.length > length ? text.slice(0, length) + "…" : text);
 
 /** Risk hints are derived only from fields the API returned. Thresholds (50% / 80% margin use, 10% drawdown) are display heuristics, not engine limits. */
 export function computeRisks(state, selected) {
@@ -25,7 +25,7 @@ export function computeRisks(state, selected) {
   const g = selected.game, v = selected.valuation;
   const positions = v?.positions || g.positions || [];
   if (g.status === "ended") add("high", "本局已结束", "不能再开仓或追加资金，可以去 AI 复盘总结这一局。");
-  if (g.status === "paused") add("warn", "实例已暂停", "自动看盘、日记和交易工具暂停，已有持仓仍按行情检查止盈止损及强平。");
+  if (g.status === "paused") add("warn", "智能体操作已暂停", "自动看盘与交易写入暂停，手动发起的看盘仍可读取行情。已有持仓继续检查止盈止损及强平。");
   if (state.market_closed) add("warn", "外汇周末休市", "行情可能停止更新" + (state.automatic_break ? "，自动看盘正在休息。" : "。"));
   else if (state.automatic_break) add("info", "处于休息时段", "已暂停自动看盘，休息结束后会恢复。");
   if (selected.market_error || !v) add("warn", "行情暂不可用", "持仓估值和浮动盈亏暂时无法计算，请等待有效报价。");
@@ -231,13 +231,17 @@ export function createHome(root, ctx) {
     const logs = selected.logs || [];
     clear(logBody);
     if (!logs.length) { logBody.append(stateBlock("empty", "还没有交易记录", {hint: "每次操作和理由都会记录在这里。"})); return; }
-    logBody.append(h("ul", {class: "hm-logs"}, logs.slice(0, 4).map(log => h("li", {},
+    logBody.append(h("ul", {class: "hm-logs"}, logs.slice(0, 4).map(log => {
+      const reason = log.reason ? h("div", {class: "hm-log-reason markdown-copy"}) : null;
+      if (reason) renderMarkdown(reason, log.reason);
+      return h("li", {},
       h("div", {class: "hm-log-top"},
         h("strong", {}, (ctx.labels[log.action] || log.action)),
         log.status === "rejected" ? h("span", {class: "ui-badge ui-badge-muted"}, "未执行") : null,
         h("span", {class: "ui-muted"}, SOURCE[log.source] || log.source),
         h("time", {class: "ui-muted", datetime: new Date(log.created * 1000).toISOString()}, formatTime(log.created))),
-      log.reason ? h("p", {class: "hm-log-reason"}, cut(log.reason, 120)) : null))));
+      reason);
+    })));
   }
 
   function renderRisks(state, selected) {

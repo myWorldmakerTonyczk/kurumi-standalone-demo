@@ -31,6 +31,10 @@ export function createPortalBridge(getGame) {
       return request(route === "state" ? "workspace" : route, params);
     },
     apiPost(route, body) {
+      if (route === "workspace-control") {
+        const {game, ...payload} = body;
+        return request(route, {game}, payload);
+      }
       if (route !== "command") throw Error("管理员已禁止此操作");
       const {game, ...payload} = body;
       return request("action", {game}, payload);
