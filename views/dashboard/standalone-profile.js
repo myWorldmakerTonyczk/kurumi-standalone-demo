@@ -11,6 +11,7 @@ export function mountProfile(gameId, {container, general = false}) {
       <div class="persona-identity">
         <label><span>我是（</span><input name="agent_real_name" maxlength="40" aria-label="智能体真实姓名" required disabled><span>）</span></label>
       </div>
+      <label class="persona-body">智能体昵称（群聊、论坛显示）<input name="agent_name" maxlength="40" required disabled></label>
       <label class="persona-body">你的关系称呼（选填）<input name="user_relationship" maxlength="40" placeholder="朋友" disabled></label>
       <label class="persona-body">当前人格<textarea name="persona" rows="14" maxlength="4000" disabled></textarea></label>
       <div class="persona-actions">
@@ -88,6 +89,9 @@ export function mountProfile(gameId, {container, general = false}) {
       form.elements.split_pattern.value = data.split_pattern || form.elements.split_pattern.placeholder;
     } else {
       form.elements.agent_real_name.value = data.agent_real_name || data.agent_name || "久留美";
+      form.elements.agent_name.value = data.agent_name || "久留美";
+      form.elements.agent_name.defaultValue = form.elements.agent_name.value;
+      form.elements.agent_name.disabled = false;
       form.elements.persona.value = profile.persona || await loadDefaultPersona();
       form.elements.agent_real_name.disabled = form.elements.user_relationship.disabled =
         form.elements.persona.disabled = resetPersona.disabled = false;
@@ -111,8 +115,10 @@ export function mountProfile(gameId, {container, general = false}) {
         status.textContent = "已保存";
         return;
       }
-      await request("profile", {agent_real_name: payload.agent_real_name, persona: payload.persona,
-        user_relationship: payload.user_relationship});
+      const {agent_name, agent_real_name, persona, user_relationship} = payload;
+      const profile = {agent_real_name, persona, user_relationship};
+      if (agent_name !== form.elements.agent_name.defaultValue) profile.agent_name = agent_name;
+      await request("profile", profile);
       window.dispatchEvent(new Event("kurumi-identity"));
       await refresh();
       status.textContent = "已保存";
