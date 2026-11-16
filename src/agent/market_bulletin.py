@@ -29,8 +29,13 @@ ZONE = ZoneInfo("Asia/Shanghai")
 EASTERN = ZoneInfo("America/New_York")
 FED = "https://www.federalreserve.gov/feeds/press_monetary.xml"
 ECB = "https://www.ecb.europa.eu/rss/press.html"
-BLS = "https://www.bls.gov/feed/bls_latest.rss"
-CALENDAR = "https://www.bls.gov/schedule/news_release/bls.ics"
+LEGACY_BLS_SOURCES = {
+    "bls": "https://www.bls.gov/feed/bls_latest.rss",
+    "bls_calendar": "https://www.bls.gov/schedule/news_release/bls.ics",
+}
+DOL_BLS_RELEASES = "https://www.dol.gov/index.php/newsroom/economicdata"
+DOL_BLS_SOURCE = "美国劳工部 · BLS 报告转载"
+FOREX_FACTORY_CALENDAR = "https://nfs.faireconomy.media/ff_calendar_thisweek.ics"
 BEA = "https://apps.bea.gov/rss/rss.xml"
 NEWS_SEARCH = "https://api.search.brave.com/res/v1/news/search"
 MEDIA_PREFIX = "非官方 · "
@@ -38,22 +43,18 @@ BEA_CALENDAR = "https://www.bea.gov/news/schedule/ics/online-calendar-subscripti
 SOURCES = {
     "fed": ("美联储", FED, False, "federalreserve.gov"),
     "ecb": ("欧洲央行", ECB, False, "ecb.europa.eu"),
-    "bls": ("美国劳工统计局", BLS, False, "bls.gov"),
+    "bls": ("美国劳工统计局", DOL_BLS_RELEASES, False, "bls.gov"),
     "bea": ("美国经济分析局", BEA, False, "bea.gov"),
-    "bls_calendar": ("美国劳工统计局", CALENDAR, True, "bls.gov"),
+    "bls_calendar": ("美国劳工统计局", FOREX_FACTORY_CALENDAR, True, "bls.gov"),
     "bea_calendar": ("美国经济分析局", BEA_CALENDAR, True, "bea.gov"),
     "media": ("补充媒体", "", False, ""),
 }
-DOL_BLS_RELEASES = "https://www.dol.gov/index.php/newsroom/economicdata"
-DOL_BLS_SOURCE = "美国劳工部 · BLS 报告转载"
 CNBC_ECONOMY = "https://www.cnbc.com/id/20910258/device/rss/rss.html"
-FOREX_FACTORY_CALENDAR = "https://nfs.faireconomy.media/ff_calendar_thisweek.ics"
 BEA_CALENDAR_JSON = "https://apps.bea.gov/API/signup/release_dates.json"
 SOURCE_ALTERNATIVES = {
     "fed": ("美联储全部新闻稿", "https://www.federalreserve.gov/feeds/press_all.xml"),
     "ecb": ("欧洲央行统计新闻稿", "https://www.ecb.europa.eu/rss/statpress.html"),
-    "bls": ("美国劳工部转载的 BLS 正式报告", DOL_BLS_RELEASES),
-    "bls_calendar": ("Forex Factory 美国周历（非官方）", FOREX_FACTORY_CALENDAR),
+    "bls": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
     "bea": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
     "bea_calendar": ("BEA 官方 JSON 日历", BEA_CALENDAR_JSON),
     "media": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
@@ -266,6 +267,22 @@ class MarketBulletin:
         """)
         if "source" not in {row[1] for row in self.db.execute("PRAGMA table_info(platform_bulletin_events)")}:
             self.db.execute("ALTER TABLE platform_bulletin_events ADD COLUMN source TEXT NOT NULL DEFAULT '美国劳工统计局'")
+
+        self.migrate_bls_sources()
+
+    def migrate_bls_sources(self):
+        row = self.db.execute("SELECT data FROM platform_bulletin_config WHERE id=1").fetchone()
+        saved = json.loads(row[0]) if row else {}
+        sources = saved.get("sources", {})
+        replaced = [key for key, old in LEGACY_BLS_SOURCES.items() if sources.get(key) == old]
+        if replaced:
+            saved["sources"] = {**sources, **{key: SOURCES[key][1] for key in replaced}}
+            self.db.execute("UPDATE platform_bulletin_config SET data=? WHERE id=1", (json.dumps(saved),))
+        if not sources.get("bls_calendar") or "bls_calendar" in replaced:
+            self.db.execute("UPDATE platform_bulletin_events SET active=0 WHERE source=? AND due>? AND active=1",
+                            ("美国劳工统计局", time.time()))
+        if replaced:
+            self.db.execute("UPDATE platform_bulletin_runs SET attempted=0 WHERE kind='scan'")
 
     def config(self):
         row = self.db.execute("SELECT data FROM platform_bulletin_config WHERE id=1").fetchone()

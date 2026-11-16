@@ -156,7 +156,7 @@ export function mountBulletinAdmin(root, bridge) {
       label("模型预设", preset), label("API Base URL", endpoint), label("模型 ID", model), label("API Key", key),
       h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。"), searchStatus),
     h("section", {class: "bulletin-admin-card bulletin-source-card"}, h("h3", {}, "订阅来源"),
-      h("p", {class: "bulletin-muted"}, "可替换任一来源的公网 HTTPS 地址。官方订阅留空会恢复默认地址，补充媒体留空则关闭。"),
+      h("p", {class: "bulletin-muted"}, "可替换任一来源的公网 HTTPS 地址。已有默认地址的订阅留空会恢复默认地址，补充媒体留空则关闭。"),
       sources),
     h("div", {class: "bulletin-admin-footer"}, submit));
   root.className = "bulletin-admin";

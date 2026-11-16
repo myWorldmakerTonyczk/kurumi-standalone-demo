@@ -6,7 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from src.agent.market_bulletin import BEA_CALENDAR_JSON, DOL_BLS_RELEASES, DOL_BLS_SOURCE, FOREX_FACTORY_CALENDAR, MarketBulletin, ZONE, parse_calendar, parse_rss, parse_source, period_window
+from src.agent.market_bulletin import BEA_CALENDAR_JSON, DOL_BLS_RELEASES, DOL_BLS_SOURCE, FOREX_FACTORY_CALENDAR, LEGACY_BLS_SOURCES, MarketBulletin, ZONE, parse_calendar, parse_rss, parse_source, period_window
 
 
 from src.agent.tool.bulletins import build_tool
@@ -117,6 +117,23 @@ class MarketBulletinTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("非官方 · media.example", report["body"])
         self.assertEqual(report["details"]["links"], [["【非官方 · media.example】Economy update", url]])
         self.assertEqual(report["details"]["media_count"], 1)
+
+    def test_bls_defaults_migrate_only_legacy_addresses(self):
+        agent = self.agent
+        self.assertEqual(agent.config()["sources"]["bls"], DOL_BLS_RELEASES)
+        self.assertEqual(agent.config()["sources"]["bls_calendar"], FOREX_FACTORY_CALENDAR)
+        agent.save({"sources": LEGACY_BLS_SOURCES | {"fed": "https://example.org/fed.rss"}})
+        agent.db.execute("INSERT INTO platform_bulletin_events(id,title,due) VALUES('old','Old schedule',?)",
+                         (int(time.time()) + 3600,))
+        agent.db.execute("INSERT INTO platform_bulletin_runs(kind,attempted) VALUES('scan',1)")
+        restarted = MarketBulletin(agent.app)
+        self.assertEqual(restarted.config()["sources"]["bls"], DOL_BLS_RELEASES)
+        self.assertEqual(restarted.config()["sources"]["bls_calendar"], FOREX_FACTORY_CALENDAR)
+        self.assertEqual(restarted.config()["sources"]["fed"], "https://example.org/fed.rss")
+        self.assertEqual(agent.db.execute("SELECT active FROM platform_bulletin_events").fetchone()[0], 0)
+        self.assertEqual(agent.db.execute("SELECT attempted FROM platform_bulletin_runs").fetchone()[0], 0)
+        restarted.save({"sources": {"bls": "https://example.org/custom.rss"}})
+        self.assertEqual(MarketBulletin(agent.app).config()["sources"]["bls"], "https://example.org/custom.rss")
 
     async def test_configurable_sources_and_check_without_importing(self):
         agent = self.agent
