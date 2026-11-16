@@ -7,14 +7,14 @@ import logging
 import os
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html import unescape
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector
+from aiohttp import ClientConnectorCertificateError, ClientConnectorDNSError, ClientError, ClientSession, ClientTimeout, TCPConnector
 from aiohttp.resolver import ThreadedResolver
 from langchain_core.messages import HumanMessage, SystemMessage
 from yarl import URL
@@ -43,6 +43,21 @@ SOURCES = {
     "bea_calendar": ("美国经济分析局", BEA_CALENDAR, True, "bea.gov"),
     "media": ("补充媒体", "", False, ""),
 }
+CNBC_ECONOMY = "https://www.cnbc.com/id/20910258/device/rss/rss.html"
+FOREX_FACTORY_CALENDAR = "https://nfs.faireconomy.media/ff_calendar_thisweek.ics"
+BEA_CALENDAR_JSON = "https://apps.bea.gov/API/signup/release_dates.json"
+SOURCE_ALTERNATIVES = {
+    "fed": ("美联储全部新闻稿", "https://www.federalreserve.gov/feeds/press_all.xml"),
+    "ecb": ("欧洲央行统计新闻稿", "https://www.ecb.europa.eu/rss/statpress.html"),
+    "bls": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
+    "bls_calendar": ("Forex Factory 美国周历（非官方）", FOREX_FACTORY_CALENDAR),
+    "bea": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
+    "bea_calendar": ("BEA 官方 JSON 日历", BEA_CALENDAR_JSON),
+    "media": ("CNBC 经济新闻（非官方）", CNBC_ECONOMY),
+}
+BUILTIN_SOURCE_URLS = frozenset(value[1] for value in SOURCES.values() if value[1]) | frozenset(
+    address for _, address in SOURCE_ALTERNATIVES.values()
+)
 KINDS = {"live": "实时报告", "day": "日报", "week": "周报", "month": "月报", "event": "指标跟踪"}
 DEFAULT = {"enabled": True, "interval": 60, "time": "08:30", "periods": ["day", "week", "month"],
            "pairs": list(PAIRS)[:4], "url": "", "model": "", "key": ""}
@@ -52,9 +67,11 @@ log = logging.getLogger("kurumi")
 class PublicSourceResolver(ThreadedResolver):
     async def resolve(self, host, port=0, family=0):
         addresses = await super().resolve(host, port, family)
-        if any(not ipaddress.ip_address(record["host"].split("%")[0]).is_global for record in addresses):
-            raise OSError("来源指向非公网地址")
-        return addresses
+        public = [record for record in addresses
+                  if ipaddress.ip_address(record["host"].split("%")[0]).is_global]
+        if not public:
+            raise OSError("来源域名未解析到公网 IP")
+        return public
 
 
 def source_url(value):
@@ -80,6 +97,8 @@ def source_details(source_id, address):
     host = URL(address).host.lower().rstrip(".")
     official = bool(domain) and (host == domain or host.endswith("." + domain))
     source = name if official else MEDIA_PREFIX + host.removeprefix("www.")
+    if address == FOREX_FACTORY_CALENDAR:
+        source = MEDIA_PREFIX + "Forex Factory"
     return name + ("日历" if calendar else ""), source, calendar
 
 
@@ -148,11 +167,41 @@ def parse_calendar(payload, source=""):
         yield (event_id, clean(title.replace(chr(92) + ",", ","))[:240], int(stamp.timestamp()))
 
 
+def parse_source(payload, source, calendar, address):
+    if not calendar:
+        return list(parse_rss(payload, source))
+    if address == FOREX_FACTORY_CALENDAR:
+        return [(ident, title.split("US ", 1)[1], due) for ident, title, due in parse_calendar(payload, source)
+                if re.match(r"^(?:[⁎⁑⁂] )?US ", title)]
+    if address != BEA_CALENDAR_JSON:
+        return list(parse_calendar(payload, source))
+    events = {}
+    schedule = json.loads(payload)
+    if not isinstance(schedule, dict):
+        raise ValueError("日历 JSON 格式无法识别")
+    for title, entry in schedule.items():
+        dates = entry.get("release_dates") if isinstance(entry, dict) else None
+        if not isinstance(dates, list):
+            continue
+        for value in dates:
+            try:
+                stamp = datetime.fromisoformat(value)
+            except (ValueError, TypeError):
+                continue
+            if stamp.tzinfo is None:
+                continue
+            seconds = int(stamp.timestamp())
+            identity = hashlib.sha256(f"{source}:{title}:{seconds}".encode()).hexdigest()[:20]
+            events[identity] = (identity, clean(title)[:240], seconds)
+    return list(events.values())
+
+
 class MarketBulletin:
     def __init__(self, app):
         self.app, self.db = app, app.db
         self.lock = asyncio.Lock()
         self.generation = 0
+        self.weekly_calendar_check = (0.0, "")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS platform_bulletin_config(id INTEGER PRIMARY KEY CHECK(id=1), data TEXT);
             CREATE TABLE IF NOT EXISTS platform_bulletin_news(
@@ -221,6 +270,7 @@ class MarketBulletin:
                 self.db.execute("UPDATE platform_bulletin_events SET active=0 WHERE source=? AND due>?",
                                 (source, time.time()))
         if config["sources"] != old["sources"]:
+            self.weekly_calendar_check = (0.0, "")
             self.db.execute("UPDATE platform_bulletin_runs SET attempted=0 WHERE kind='scan'")
         self.generation += 1
 
@@ -272,7 +322,8 @@ class MarketBulletin:
         return {"config": config | {"has_key": bool(key), "model_ready": ready}, "available_pairs": list(PAIRS),
                 "tasks": [dict(row) for row in tasks], "agenda": [dict(row) for row in next_events],
                 "sources": [dict(id=key, label=name + ("日历" if calendar else ""),
-                                 default_url=default, format="ICS" if calendar else "RSS")
+                                 default_url=default, format=("ICS / JSON" if key == "bea_calendar" else "ICS")
+                                 if calendar else "RSS", alternative=SOURCE_ALTERNATIVES.get(key))
                             for key, (name, default, calendar, _) in SOURCES.items()],
                 "search_ready": bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()),
                 "runs": [dict(row) for row in self.db.execute("SELECT * FROM platform_bulletin_runs")],
@@ -305,14 +356,15 @@ class MarketBulletin:
 
     @staticmethod
     @asynccontextmanager
-    async def source_session():
-        resolver = PublicSourceResolver()
+    async def source_session(*, builtin=False):
+        resolver = None if builtin else PublicSourceResolver()
         try:
             async with ClientSession(connector=TCPConnector(resolver=resolver), timeout=ClientTimeout(total=20),
                                      headers={"User-Agent": "KurumiMarketBulletin/1.0"}) as session:
                 yield session
         finally:
-            await resolver.close()
+            if resolver:
+                await resolver.close()
 
     async def check_source(self, source_id, address):
         if not isinstance(source_id, str) or source_id not in SOURCES:
@@ -323,9 +375,9 @@ class MarketBulletin:
         address = source_url(address)
         _, source, calendar = source_details(source_id, address)
         try:
-            async with self.source_session() as session:
+            async with self.source_session(builtin=address in BUILTIN_SOURCE_URLS) as session:
                 payload = await self.fetch(session, address)
-            count = len(list(parse_calendar(payload, source) if calendar else parse_rss(payload, source)))
+            count = len(parse_source(payload, source, calendar, address))
         except Exception as error:
             return {"ok": False, "message": self.source_error(error)}
         if not count:
@@ -336,11 +388,18 @@ class MarketBulletin:
     def source_error(error):
         status = getattr(error, "status", 0)
         if status:
-            return f"HTTP {status}" + ("，来源拒绝访问" if status in (401, 403) else "")
+            hint = {401: "，来源拒绝访问", 403: "，来源拒绝访问", 429: "，来源请求限流"}
+            return f"HTTP {status}" + hint.get(status, "")
         if isinstance(error, TimeoutError):
             return "连接超时"
+        if isinstance(error, ClientConnectorCertificateError):
+            return "TLS 证书校验失败"
+        if isinstance(error, ClientConnectorDNSError):
+            if str(error.__cause__) == "来源域名未解析到公网 IP":
+                return str(error.__cause__)
+            return "DNS 域名解析失败"
         if isinstance(error, ClientError):
-            return "连接失败"
+            return "连接失败（请检查服务器出站网络）"
         if isinstance(error, (ElementTree.ParseError, UnicodeError)):
             return "来源格式无法解析"
         if type(error) is ValueError:
@@ -378,10 +437,14 @@ class MarketBulletin:
 
     async def collect(self):
         async def read(session, label, source, address, calendar=False):
+            weekly = address == FOREX_FACTORY_CALENDAR
+            checked, previous_error = self.weekly_calendar_check
+            if weekly and checked and time.monotonic() - checked < 900:
+                return [], previous_error
             try:
                 payload = await self.fetch(session, address)
                 if calendar:
-                    events = [(*item, source) for item in parse_calendar(payload, source)]
+                    events = [(*item, source) for item in parse_source(payload, source, True, address)]
                     if not events:
                         raise ValueError("日历为空或格式无法识别")
                     self.db.execute("SAVEPOINT refresh_bulletin_calendar")
@@ -395,19 +458,26 @@ class MarketBulletin:
                         raise
                     finally:
                         self.db.execute("RELEASE refresh_bulletin_calendar")
+                    if weekly:
+                        self.weekly_calendar_check = (time.monotonic(), "")
                     return [], ""
-                items = list(parse_rss(payload, source))
+                items = parse_source(payload, source, False, address)
                 if not items:
                     raise ValueError("RSS 暂无可解析条目")
                 return items, ""
             except Exception as error:
                 reason = self.source_error(error)
+                if weekly:
+                    self.weekly_calendar_check = (time.monotonic(), reason)
                 log.info("Bulletin source unavailable: %s (%s)", label, reason)
                 return [], reason
 
         sources = [(*source_details(key, address), address) for key, address in self.config()["sources"].items() if address]
-        async with self.source_session() as session:
-            results = await asyncio.gather(*(read(session, label, source, address, calendar)
+        async with AsyncExitStack() as stack:
+            default_session = await stack.enter_async_context(self.source_session(builtin=True))
+            custom_session = await stack.enter_async_context(self.source_session())
+            results = await asyncio.gather(*(read(default_session if address in BUILTIN_SOURCE_URLS else custom_session,
+                                                 label, source, address, calendar)
                                              for label, source, calendar, address in sources))
         failed = [f"{source[0]}（{error}）" for source, (_, error) in zip(sources, results) if error]
         media, search_error = await self.search_news("forex dollar euro yen central banks inflation jobs economic data markets")

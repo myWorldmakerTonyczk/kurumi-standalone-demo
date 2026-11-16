@@ -80,7 +80,7 @@ export function marketBulletin({compact = false} = {}) {
         h("b", {}, q.pair), h("span", {}, q.bid + " / " + q.ask), h("small", {}, time(q.timestamp)))));
       const events = data.agenda.length
         ? h("ul", {class: "bulletin-agenda"}, data.agenda.map(item => h("li", {},
-          h("time", {}, time(item.due).slice(-5)), h("span", {}, item.title))))
+          h("time", {}, time(item.due).slice(-5)), h("span", {}, item.title, item.source?.startsWith("非官方") ? h("small", {}, " · " + item.source) : null))))
         : h("p", {class: "bulletin-muted"}, "暂无已同步的待公布指标");
       if (compact) {
         body.replaceChildren(h("button", {type: "button", class: "ui-btn ui-btn-sm",
@@ -168,7 +168,7 @@ export function mountBulletinAdmin(root, bridge) {
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "运行记录"), operations, runs),
     h("div", {class: "bulletin-admin-grid"},
       h("section", {class: "bulletin-admin-card"}, h("h3", {}, "Agent 唤起任务"), schedule),
-      h("section", {class: "bulletin-admin-card"}, h("h3", {}, "近期官方日历"), calendar)),
+      h("section", {class: "bulletin-admin-card"}, h("h3", {}, "近期发布日历"), calendar)),
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "已发布播报"), reports));
   operations.append(h("button", {type: "button", onClick: () => request({action: "scan"})}, "立即采集"));
   operations.append(h("button", {type: "button", onClick: () => request()}, "刷新记录"));
@@ -192,7 +192,7 @@ export function mountBulletinAdmin(root, bridge) {
         return label(pair, input);
       }));
       sources.replaceChildren(...data.sources.map(source => {
-        const input = h("input", {type: "url", value: config.sources[source.id],
+        const input = h("input", {type: "url", id: "bulletin-source-" + source.id, value: config.sources[source.id] ?? source.default_url,
           placeholder: source.default_url, dataset: {source: source.id}});
         const feedback = h("small", {role: "status"});
         const test = h("button", {type: "button", onClick: async () => {
@@ -202,18 +202,30 @@ export function mountBulletinAdmin(root, bridge) {
           feedback.textContent = "正在检查…";
           try {
             const result = await bridge.apiPost("market-bulletin", {action: "check-source", source: source.id, url});
-            if (input.value.trim() === url) feedback.textContent = result.message;
+            if (input.value.trim() === url) {
+              feedback.textContent = result.message;
+              feedback.dataset.state = result.ok ? "ok" : "error";
+            }
           } catch (error) {
             if (input.value.trim() === url) feedback.textContent = error.message;
           } finally { test.disabled = false; }
         }}, "检查连通性");
         input.addEventListener("input", () => { feedback.textContent = ""; });
-        return h("div", {class: "bulletin-source-row"}, label(source.label + " · " + source.format, input), test, feedback);
+        const alternate = source.alternative ? h("button", {type: "button", onClick: () => {
+          input.value = source.alternative[1];
+          input.dispatchEvent(new Event("input", {bubbles: true}));
+          input.focus();
+        }}, "填入备用地址") : null;
+        return h("div", {class: "bulletin-source-row"},
+          h("label", {for: input.id}, source.label + " · " + source.format),
+          h("div", {class: "bulletin-source-controls"}, input,
+            h("div", {class: "bulletin-actions"}, test, alternate)),
+          source.alternative ? h("small", {class: "bulletin-muted"}, source.alternative[0]) : null, feedback);
       }));
       dirty = false;
     }
     key.placeholder = config.has_key ? "已配置，留空保留" : "请输入管理员 API Key";
-    searchStatus.textContent = data.search_ready ? "联网新闻搜索已配置" : "联网新闻搜索待配置（BRAVE_SEARCH_API_KEY）";
+    searchStatus.textContent = data.search_ready ? "联网新闻搜索已配置" : "Brave 联网搜索未配置。RSS 和日历订阅仍可独立使用。";
     signal.textContent = !config.enabled ? "已停用" : config.model_ready ? "已启用" : "已启用 · 待配置模型";
     signal.dataset.state = config.enabled && config.model_ready ? "live" : "stale";
     runs.replaceChildren(...Object.entries(RUNS).flatMap(([kind, label]) => {
@@ -231,7 +243,7 @@ export function mountBulletinAdmin(root, bridge) {
           action === "cancel" ? "取消任务" : "重试") : null);
     }) : [h("p", {class: "bulletin-muted"}, "采集后，Agent 选中的指标会出现在这里。")]));
     calendar.replaceChildren(...(data.agenda.length ? data.agenda.map(item =>
-      h("p", {class: "bulletin-calendar-row"}, h("time", {}, time(item.due)), h("span", {}, item.title)))
+      h("p", {class: "bulletin-calendar-row"}, h("time", {}, time(item.due)), h("span", {}, item.title, item.source?.startsWith("非官方") ? h("small", {}, " · " + item.source) : null)))
       : [h("p", {class: "bulletin-muted"}, "暂无已同步的日历事件")]));
     reports.replaceChildren(reportList(data.reports));
   }

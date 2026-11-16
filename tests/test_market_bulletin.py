@@ -6,7 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from src.agent.market_bulletin import MarketBulletin, ZONE, parse_calendar, parse_rss, period_window
+from src.agent.market_bulletin import BEA_CALENDAR_JSON, FOREX_FACTORY_CALENDAR, MarketBulletin, ZONE, parse_calendar, parse_rss, parse_source, period_window
 
 
 from src.agent.tool.bulletins import build_tool
@@ -137,6 +137,29 @@ class MarketBulletinTests(unittest.IsolatedAsyncioTestCase):
         agent.save({"sources": {"bls": "", "media": ""}})
         self.assertEqual(agent.config()["sources"]["bls"], default)
         self.assertEqual(agent.config()["sources"]["media"], "")
+
+    def test_bea_json_calendar_ignores_metadata_and_duplicate_dates(self):
+        when = "2026-11-25T13:30:00+00:00"
+        payload = json.dumps({"GDP": {"release_dates": [when, when, "bad date"]}, "file_last_updated": "2026-11-16"})
+        first, = parse_source(payload, "BEA", True, BEA_CALENDAR_JSON)
+        self.assertEqual(first[1:], ("GDP", int(datetime.fromisoformat(when).timestamp())))
+
+    def test_third_party_weekly_calendar_selects_us_events(self):
+        calendar = """BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:us
+SUMMARY:⁂ US Non-Farm Employment Change
+DTSTART;TZID=America/New_York:20261106T083000
+END:VEVENT
+BEGIN:VEVENT
+UID:ca
+SUMMARY:⁂ CA Employment Change
+DTSTART;TZID=America/New_York:20261106T083000
+END:VEVENT
+END:VCALENDAR"""
+        event, = parse_source(calendar, "Forex Factory", True, FOREX_FACTORY_CALENDAR)
+        self.assertEqual(event[1], "Non-Farm Employment Change")
+        self.assertEqual(datetime.fromtimestamp(event[2], ZONE).hour, 21)
 
     def test_official_formats_and_timezone(self):
         rss = """<rss><channel><item><title>Indicator</title><link>https://example.gov/release</link>
