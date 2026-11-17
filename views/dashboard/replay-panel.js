@@ -510,7 +510,8 @@ export class ReplayPanel {
     const intro = el("p", "每格 " + (step === 86400 ? "1 天" : step / 3600 + " 小时") + " · 柱高为看盘任务数，按结果分色。点选柱子查看操作次数", "replay-muted");
     const strip = el("div", null, "replay-activity-strip");
     const list = el("div", null, "replay-activity-runs");
-    const max = Math.max(1, ...bins.map(events => events.length));
+    const scale = Math.max(3, ...bins.map(events => events.length));
+    strip.style.setProperty("--activity-unit", (100 / scale) + "%");
     const labels = new Intl.DateTimeFormat("zh-CN", {timeZone: "Asia/Shanghai",
       ...(step === 86400 ? {month: "numeric", day: "numeric"} : {hour: "2-digit", minute: "2-digit", hour12: false})});
     const buttons = [];
@@ -538,16 +539,14 @@ export class ReplayPanel {
       const count = countOperations(events);
       button.setAttribute("aria-label", stamp(start) + " 起，" + count + " 次操作，" + events.length + " 个任务");
       const stack = el("span", null, "replay-activity-stack");
-      for (const key of keys) {
-        const count = events.filter(event => taskKind(event) === key).length;
-        if (!count) continue;
+      stack.setAttribute("aria-hidden", "true");
+      for (const event of events) {
         const bar = el("span");
-        bar.dataset.kind = key;
-        bar.style.height = (count / max * 100) + "%";
+        bar.dataset.kind = taskKind(event);
         stack.append(bar);
       }
-      if (events.length) stack.append(el("b", events.length, "replay-activity-count"));
-      button.append(stack, el("small", index % 4 === 0 ? labels.format(start * 1000) : ""));
+      button.append(el("b", events.length || "", "replay-activity-count"), stack,
+        el("small", index % 4 === 0 ? labels.format(start * 1000) : ""));
       button.onclick = () => show(index);
       strip.append(button);
       buttons.push(button);

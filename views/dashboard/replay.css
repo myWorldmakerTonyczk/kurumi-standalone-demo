@@ -138,11 +138,11 @@
 .replay-activity [data-kind="other"] { --activity-ink: #56665f; }
 .replay-activity-legend span, .replay-run span { padding: 3px 7px; border: 1px solid currentColor; border-radius: 5px; color: var(--activity-ink); font-size: .75rem; }
 .replay-activity-strip { display: flex; gap: 2px; overflow-x: auto; padding: 3px; }
-.replay-activity-strip .replay-activity-bin { flex: 1 0 25px; min-width: 0; display: grid; grid-template-rows: 62px 18px; align-items: end; gap: 3px; border: 1px solid transparent; background: transparent; padding: 3px 2px; color: var(--review-muted); }
+.replay-activity-strip .replay-activity-bin { flex: 1 0 25px; min-width: 0; display: grid; grid-template-rows: 14px 84px 18px; align-items: end; gap: 3px; border: 1px solid transparent; background: transparent; padding: 3px 2px; color: var(--review-muted); }
 .replay-activity-bin[aria-pressed="true"], .replay-activity-bin:hover { background: #eee7f7; border-color: #cbb8e1; }
 .replay-activity-bin small { overflow: visible; white-space: nowrap; font-size: .66rem; text-align: left; }
 .replay-activity-stack { position: relative; height: 100%; display: flex; flex-direction: column-reverse; border-bottom: 1px solid var(--review-line); }
-.replay-activity-stack span { background: var(--activity-ink); border-radius: 2px; }
+.replay-activity-stack > span { flex: 0 0 var(--activity-unit); background: var(--activity-ink); border-radius: 2px; }
 .replay-activity-runs { display: grid; gap: 5px; margin-top: 10px; }
 .replay-activity-runs > strong { font-size: .82rem; color: var(--review-muted); }
 .replay-activity-runs .replay-run { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; text-align: left; }
@@ -174,7 +174,7 @@
   height: var(--guide-height); border-left: 1px dashed #8560b3;
 }
 
-.replay-activity-count { position: absolute; top: 0; left: 0; right: 0; color: #243735; font-size: .66rem; text-shadow: 0 0 3px white, 0 0 3px white; }
+.replay-activity-count { color: #243735; font-size: .66rem; text-align: center; }
 
 .replay-market.is-floating.is-positioned { left: var(--float-left); top: var(--float-top); right: auto; bottom: auto; }
 .replay-market.is-floating .replay-chart-top { cursor: move; touch-action: none; user-select: none; }
