@@ -48,6 +48,47 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
         await graph.ainvoke({"messages": [("user", "hello")]})
         self.assertEqual(TrackingModel.bindings[-1], ["load_tool_group"])
 
+    async def test_load_multiple_groups_in_one_call(self):
+        def read_example() -> str:
+            """Read the example inbox."""
+            return "inbox"
+
+        def inspect_trade() -> str:
+            """Read the example trade."""
+            return "trade"
+
+        groups = {"inbox": [read_example], "trading": [inspect_trade]}
+        responses = [
+            AIMessage(content="", tool_calls=[dict(name="load_tool_group", args={}, id="directory")]),
+            AIMessage(content="", tool_calls=[dict(
+                name="load_tool_group", args={"categories": ["inbox", "media"]}, id="invalid"
+            )]),
+            AIMessage(content="", tool_calls=[dict(
+                name="load_tool_group", args={"categories": ["inbox", "trading", "inbox"]}, id="groups"
+            )]),
+            AIMessage(content="", tool_calls=[
+                dict(name="read_example", args={}, id="read"),
+                dict(name="inspect_trade", args={}, id="trade"),
+            ]),
+            AIMessage(content="done"),
+        ]
+        TrackingModel.bindings.clear()
+        graph = create_agent(TrackingModel(responses=responses), tools=flatten(groups), middleware=[ToolGroups(groups)])
+        result = await graph.ainvoke({"messages": [("user", "check both groups")]})
+        by_call = {message.tool_call_id: message.content for message in result["messages"] if message.type == "tool"}
+
+        self.assertEqual(set(json.loads(by_call["directory"])["groups"]), set(groups))
+        self.assertEqual(json.loads(by_call["invalid"])["unavailable"], ["media"])
+        self.assertEqual(TrackingModel.bindings[:3], [["load_tool_group"]] * 3)
+        self.assertEqual(json.loads(by_call["groups"]), {
+            "ok": True,
+            "enabled": ["inbox", "trading"],
+            "tools": {"inbox": ["read_example"], "trading": ["inspect_trade"]},
+        })
+        self.assertEqual(set(TrackingModel.bindings[3]), {"load_tool_group", "read_example", "inspect_trade"})
+        self.assertEqual(by_call["read"], "inbox")
+        self.assertEqual(by_call["trade"], "trade")
+
     async def test_patrol_inbox_tools_use_the_current_account(self):
         with tempfile.TemporaryDirectory() as root:
             app = Demo(Path(root) / "inbox.sqlite3")

@@ -13,7 +13,7 @@ CATALOG = {
     "timeline": "预约任务、查任务时间线与执行报告。",
 }
 
-INSTRUCTIONS = "需要工具时可调用 load_tool_group。知道类别就直接传类别，不确定时留空查目录。没有工具需求可直接回复。"
+INSTRUCTIONS = "需要工具时可调用 load_tool_group。知道类别就用 categories 传入所需类别列表，不确定时留空查目录。没有工具需求可直接回复。"
 
 
 def tool_name(tool):
@@ -29,13 +29,20 @@ class ToolGroups(AgentMiddleware):
         self.tools = [self._loader()]
 
     def _loader(self):
-        def load_tool_group(category: str = "") -> str:
-            """启用一组工具。留空查看当前场景可用的工具类别。"""
-            if not category:
+        def load_tool_group(category: str = "", categories: list[str] | None = None) -> str:
+            """启用一个或多个工具组。categories 接收类别列表，category 接收单个类别。留空查看目录。"""
+            requested = dict.fromkeys(([category] if category else []) + (categories or []))
+            if not requested:
                 return dump({"groups": {name: CATALOG[name] for name in self.groups}})
-            if category not in self.groups:
-                return dump({"ok": False, "error": "当前场景没有这个工具组", "groups": list(self.groups)})
-            self.enabled.add(category)
+            unavailable = [name for name in requested if name not in self.groups]
+            if unavailable:
+                return dump({"ok": False, "error": "当前场景没有这些工具组",
+                             "unavailable": unavailable, "groups": list(self.groups)})
+            self.enabled.update(requested)
+            if categories:
+                return dump({"ok": True, "enabled": list(requested), "tools": {
+                    name: [tool_name(tool) for tool in self.groups[name]] for name in requested
+                }})
             return dump({"ok": True, "enabled": category, "tools": [tool_name(tool) for tool in self.groups[category]]})
 
         load_tool_group.__doc__ += " 可用类别：" + "、".join(self.groups)
