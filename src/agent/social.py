@@ -16,6 +16,8 @@ from src.core.engine import dump
 from .chat_debounce import ChatDebounce, debounce_config
 from .image_library import image_reference
 from .model_registry import model_client, selected
+from .task_trace_middleware import TraceTools
+from .timeline import task_trace
 from .mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups
 from .mcp.registry import flatten, inbox_group, timeline_group, user_group_groups, user_patrol_groups
 from .workflow import social_system_prompt, workflow
@@ -318,7 +320,8 @@ class Social:
                 persona = self.app.agent_persona(owner, profile)
                 prompt = social_system_prompt(persona) + "\n" + task_prompt
                 portrait = []
-                if profile.get("chat_memory", {}).get("enabled", True):
+                memory_config = profile.get("chat_memory", {})
+                if memory_config.get("enabled", True):
                     subjects = ["self" if row["owner"] == owner else "user:" + row["owner"]
                                 for row in rows if not row["is_agent"]]
                     portrait = self.app.memory.profiles.context(owner, f"group:{room}", subjects)
@@ -360,9 +363,12 @@ class Social:
                 from langchain.agents import create_agent
 
                 agent = create_agent(model, tools=flatten(groups),
-                    middleware=[ToolGroups(groups, initial=("mention_group_member",))],
+                    middleware=[TraceTools(), ToolGroups(groups, initial=("mention_group_member",))],
                     system_prompt=prompt + "\n" + TOOL_INSTRUCTIONS + "\n近期任务时间线：" +
                     dump(self.app.timeline.context(owner)))
+                if trace := task_trace(owner):
+                    trace.event("memory", "group", {"location": "input.profiles", "enabled": memory_config.get("enabled", True),
+                                                   "injected": {"profiles": portrait}})
                 started = time.time()
                 result = (await agent.ainvoke({"messages": [human]}, config={"recursion_limit": 12}))["messages"][-1]
                 mentions_read = [entry["id"] for entry in incoming if self_id in entry["mentions"]]
@@ -416,7 +422,7 @@ class Social:
                 groups = user_patrol_groups(self, owner)
                 agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")),
                     tools=flatten(groups),
-                    middleware=[ToolGroups(groups, initial=("read_inbox",)), ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
+                    middleware=[TraceTools(), ToolGroups(groups, initial=("read_inbox",)), ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
                     system_prompt=workflow("patrol") + "\n\n" + social_system_prompt(self.app.agent_persona(owner, profile))
                     + "\n" + workflow("forum_authorship")
                     + "\n" + TOOL_INSTRUCTIONS
@@ -501,7 +507,7 @@ class Social:
             history = [dict(row) for row in reversed(rows)]
             groups = {"inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner)}
         agent = create_agent(model_client(config, self.app.model_url,
-            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=flatten(groups),
+            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=flatten(groups), middleware=[TraceTools()],
             system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
                 "\n你在处理上一项任务交接的聊天跟进。根据当前会话的最新消息决定是否发送。"
                 "说明只是内部意图，不要复述内部任务信息或公开私聊、私有账户内容。"
@@ -600,7 +606,7 @@ class Social:
                 from langchain.agents import create_agent
 
                 agent = create_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
-                    tools=inbox_group(self.app, owner) + timeline_group(self.app, owner),
+                    tools=inbox_group(self.app, owner) + timeline_group(self.app, owner), middleware=[TraceTools()],
                     system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
                     + "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
                 result = await agent.ainvoke({"messages": [

@@ -3,10 +3,56 @@ import asyncio
 import heapq
 import itertools
 import json
+import logging
+import sqlite3
 import time
 from contextvars import ContextVar
 
+from .call_logs import clean_log, error_label, log_secrets
+
 _active_task = ContextVar("active_agent_task", default=None)
+_log = logging.getLogger(__name__)
+
+
+def task_trace(owner=None):
+    current = _active_task.get()
+    if current and (owner is None or owner == current[0]):
+        trace = current[2]
+        return trace if trace and not trace.closed else None
+    return None
+
+
+class TaskTrace:
+    def __init__(self, db, task, owner, profile):
+        self.db, self.task, self.owner = db, task, owner
+        self.secrets = log_secrets(profile)
+        self.closed = False
+
+    def encode(self, payload):
+        return clean_log(payload, self.secrets, limit=None, json_payload=True)
+
+    def start(self, kind, label, payload):
+        if self.closed:
+            return None
+        try:
+            return self.db.execute("""INSERT INTO agent_task_trace(task,kind,label,created,request)
+                VALUES(?,?,?,?,?)""", (self.task, kind, label, time.time(), self.encode(payload))).lastrowid
+        except (sqlite3.Error, ValueError, TypeError):
+            _log.exception("Could not write task trace event")
+            return None
+
+    def finish(self, entry, result, state="ok"):
+        if self.closed or entry is None:
+            return
+        try:
+            self.db.execute("""UPDATE agent_task_trace SET result=?,state=?,ended=? WHERE task=? AND id=?""",
+                            (self.encode(result), state, time.time(), self.task, entry))
+        except (sqlite3.Error, ValueError, TypeError):
+            _log.exception("Could not finish task trace event")
+
+    def event(self, kind, label, payload, state="ok"):
+        self.finish(self.start(kind, label, payload), {}, state)
+
 
 PRIORITY = {"private": 0, "group_mention": 1, "account_check": 1, "manual_watch": 2, "group": 3,
             "private_followup": 3, "group_followup": 3, "watch": 4, "diary": 5,
@@ -34,6 +80,12 @@ class AgentTimeline:
         CREATE TABLE IF NOT EXISTS agent_task_debug(
             id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
             state TEXT NOT NULL, created REAL NOT NULL, error_type TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS agent_task_trace(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL, label TEXT NOT NULL, created REAL NOT NULL, ended REAL,
+            state TEXT NOT NULL DEFAULT 'running', request TEXT NOT NULL, result TEXT NOT NULL DEFAULT '{}');
+        CREATE INDEX IF NOT EXISTS agent_task_trace_task ON agent_task_trace(task,id);
+        UPDATE agent_task_trace SET state='interrupted', ended=unixepoch() WHERE state='running';
         UPDATE agent_tasks SET state='interrupted',ended=unixepoch(),outcome='服务重启，任务中断'
           WHERE state IN ('queued','running');
         """)
@@ -76,7 +128,12 @@ class AgentTimeline:
                 state, outcome, error = "completed", "已完成", ""
                 self.db.execute("UPDATE agent_tasks SET state='running',started=? WHERE id=?", (time.time(), ident))
                 self.debug(owner, ident, "running")
-                token = _active_task.set((owner, ident))
+                settings = self.preferences(owner)
+                trace = TaskTrace(self.db, ident, owner, settings) if settings.get("timeline_debug") else None
+                token = _active_task.set((owner, ident, trace))
+                if trace:
+                    row = self.db.execute("SELECT data FROM agent_task_reports WHERE task=?", (ident,)).fetchone()
+                    trace.event("task", kind, {"details": json.loads(row[0])})
                 try:
                     result = await execute()
                     if summarize:
@@ -88,20 +145,32 @@ class AgentTimeline:
                         detail["report"] = result[:3200]
                     if detail:
                         self.note(owner, detail)
+                    if trace:
+                        trace.event("result", outcome, {"result": result}, state)
                     future.set_result(result)
                 except asyncio.CancelledError:
                     state, outcome = "interrupted", "服务停止，任务中断"
+                    if trace:
+                        trace.event("result", outcome, {}, state)
                     future.cancel()
                     raise
                 except Exception as exc:
                     state, outcome, error = "failed", "执行失败", type(exc).__name__
                     self.note(owner, {"error_type": error})
+                    if trace:
+                        trace.event("result", outcome, {"error": error_label(exc), "message": str(exc)}, state)
                     future.set_exception(exc)
                 finally:
                     _active_task.reset(token)
                     self.db.execute("UPDATE agent_tasks SET state=?,ended=?,outcome=? WHERE id=?",
                                     (state, time.time(), outcome, ident))
                     self.debug(owner, ident, state, error)
+                    if trace:
+                        trace.closed = True
+                        self.db.execute("""DELETE FROM agent_task_trace WHERE task IN (
+                            SELECT DISTINCT t.id FROM agent_tasks t JOIN agent_task_trace e ON e.task=t.id
+                            WHERE t.owner=? AND t.ended IS NOT NULL ORDER BY t.id DESC LIMIT -1 OFFSET 50)""",
+                            (owner,))
                     if key is not None:
                         self.dedup.pop((owner, key), None)
         finally:
@@ -127,6 +196,8 @@ class AgentTimeline:
         current = _active_task.get()
         if not current or current[0] != owner:
             return
+        if trace := task_trace(owner):
+            trace.event("reference", reference.get("action", reference["type"]), reference)
         row = self.db.execute("SELECT data FROM agent_task_reports WHERE task=?", (current[1],)).fetchone()
         if row:
             refs = json.loads(row["data"]).get("references", [])
@@ -146,6 +217,11 @@ class AgentTimeline:
             item["details"] = json.loads(data or "{}")
         return item
 
+    def trace_events(self, owner, ident):
+        return [dict(row, request=json.loads(row["request"]), result=json.loads(row["result"]))
+                for row in self.db.execute("""SELECT e.* FROM agent_task_trace e
+                    JOIN agent_tasks t ON t.id=e.task WHERE t.owner=? AND t.id=? ORDER BY e.id""", (owner, ident))]
+
     def query(self, owner, since=0, until=0, kind="", state="", before=0, limit=20):
         limit = min(50, max(1, limit))
         rows = self.db.execute("""SELECT id,kind,state,created,started,ended,outcome FROM agent_tasks
@@ -155,9 +231,10 @@ class AgentTimeline:
         return {"items": [dict(row) | {"label": LABELS.get(row["kind"], row["kind"])} for row in rows[:limit]],
                 "next_before": rows[limit-1]["id"] if len(rows) > limit else None}
 
-    def history(self, owner, limit=30):
+    def history(self, owner, limit=30, trace_kind=""):
         rows = self.db.execute("""SELECT id,kind,state,created,started,ended,outcome FROM agent_tasks
-            WHERE owner=? ORDER BY id DESC LIMIT ?""", (owner, limit))
+            WHERE owner=? AND (?='' OR EXISTS (SELECT 1 FROM agent_task_trace e WHERE e.task=agent_tasks.id AND e.kind=?))
+            ORDER BY id DESC LIMIT ?""", (owner, trace_kind, trace_kind, limit))
         return [dict(row) | {"label": LABELS.get(row["kind"], row["kind"])} for row in rows]
 
     def context(self, owner):

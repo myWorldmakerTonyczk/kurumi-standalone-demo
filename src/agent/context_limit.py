@@ -6,6 +6,7 @@ from langgraph.runtime import Runtime
 
 from .context_tokens import count_tokens_cjk
 from .workflow import workflow
+from .timeline import task_trace
 
 # 只是把上下文卡在 N 以内、不做摘要，所以这个值是「硬顶」。
 # ⚠️ 必须配 count_tokens_cjk：默认的 "approximate" 是「字符数 ÷ 4」，对中文低估 1.8~3.7 倍，
@@ -26,6 +27,10 @@ def cap_context(state: AgentState, runtime: Runtime):
     )
     if len(trim) == len(msgs):
         return None  # 没变就别返回更新，否则每轮都白写一份 checkpoint 全量快照
+    if trace := task_trace():
+        trace.event("context", "message_trim", {
+            "messages_before": len(msgs), "messages_after": len(trim), "estimated_token_limit": MAX_CONTEXT_TOKEN,
+        })
     return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *trim]}
 
 
@@ -53,8 +58,12 @@ async def manage_history(history, policy, summary, validate_url, *, audit=None):
                 HumanMessage(content="\n".join(f"{item.type}: {item.content}" for item in source)),
             ])
             if result.text.strip():
+                if trace := task_trace():
+                    trace.event("context", "history_summary", {"summarized_messages": len(source), "kept_messages": keep})
                 return [HumanMessage(content="历史对话摘要（供参考）：\n" + result.text), *history[cutoff:]]
         except Exception:
             import logging
             logging.getLogger(__name__).warning("Context summary failed; using truncation")
+    if trace := task_trace():
+        trace.event("context", "history_trim", {"messages_before": len(history), "messages_after": len(history[discard:])})
     return history[discard:]

@@ -3,6 +3,8 @@ import json
 import time
 import uuid
 
+from .timeline import task_trace
+
 SOURCES = ("forum", "group", "market", "system")
 
 
@@ -25,6 +27,8 @@ class AgentInbox:
           id INTEGER PRIMARY KEY, owner TEXT NOT NULL REFERENCES sim_users(id) ON DELETE CASCADE,
           created REAL NOT NULL, action TEXT NOT NULL, batch TEXT, total INTEGER NOT NULL);
         """)
+        if "task" not in {row[1] for row in self.db.execute("PRAGMA table_info(agent_inbox_audit)")}:
+            self.db.execute("ALTER TABLE agent_inbox_audit ADD COLUMN task INTEGER REFERENCES agent_tasks(id) ON DELETE SET NULL")
 
     def add(self, owner, source, event, title, preview="", *, room=None, reference=None, mentioned=False):
         self.db.execute("""INSERT OR IGNORE INTO agent_inbox
@@ -83,12 +87,16 @@ class AgentInbox:
             self.add(row["id"], "market", ident, title, reference={"bulletin_id": ident, "kind": kind})
 
     def audit(self, owner, action, total, batch=None):
-        self.db.execute("INSERT INTO agent_inbox_audit(owner,created,action,batch,total) VALUES(?,?,?,?,?)",
-                        (owner, time.time(), action, batch, total))
+        trace = task_trace(owner)
+        self.db.execute("INSERT INTO agent_inbox_audit(owner,created,action,batch,total,task) VALUES(?,?,?,?,?,?)",
+                        (owner, time.time(), action, batch, total, trace.task if trace else None))
+        if trace:
+            trace.event("inbox", action, {"total": total, "batch": batch})
 
     def logs(self, owner):
-        return [dict(row) for row in self.db.execute("""SELECT id,created,action,batch,total
-            FROM agent_inbox_audit WHERE owner=? ORDER BY id DESC LIMIT 50""", (owner,))]
+        return [dict(row) for row in self.db.execute("""SELECT a.id,a.created,a.action,a.batch,a.total,
+            CASE WHEN EXISTS (SELECT 1 FROM agent_task_trace e WHERE e.task=a.task) THEN a.task END AS task
+            FROM agent_inbox_audit a WHERE a.owner=? ORDER BY a.id DESC LIMIT 50""", (owner,))]
 
     @staticmethod
     def visible_sql():

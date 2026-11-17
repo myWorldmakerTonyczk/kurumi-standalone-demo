@@ -2493,3 +2493,13 @@ body.community-groups-collapsed .workspace > main { grid-column: 1; }
   .wealth-launch { right: 12px; top: 106px; }
   .wealth-dialog { inset: 78px 12px auto auto; width: min(450px, calc(100vw - 24px)); padding: 14px; }
 }
+
+.task-trace-panel { min-width: 0; margin-block: .6rem; }
+.task-trace-summary { font-size: .9rem; margin: .5rem 0; overflow-wrap: anywhere; }
+.task-trace-events { list-style: none; margin: 0; padding: 0 0 0 .65rem; border-inline-start: 2px solid var(--line, #dfcedc); }
+.task-trace-step { margin-block: .45rem; overflow-wrap: anywhere; }
+.task-trace-step summary { display: list-item; cursor: pointer; color: inherit; }
+.task-trace-step small { display: block; margin-inline-start: 1rem; }
+.task-trace-tool { margin-inline-start: .75rem; }
+.task-trace-payload { margin: .5rem 0 .6rem 1rem; min-width: 0; }
+.task-trace-panel pre { margin: .35rem 0 .6rem; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

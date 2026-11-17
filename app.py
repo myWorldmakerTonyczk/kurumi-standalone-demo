@@ -28,7 +28,8 @@ from dashboard_api import Dashboard
 from src.agent.image_library import ImageLibrary
 from src.agent.market_bulletin import MarketBulletin
 from src.agent.inbox import AgentInbox
-from src.agent.timeline import AgentTimeline
+from src.agent.timeline import AgentTimeline, task_trace
+from src.agent.task_trace_middleware import TraceTools
 from src.agent.task_schedule import ACCOUNT_EVENTS, TaskSchedule
 from src.agent.mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups, tool_name
 from src.agent.mcp.registry import flatten, user_workspace_groups
@@ -449,7 +450,7 @@ class Demo:
                     ]
                 history = await manage_history(history, policy, selected(settings, "summary"), self.model_url,
                                                audit=self.call_logs.callback(owner, "context_summary"))
-                middleware = [cap_context]
+                middleware = [TraceTools(), cap_context]
                 fallback_id = settings.get("model_roles", {}).get("fallback")
                 fallback = next((entry for entry in connections(settings)
                                  if entry["id"] == fallback_id and entry["id"] != model_settings["id"] and entry["key"]), None)
@@ -467,20 +468,22 @@ class Demo:
                 instructions = workflow("private") + "\n" + workflow("forum_authorship")
                 instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner))
                 if attachments is not None:
-                    middleware.insert(0, ToolGroups(groups))
+                    middleware.insert(1, ToolGroups(groups))
                     instructions += "\n" + TOOL_INSTRUCTIONS
                 if any(tool_name(tool) == "sticker" for tool in tools):
                     instructions += "\n" + workflow("private_sticker")
                 if message is not None and attachments is not None:
                     instructions += "\n当前私聊允许自然结束。如果这一轮无需发消息，只输出 [SKIP]，不附带图片、语音或表情。"
+                memory_context = None
                 if message is not None and memory.get("enabled", True):
                     recalled = self.memory.recall(owner, message, recent=recent_user_messages)
                     portrait = self.memory.profiles.context(owner, f"private:{gid}", ["self"])
-                    if portrait or recalled:
-                        seen = {entry["text"] for entry in portrait}
-                        instructions += "\n" + workflow("private_memory_context") + dump({
-                            "profiles": portrait, "memories": [item for item in recalled if item["text"] not in seen],
-                        })
+                    seen = {entry["text"] for entry in portrait}
+                    memory_context = {
+                        "profiles": portrait, "memories": [item for item in recalled if item["text"] not in seen],
+                    }
+                    if any(memory_context.values()):
+                        instructions += "\n" + workflow("private_memory_context") + dump(memory_context)
                 image_refs = []
                 if message is not None and attachments is not None:
                     instructions += "\n" + workflow("image_library")
@@ -517,6 +520,9 @@ class Demo:
                     prompt = dump({"user_message": message, "image_description": description, "image_references": image_refs})
                 elif image_refs:
                     prompt = dump({"user_message": message, "image_references": image_refs})
+                if message is not None and (trace := task_trace(owner)):
+                    trace.event("memory", "private", {"location": "system_prompt", "enabled": memory_context is not None,
+                                                       "injected": memory_context or {}})
                 result = await invoke_agent(agent, history + [{"role": "user", "content": prompt}])
                 final_message = result["messages"][-1]
                 reply = final_message.text[:8000]
@@ -1021,8 +1027,11 @@ class Demo:
                     task = self.timeline.report(owner, int(task_id))
                     if not task:
                         raise web.HTTPNotFound()
+                    task["trace"] = self.timeline.trace_events(owner, int(task_id))
                     return web.json_response(task, headers={"Cache-Control": "no-store"})
-                return web.json_response({"enabled": enabled, "tasks": self.timeline.history(owner) if enabled else [],
+                trace_kind = "memory" if request.query.get("filter") == "memory" else ""
+                return web.json_response({"enabled": enabled,
+                    "tasks": self.timeline.history(owner, limit=50, trace_kind=trace_kind) if enabled else [],
                     "logs": self.timeline.logs(owner) if enabled else []}, headers={"Cache-Control": "no-store"})
             if action == "agent-inbox":
                 if session["mode"] != "account":

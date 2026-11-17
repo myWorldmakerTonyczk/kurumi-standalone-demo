@@ -1075,7 +1075,7 @@ function mountImageLibrary(panel) {
   return () => load();
 }
 
-function mountAgentInbox(panel) {
+function mountAgentInbox(panel, openTask) {
   const toggle = h("input", {type: "checkbox"});
   const status = h("p", {role: "status", class: "caption"});
   const source = h("select", {"aria-label": "邮件来源"}, ...Object.entries({
@@ -1118,7 +1118,8 @@ function mountAgentInbox(panel) {
       if (data.enabled && !items.childElementCount) items.append(h("li", {}, "暂无邮件"));
       logs.replaceChildren(...(data.logs || []).map(entry => h("li", {},
         h("strong", {}, labels[entry.action] || entry.action), " · " + entry.total + " 条",
-        h("small", {}, formatTime(entry.created) + (entry.batch ? " · 批次 " + entry.batch.slice(0, 8) : "")))));
+        h("small", {}, formatTime(entry.created) + (entry.batch ? " · 批次 " + entry.batch.slice(0, 8) : "")),
+        entry.task ? h("button", {type: "button", onclick: () => openTask(entry.task)}, "查看任务 #" + entry.task) : null)));
       if (data.enabled && !logs.childElementCount) logs.append(h("li", {}, "暂无操作记录"));
     } catch (error) {
       if (options.method === "POST") toggle.checked = content.hidden === false;
@@ -1134,13 +1135,106 @@ function mountAgentInbox(panel) {
   return () => load();
 }
 
+function renderTaskTrace(report) {
+  const events = report.trace || [];
+  if (!events.length) return h("p", {class: "caption"}, "这项任务没有详细调试记录。");
+  const models = events.filter(event => event.kind === "model");
+  const tools = events.filter(event => event.kind === "tool");
+  const usage = models.map(event => event.result.usage);
+  const sumTokens = key => {
+    const values = usage.map(item => item?.[key]).filter(Number.isFinite);
+    if (!values.length) return "未返回";
+    return values.reduce((total, value) => total + value, 0) + (values.length < usage.length ? "（部分）" : "");
+  };
+  const displayedUsage = (usage, key) => usage?.[key] ?? "未返回";
+  const elapsed = event => event.ended ? Math.max(0, Math.round((event.ended - event.created) * 1000)) + " ms" : "进行中";
+  const toolNames = tools => (tools || []).map(item => item.function?.name || item.name).filter(Boolean);
+  const states = {running: "执行中", failed: "失败", interrupted: "中断", ok: "完成"};
+  const inboxActions = {read: "收件并标为已读", preview: "预览", mark_unread: "标回未读", mention_read: "已读群聊提及"};
+  const contextActions = {message_trim: "裁剪本轮消息", history_summary: "压缩历史对话", history_trim: "裁剪历史对话"};
+  const roundByCall = new Map();
+  let previousModel;
+  const list = h("ol", {class: "task-trace-events"});
+  for (const event of events) {
+    const input = event.request, output = event.result;
+    let title = event.label, hint = elapsed(event);
+    let fields = [["输入", input], ["结果", output]];
+    if (event.kind === "model") {
+      const round = models.indexOf(event) + 1;
+      const names = toolNames(input.tools);
+      const previous = new Set(toolNames(previousModel?.request.tools));
+      const added = names.filter(name => !previous.has(name));
+      const reissued = previousModel?.state === "failed" && previousModel.label === event.label
+        && JSON.stringify(previousModel.request.messages) === JSON.stringify(input.messages)
+        && JSON.stringify(previousModel.request.tools) === JSON.stringify(input.tools);
+      title = "第 " + round + " 次模型请求 · " + (input.model || event.label) + (reissued ? " · 同一输入再次请求" : "");
+      hint = [hint, names.length + " 个可用工具",
+        "输入 " + displayedUsage(output.usage, "input_tokens") + " / 输出 " + displayedUsage(output.usage, "output_tokens"),
+        output.error, (previousModel && added.length ? "新增 " + added.join("、") : "")].filter(Boolean).join(" · ");
+      for (const message of output.messages || []) {
+        for (const call of message.tool_calls || []) roundByCall.set(call.id, round);
+      }
+      previousModel = event;
+      fields = [["请求消息", input.messages], ["工具定义", input.tools], ["模型返回（含接口提供的推理内容）", output.messages],
+        ["接口用量", output.usage], ["错误详情", output.message]];
+    } else if (event.kind === "tool") {
+      const round = roundByCall.get(input.call_id);
+      title = (round ? "第 " + round + " 次请求 · " : "") + (event.label === "load_tool_group" ? "加载工具组" : "执行 " + event.label);
+      fields = [["调用参数", input.arguments], ["实际返回", output.output], ["错误详情", output.message]];
+    } else if (event.kind === "memory") {
+      const count = Object.values(input.injected).reduce((total, items) => total + items.length, 0);
+      title = count ? "注入 " + count + " 条记忆" : "本轮未注入记忆";
+      hint = input.enabled ? ({system_prompt: "私聊 · 系统提示词", "input.profiles": "群聊 · 输入中的对象画像"}[input.location]) : "长期记忆已关闭";
+      fields = [["注入内容", input.injected]];
+    } else if (event.kind === "inbox") {
+      title = "邮箱 · " + (inboxActions[event.label] || event.label);
+      hint = input.total + " 条";
+      fields = [["操作记录", input]];
+    } else if (event.kind === "context") {
+      title = contextActions[event.label] || event.label;
+      fields = [["上下文处理", input]];
+    } else if (event.kind === "task" || event.kind === "result") {
+      title = event.kind === "task" ? "任务开始 · " + report.label : "任务结束 · " + event.label;
+      hint = input.error || "";
+      fields = [[event.kind === "task" ? "触发信息" : "任务结果", input]];
+    } else if (event.kind === "reference") {
+      title = "关联记录 · " + event.label;
+      hint = input.status || "";
+      fields = [["记录", input]];
+    }
+    const details = h("details", {}, h("summary", {}, title), h("small", {class: "caption"},
+      [hint, states[event.state] === "失败" ? "失败" : ""].filter(Boolean).join(" · ")));
+    details.ontoggle = () => {
+      if (!details.open || details.querySelector(".task-trace-payload")) return;
+      const body = h("div", {class: "task-trace-payload"});
+      for (const [label, value] of fields) {
+        if (value === undefined || value === null || value === "") continue;
+        body.append(h("strong", {}, label), h("pre", {class: "markdown-copy"},
+          typeof value === "string" ? value : JSON.stringify(value, null, 2)));
+      }
+      details.append(body);
+    };
+    list.append(h("li", {class: "task-trace-step" + (event.kind === "tool" ? " task-trace-tool" : "")}, details));
+  }
+  const loaders = tools.filter(event => event.label === "load_tool_group").length;
+  const failedModels = models.filter(event => event.state === "failed").length;
+  const duration = report.started && report.ended ? elapsed({created: report.started, ended: report.ended}) : "—";
+  return h("div", {class: "task-trace"}, h("p", {class: "task-trace-summary"},
+    models.length + " 次模型请求（失败 " + failedModels + "） · " + tools.length + " 次工具执行（加载工具组 " + loaders +
+    "） · 输入 " + sumTokens("input_tokens") + " / 输出 " + sumTokens("output_tokens") + " tokens · " + duration), list);
+}
+
 function mountAgentTimeline(panel) {
+  let focusTask, filter = "";
   const toggle = h("input", {type: "checkbox"});
   const refresh = h("button", {type: "button"}, "刷新");
   const status = h("p", {role: "status", class: "caption"});
   const tasks = h("ul", {class: "agent-inbox-items"});
   const logs = h("ul", {class: "agent-inbox-items"});
-  const content = h("section", {hidden: true}, refresh, tasks, h("details", {}, h("summary", {}, "调试日志"), logs));
+  const filterControl = h("select", {"aria-label": "筛选任务"}, h("option", {value: ""}, "全部任务"),
+    h("option", {value: "memory"}, "记忆注入检查"));
+  const content = h("section", {hidden: true}, filterControl, refresh, tasks,
+    h("details", {}, h("summary", {}, "状态日志"), logs));
   panel.className = "profile-settings";
   const eventFields = Object.entries({liquidation: "模拟强平", stop_loss: "止损成交", take_profit: "止盈成交",
     margin_call: "首次保证金不足", deposit: "追加虚拟资金"}).map(([key, title]) => [key, h("input", {type: "checkbox"}), title]);
@@ -1163,26 +1257,37 @@ function mountAgentTimeline(panel) {
   }
   saveEvents.onclick = () => loadEvents(true);
   panel.append(h("h3", {}, "智能体任务时间线"),
-    h("label", {class: "check"}, toggle, "测试开关：记录并显示任务日志"),
-    h("p", {class: "caption"}, "关闭时仍为智能体保留简短任务记录。"), status, content);
+    h("label", {class: "check"}, toggle, "记录任务调试日志"),
+    h("p", {class: "caption"}, "开启后记录模型请求、工具执行和注入的记忆，保留最近 50 项详细任务。推理内容仅在模型接口返回时显示。关闭时仍保留简短任务记录。"), status, content);
   const labels = {queued: "排队中", running: "执行中", completed: "已完成", skipped: "已跳过",
     failed: "失败", interrupted: "已中断"};
   async function load(enabled) {
     toggle.disabled = refresh.disabled = true;
     try {
-      const data = await api("agent-timeline", enabled === undefined ? {} : {method: "POST", body: {enabled}});
+      const data = await api("agent-timeline", enabled === undefined ? {query: {filter}}
+        : {method: "POST", body: {enabled}, query: {filter}});
       toggle.checked = data.enabled;
       content.hidden = !data.enabled;
-      tasks.replaceChildren(...data.tasks.map(task => {
-        const detail = h("pre", {class: "markdown-copy"});
-        const open = h("details", {}, h("summary", {}, "查看报告"), detail);
+      let visible = data.tasks;
+      if (data.enabled && focusTask && !visible.some(task => task.id === focusTask)) {
+        const report = await api("agent-timeline", {query: {task: focusTask}});
+        visible = [report, ...visible];
+      }
+      tasks.replaceChildren(...visible.map(task => {
+        const detail = h("div", {class: "task-trace-panel"});
+        const open = h("details", {}, h("summary", {}, "查看执行过程"), detail);
         open.ontoggle = async () => {
           if (!open.open) return;
           try {
             const report = await api("agent-timeline", {query: {task: task.id}});
-            detail.textContent = JSON.stringify(report.details, null, 2);
+            detail.replaceChildren(renderTaskTrace(report));
+            if (Object.keys(report.details || {}).length) {
+              detail.append(h("details", {}, h("summary", {}, "任务报告"),
+                h("pre", {class: "markdown-copy"}, JSON.stringify(report.details, null, 2))));
+            }
           } catch (error) { detail.textContent = error.message; }
         };
+        if (task.id === focusTask) open.open = true;
         return h("li", {},
         h("strong", {}, task.label + " · " + labels[task.state]),
         h("small", {}, "#" + task.id + " · " + formatTime(task.created)),
@@ -1203,7 +1308,14 @@ function mountAgentTimeline(panel) {
   }
   toggle.onchange = () => load(toggle.checked);
   refresh.onclick = () => load();
-  return () => { load(); loadEvents(); };
+  filterControl.onchange = () => { filter = filterControl.value; focusTask = undefined; load(); };
+  return ({task, memory = false} = {}) => {
+    focusTask = task;
+    filter = memory ? "memory" : "";
+    filterControl.value = filter;
+    load();
+    loadEvents();
+  };
 }
 
 export function mountAdvanced(container) {
@@ -1217,7 +1329,7 @@ export function mountAdvanced(container) {
   const debounce = document.createElement("div");
   const inbox = document.createElement("section");
   const inboxTab = h("button", {type: "button"}, "智能体邮箱");
-  const loadInbox = mountAgentInbox(inbox);
+  const loadInbox = mountAgentInbox(inbox, task => openTimeline({task}));
   const timeline = document.createElement("section");
   const timelineTab = h("button", {type: "button"}, "任务时间线");
   const loadTimeline = mountAgentTimeline(timeline);
@@ -1238,6 +1350,7 @@ export function mountAdvanced(container) {
   memoryTab.textContent = "记忆模组";
   const loadStickers = stickerTab.onclick;
   const loadMemory = mountMemory(memory);
+  memory.prepend(h("button", {type: "button", onclick: () => openTimeline({memory: true})}, "查看记忆注入日志"));
   const logTab = document.createElement("button");
   logTab.type = "button";
   logTab.textContent = "模型调用日志";
@@ -1249,13 +1362,18 @@ export function mountAdvanced(container) {
   }], [logTab, logs, loadLogs], [imageTab, images, loadImages], [debounceTab, debounce, debounceTab.onclick],
       [inboxTab, inbox, loadInbox], [timelineTab, timeline, loadTimeline]];
   let active = 0;
-  function select() {
+  function openTimeline(options) {
+    active = tabs.findIndex(([button]) => button === timelineTab);
+    select(options);
+  }
+  function select(options) {
     tabs.forEach(([button, panel], i) => {
       panel.hidden = i !== active;
       button.classList.toggle("active", i === active);
       button.setAttribute("aria-pressed", String(i === active));
     });
-    tabs[active][2]();
+    if (tabs[active][0] === timelineTab) loadTimeline(options);
+    else tabs[active][2]();
   }
   tabs.forEach(([button], i) => {
     button.onclick = () => { active = i; select(); };

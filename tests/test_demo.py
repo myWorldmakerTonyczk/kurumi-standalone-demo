@@ -58,6 +58,11 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(saved.status, 200, await saved.text())
                             too_long = await user.post("/api/profile", json=dict(persona=persona + "超"))
                             self.assertEqual(too_long.status, 400, await too_long.text())
+                            if name == "甲":
+                                initial_trace = await (await user.get("/api/agent-timeline")).json()
+                                self.assertFalse(initial_trace["enabled"])
+                                response = await user.post("/api/agent-timeline", json={"enabled": True})
+                                self.assertEqual(response.status, 200, await response.text())
                             for message in ("第一条", "第二条"):
                                 reply = await user.post("/api/chat", json=dict(message=message))
                                 self.assertEqual(reply.status, 200, await reply.text())
@@ -68,6 +73,15 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
                             self.assertTrue(any(persona in message["content"] for message in requests[-1][1]["messages"]
                                                 if isinstance(message.get("content"), str)))
                             self.assertEqual(len(state["chat"]), 4)
+                            if name == "甲":
+                                trace_list = await (await user.get("/api/agent-timeline", params={"filter": "memory"})).json()
+                                self.assertTrue(trace_list["tasks"])
+                                detail = await user.get("/api/agent-timeline", params={"task": trace_list["tasks"][0]["id"]})
+                                self.assertEqual(detail.status, 200, await detail.text())
+                                events = (await detail.json())["trace"]
+                                memory_event = next(event for event in events if event["kind"] == "memory")
+                                self.assertEqual(memory_event["request"]["location"], "system_prompt")
+                                self.assertTrue(any(event["kind"] == "model" for event in events))
                             if name == "乙":
                                 gid = state["state"]["game"]["id"]
                                 demo.db.executemany("INSERT INTO demo_chat(game,role,content) VALUES(?,?,?)",
