@@ -103,6 +103,16 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("已收到", decisions)
                         self.assertEqual(decisions["已收到"]["outcome"], "已成交")
                         self.assertEqual(decisions["已收到"]["operations"], 1)
+                        failed_job = decisions["已收到"]["job"]
+                        demo.db.execute(
+                            "UPDATE decision_jobs SET state='failed', result='', error=? WHERE id=?",
+                            ("看盘任务未完成", failed_job),
+                        )
+                        replay = await review(demo, game["id"], pair="USD/JPY", include_candles=False)
+                        recorded = next(event for event in replay["events"] if event["id"] == f"job-{failed_job}")
+                        self.assertEqual(recorded["outcome"], "已成交")
+                        self.assertEqual(recorded["operations"], 1)
+                        self.assertEqual(recorded["text"], "")
                         self.assertEqual(decisions["旧记录"]["outcome"], "已完成，无成交记录")
                         self.assertEqual(decisions["旧记录"]["operations"], 0)
                         self.assertEqual(requests[-1][0], "Bearer test-key-"+"甲".encode().hex())

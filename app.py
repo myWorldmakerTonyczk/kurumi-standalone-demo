@@ -35,7 +35,7 @@ from src.agent.mcp.registry import flatten, user_workspace_groups
 from src.agent.workflow import agent_real_name, character_persona, persona_body, social_system_prompt, workflow
 from src.agent.chat_debounce import debounce_config
 from src.agent.social import Social, social_config
-from src.agent.call_logs import CallLogs
+from src.agent.call_logs import CallLogs, CallTrace
 from src.agent.stickers import Stickers
 from src.agent.memory import MEMORY_DAYS, Memory
 from src.portal.community import Community, community_image
@@ -46,6 +46,7 @@ from src.agent.decision_settings import settings as rest_settings
 from src.core.availability import automatic_break
 from src.core.replay import review
 from src.core.replay_records import decision_scope
+from src.diary.store import redact
 from src.diary.settings import settings as diary_settings, bounds, due_before
 from src.notifications.settings import validate as notice_settings, delivery_time
 from src.portal.server import ASSETS, SECURITY_HEADERS
@@ -172,9 +173,17 @@ class Demo:
         scope = decision_scope.set((game["id"], cursor.lastrowid))
         try:
             reply = await self._agent(game)
-        except BaseException:
+        except BaseException as exc:
             self.db.execute("UPDATE decision_jobs SET state='failed',updated=?,error=? WHERE id=?",
                             (time.time(), "看盘任务未完成", cursor.lastrowid))
+            if isinstance(exc, Exception):
+                trace = CallTrace(self.call_logs, game["owner_id"], "watch")
+                details = redact(trace.clean("".join(traceback.format_exception(exc))))
+                logging.getLogger("kurumi").error(
+                    "看盘任务异常 job=%s game=%s trigger=%s %s\n%s",
+                    cursor.lastrowid, game["id"], "manual" if manual else "scheduled",
+                    trace.error_label(exc), details,
+                )
             raise
         finally:
             decision_scope.reset(scope)

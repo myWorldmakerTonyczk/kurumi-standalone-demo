@@ -118,31 +118,31 @@ async def review(plugin, gid, pair="", days=1, end=0, *, private=True, include_c
         ):
             jid, action, status = row
             job_operations[jid].append((action, status))
+    operation_types = {"open", "close", "protect", "plan", "borrow", "repay"}
     for jid, trigger, status, created, updated, result, error, risks in jobs[:300]:
         operations = job_operations[jid]
         if status in {"success", "failed"} and updated > end:
             status, result, error = "running", "", ""
         completed = json.loads(result) if result else {}
+        actions = {action for action, state in operations if state == "success"}
         outcome = ""
-        if status == "success":
-            actions = {action for action, state in operations if state == "success"}
-            if actions & {"open", "close"}:
-                outcome = "已成交"
-            elif any(state == "rejected" for _, state in operations):
-                outcome = "操作未执行"
-            elif "observe" in actions:
-                outcome = "已记录观望"
-            else:
-                outcome = "已完成，无成交记录"
+        if actions & {"open", "close"}:
+            outcome = "已成交"
+        elif "observe" in actions:
+            outcome = "已记录观望"
+        elif actions & operation_types:
+            outcome = "已完成操作"
+        elif status == "success":
+            outcome = ("操作未执行" if any(state == "rejected" for _, state in operations)
+                       else "已完成，无成交记录")
         summary = completed.get("summary", "")
         events.append(dict(
             id=f"job-{jid}", job=jid, time=created, bar=bucket(created, period, provider),
             action="review", actor="ai", status=status, reason=trigger,
-            text=redact(error or summary), outcome=outcome,
+            text=redact(summary or (error if not outcome else "")), outcome=outcome,
             elapsed=round(max(0, updated - created)) if status in {"success", "failed"} else None,
             tools=completed.get("tool_calls") or [],
-            operations=sum(state == "success" and action in {"open", "close", "protect", "plan", "borrow", "repay"}
-                           for action, state in operations),
+            operations=sum(state == "success" and action in operation_types for action, state in operations),
             related=[f"log-{x['id']}" for x in json.loads(risks) if "id" in x],
         ))
     baseline = db.execute(

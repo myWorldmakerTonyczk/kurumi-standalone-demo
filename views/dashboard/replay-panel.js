@@ -23,6 +23,7 @@ const toolNames = {
 };
 const taskKind = event => event.outcome === "已成交" ? "fill"
   : event.outcome === "已记录观望" ? "observe"
+  : event.outcome === "已完成操作" ? "idle"
   : ["failed", "interrupted", "cancelled"].includes(event.status) || event.outcome === "操作未执行" ? "fail"
   : (event.outcome === "已完成，无成交记录" || event.status === "success") ? "idle" : "other";
 const fill = (event) => event.price != null && event.status === "success";
