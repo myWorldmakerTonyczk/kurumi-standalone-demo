@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import ClassVar
+from unittest.mock import patch
 
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -22,6 +23,41 @@ class TrackingModel(FakeMessagesListChatModel):
 
 
 class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_watch_records_observation_only_without_an_existing_outcome(self):
+        import time
+        from src.users.ownership import issue_id
+
+        with tempfile.TemporaryDirectory() as root:
+            app = Demo(Path(root) / "test.sqlite3")
+            try:
+                owner = await app.accounts.create_web_user("watch-test", "temporary-test-password")
+                token = issue_id(app.db, owner)
+                game = app.engine.create({"user_binding": {"type": "random", "values": [token]}})
+                gid = game["id"]
+                app.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)",
+                               (owner, json.dumps({"url": "https://example.com/v1", "model": "test", "key": "test-key"})))
+                for pair, bid, ask in [("EUR/USD", "1.1000", "1.1002"), ("USD/JPY", "150", "150.02")]:
+                    app.engine.quotes[pair] = dict(bid=bid, ask=ask, timestamp=time.time(), tradeable=True)
+
+                observe = ("record_observation", {"reason": "tool observation"})
+                opening = ("open_trade", {"side": "buy", "units": 100, "reason": "simulated trade"})
+                for calls, expected in [([], ["observe"]), ([observe, observe], ["observe"]), ([opening, observe], ["open"])]:
+                    with self.subTest(calls=calls):
+                        count = len(app.engine.logs(gid))
+                        responses = [AIMessage(content="", tool_calls=[dict(name=name, args=args, id=f"call-{index}")])
+                                     for index, (name, args) in enumerate(calls)]
+                        responses.append(AIMessage(content="Final watch summary"))
+                        with patch("app.model_client", return_value=TrackingModel(responses=responses)):
+                            reply = await app.run_decision(app.engine.get(gid))
+                        self.assertEqual(reply, "Final watch summary")
+                        added = app.engine.logs(gid)[:len(app.engine.logs(gid)) - count]
+                        self.assertEqual([entry["action"] for entry in added], expected)
+                        if calls == [observe, observe]:
+                            self.assertEqual(added[0]["reason"], "tool observation")
+            finally:
+                await app.timeline.close()
+                app.db.close()
+
     async def test_same_turn_load_and_no_carry_to_next_turn(self):
         def read_example(peek: bool = False) -> str:
             """Inspect an example."""

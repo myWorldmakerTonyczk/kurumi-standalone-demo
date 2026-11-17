@@ -33,6 +33,7 @@ from src.agent.task_trace_middleware import TraceTools
 from src.agent.task_schedule import ACCOUNT_EVENTS, TaskSchedule
 from src.agent.mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups, tool_name
 from src.agent.mcp.registry import flatten, user_workspace_groups
+from src.agent.mcp.trading.execution import WATCH_OUTCOME_ACTIONS
 from src.agent.workflow import agent_real_name, character_persona, persona_body, social_system_prompt, workflow
 from src.agent.chat_debounce import debounce_config
 from src.agent.social import Social, social_config
@@ -417,6 +418,7 @@ class Demo:
             state = public_snapshot(self, gid, 4)
             revision = state["game"].get("action_revision", 0)
             filled = False
+            watch_actions = set() if message is None and diary_prompt is None else None
 
             async def open_trade(side: str, units: int, reason: str) -> str:
                 """Submit one paper EUR/USD order. Side is buy or sell. Supply a short reason."""
@@ -462,7 +464,7 @@ class Demo:
                 groups = user_workspace_groups(self, gid, revision=revision, attachments=attachments, user_image=user_image,
                     writable=not readonly and diary_prompt is None and game["status"] == "running"
                     and (message is None or self.accounts.trade_allowed(game)),
-                    message_ids=[entry[0] for entry in chat_messages], diary=diary_prompt is not None,
+                    message_ids=[entry[0] for entry in chat_messages], diary=diary_prompt is not None, watch_actions=watch_actions,
                     handoff=message is None and diary_prompt is None and self.external.settings(owner)["mode"] == "platform")
                 tools = flatten(groups)
                 instructions = workflow("private") + "\n" + workflow("forum_authorship")
@@ -596,8 +598,9 @@ class Demo:
                         self.memory.include_private_history(owner, gid)
                         self.memory.last_seen[key] = asyncio.get_running_loop().time()
                         self.memory.start(*key, chosen, self.model_url)
-            elif not readonly and game["status"] == "running":
-                await execute(self, gid, "observe", {"reason": reply[:500] or "完成定时看盘"}, already_locked=True)
+            elif (not readonly and game["status"] == "running" and not filled
+                  and WATCH_OUTCOME_ACTIONS.isdisjoint(watch_actions) and reply.strip() and reply.strip() != "[SKIP]"):
+                await execute(self, gid, "observe", {"reason": reply[:500]}, already_locked=True)
             return reply
 
     def reports(self, game):
