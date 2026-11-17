@@ -89,6 +89,36 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_call["read"], "inbox")
         self.assertEqual(by_call["trade"], "trade")
 
+    async def test_timeline_tools_run_on_the_database_thread(self):
+        from src.agent.mcp.registry import timeline_group
+
+        with tempfile.TemporaryDirectory() as root:
+            app = Demo(Path(root) / "test.sqlite3")
+            try:
+                owner = await app.accounts.create_web_user("timeline-tools", "temporary-test-password")
+
+                async def complete():
+                    return "done"
+
+                task_id, finished = app.timeline.enqueue(owner, "private_followup", complete)
+                await finished
+                model = TrackingModel(responses=[
+                    AIMessage(content="", tool_calls=[
+                        dict(name="query_task_timeline", args={"limit": 10}, id="query"),
+                        dict(name="get_task_report", args={"task_id": task_id}, id="report"),
+                    ]),
+                    AIMessage(content="done"),
+                ])
+                agent = create_agent(model, tools=timeline_group(app, owner))
+                result = await agent.ainvoke({"messages": [("user", "check the reminder")]})
+                by_call = {message.tool_call_id: json.loads(message.content)
+                           for message in result["messages"] if message.type == "tool"}
+                self.assertEqual(by_call["query"]["items"][0]["id"], task_id)
+                self.assertEqual(by_call["report"]["state"], "completed")
+            finally:
+                await app.timeline.close()
+                app.db.close()
+
     async def test_patrol_inbox_tools_use_the_current_account(self):
         with tempfile.TemporaryDirectory() as root:
             app = Demo(Path(root) / "inbox.sqlite3")
