@@ -52,6 +52,10 @@ def dump(value):
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+class QuoteUnavailable(ValueError):
+    pass
+
+
 class Engine:
     def __init__(self, path):
         self.db = sqlite3.connect(path, isolation_level=None)
@@ -161,7 +165,7 @@ class Engine:
         return [
             dict(id=r[0], **json.loads(r[1]))
             for r in self.db.execute(
-                "SELECT seq,data FROM logs WHERE game=? AND seq<? AND (?='' OR json_extract(data,'$.detail.position.pair')=?) ORDER BY seq DESC LIMIT ?",
+                "SELECT seq,data FROM logs WHERE game=? AND seq<? AND (?='' OR coalesce(json_extract(data,'$.detail.position.pair'),json_extract(data,'$.detail.order.pair'))=?) ORDER BY seq DESC LIMIT ?",
                 (gid, int(before), pair, pair, min(100, max(1, int(limit)))),
             )
         ]
@@ -409,7 +413,7 @@ class Engine:
     def quote(self, pair):
         q = self.quotes.get(pair)
         if not q or time.time() - q["timestamp"] > 30 or q.get("tradeable") is not True:
-            raise ValueError(f"{pair} 行情过期、休市或尚未连接，暂停成交")
+            raise QuoteUnavailable(f"{pair} 行情过期、休市或尚未连接，暂停成交")
         return q
 
     def convert(self, amount, currency):
@@ -482,51 +486,90 @@ class Engine:
             game, source, "close", reason, dict(position=p, fee=str(fee), kind=kind)
         )
 
-    def trade(self, game, body, source, reason):
+    @staticmethod
+    def order_terms(game, body):
         pair, side = body.get("pair"), body.get("side")
         if pair not in game["pairs"] or side not in ("buy", "sell"):
             raise ValueError("品种未授权或交易方向无效")
         leverage = positive(body.get("leverage", game["leverage"]))
         if leverage > number(game["leverage"]):
             raise ValueError("本次杠杆超过游戏上限")
+        return pair, side, leverage
+
+    @staticmethod
+    def protection_prices(body, side, entry):
+        sl = str(positive(body["sl"])) if body.get("sl") else ""
+        tp = str(positive(body["tp"])) if body.get("tp") else ""
+        if sl and ((side == "buy" and number(sl) >= entry) or (side == "sell" and number(sl) <= entry)):
+            raise ValueError("止损必须位于亏损方向")
+        if tp and ((side == "buy" and number(tp) <= entry) or (side == "sell" and number(tp) >= entry)):
+            raise ValueError("止盈必须位于盈利方向")
+        return sl, tp
+
+    def trade(self, game, body, source, reason, *, order=None):
+        pair, side, leverage = self.order_terms(game, body)
         q = self.quote(pair)
         entry = number(q["ask"] if side == "buy" else q["bid"])
         if body.get("margin"):
             units = positive(body["margin"]) * leverage / self.convert(entry, pair[4:])
         else:
             units = positive(body.get("units"))
-        sl = str(positive(body["sl"])) if body.get("sl") else ""
-        tp = str(positive(body["tp"])) if body.get("tp") else ""
-        if sl and (
-            (side == "buy" and number(sl) >= entry)
-            or (side == "sell" and number(sl) <= entry)
-        ):
-            raise ValueError("止损必须位于亏损方向")
-        if tp and (
-            (side == "buy" and number(tp) <= entry)
-            or (side == "sell" and number(tp) >= entry)
-        ):
-            raise ValueError("止盈必须位于盈利方向")
+        sl, tp = self.protection_prices(body, side, entry)
         notional = self.convert(units * entry, pair[4:])
         fee = notional * number(game["fee_rate"])
-        p = dict(
-            id=uuid.uuid4().hex,
-            pair=pair,
-            side=side,
-            units=str(units),
-            entry=str(entry),
-            leverage=str(leverage),
-            sl=sl,
-            tp=tp,
-            reason=reason,
-            created=time.time(),
-        )
-        game["balance"] = str(number(game["balance"]) - fee)
-        game["fees"] = str(number(game["fees"]) + fee)
-        game["positions"].append(p)
-        if number(self.valuation(game)["free"]) < 0:
+        p = dict(id=uuid.uuid4().hex, pair=pair, side=side, units=str(units),
+                 entry=str(entry), leverage=str(leverage), sl=sl, tp=tp, reason=reason, created=time.time())
+        updated = dict(balance=str(number(game["balance"]) - fee),
+                       fees=str(number(game["fees"]) + fee), positions=[*game["positions"], p])
+        if number(self.valuation(game | updated)["free"]) < 0:
             raise ValueError("可用保证金不足，未成交")
-        self.log(game, source, "open", reason, dict(position=p, fee=str(fee)))
+        game.update(updated)
+        detail = dict(position=p, fee=str(fee))
+        if order:
+            detail.update(order_id=order["id"], limit_price=order["limit_price"])
+        self.log(game, source, "open", reason, detail)
+
+    def place_limit_order(self, game, body, source, reason):
+        pair, side, leverage = self.order_terms(game, body)
+        price = positive(body.get("limit_price"))
+        sl, tp = self.protection_prices(body, side, price)
+        size = "margin" if body.get("margin") else "units"
+        orders = game.setdefault("orders", [])
+        if len(orders) >= 50:
+            raise ValueError("最多可保留 50 笔未成交限价单")
+        order = dict(id=uuid.uuid4().hex, pair=pair, side=side, leverage=str(leverage),
+                     limit_price=str(price), sl=sl, tp=tp, reason=reason, source=source, created=time.time())
+        order[size] = str(positive(body.get(size)))
+        orders.append(order)
+        self.log(game, source, "place_limit_order", reason, {"order": order})
+        return order["id"]
+
+    def cancel_limit_order(self, game, order_id, source, reason):
+        orders = game.get("orders", [])
+        order = next((item for item in orders if item["id"] == order_id and "limit_price" in item), None)
+        if not order:
+            raise ValueError("未找到等待成交的限价单")
+        orders.remove(order)
+        self.log(game, source, "cancel_limit_order", reason, {"order": order})
+
+    def fill_limit_orders(self, game):
+        for order in list(game.get("orders", [])):
+            if "limit_price" not in order or (order["source"] == "ai" and game["status"] != "running"):
+                continue
+            try:
+                quote = self.quote(order["pair"])
+                buying = order["side"] == "buy"
+                price = number(quote["ask" if buying else "bid"])
+                limit = number(order["limit_price"])
+                if (buying and price > limit) or (not buying and price < limit):
+                    continue
+                self.trade(game, order, order["source"], order["reason"], order=order)
+            except QuoteUnavailable:
+                continue
+            except ValueError as exc:
+                self.log(game, order["source"], "place_limit_order", order["reason"],
+                         {"order": order, "error": str(exc)}, status="rejected")
+            game["orders"].remove(order)
 
     def action(self, gid, action, body, source="human", key=None):
         try:
@@ -564,8 +607,13 @@ class Engine:
             if action in ("open", "close", "deposit", "borrow", "repay"):
                 self.settle_interest(game)
                 self.mark(game)
+            order_id = None
             if action == "open":
                 self.trade(game, body, source, reason)
+            elif action == "place_limit_order":
+                order_id = self.place_limit_order(game, body, source, reason)
+            elif action == "cancel_limit_order":
+                self.cancel_limit_order(game, body.get("order_id"), source, reason)
             elif action == "close":
                 self.close_position(game, body.get("position"), reason, source)
             elif action == "protect":
@@ -672,6 +720,8 @@ class Engine:
             if action in {"open", "close", "deposit", "borrow", "repay"}:
                 sample(self.db, game, force=True)
             result = {"ok": True, "revision": game["revision"], "request_id": key}
+            if order_id:
+                result.update(order_id=order_id, state="waiting")
             self.db.execute(
                 "INSERT INTO requests VALUES(?,?,?)", (gid, key, dump(result))
             )
@@ -706,6 +756,7 @@ class Engine:
                 return
             self.settle_interest(game)
             original_positions = dump(game["positions"])
+            original_orders = len(game.get("orders", []))
             original_status = game["status"]
             for p in list(game["positions"]):
                 q = self.quote(p["pair"])
@@ -775,6 +826,9 @@ class Engine:
             if outcome:
                 for p in list(game["positions"]):
                     self.close_position(game, p["id"], "游戏结束结算", "system")
+                for order in list(game.get("orders", [])):
+                    if "limit_price" in order:
+                        self.cancel_limit_order(game, order["id"], "system", "本局结束，取消限价单")
                 game["status"], game["outcome"], game["auto"] = "ended", outcome, False
                 self.mark(game)
                 self.log(
@@ -784,14 +838,17 @@ class Engine:
                     "触发游戏结束条件",
                     {"outcome": outcome, "bankrupt": eq <= 0},
                 )
+            elif game.get("orders"):
+                previous_count = len(game["positions"])
+                self.fill_limit_orders(game)
+                if len(game["positions"]) != previous_count:
+                    self.mark(game)
             game["revision"] += 1
-            if (
-                original_positions != dump(game["positions"])
-                or original_status != game["status"]
-            ):
+            changed = original_positions != dump(game["positions"]) or original_status != game["status"]
+            if changed or original_orders != len(game.get("orders", [])):
                 game["action_revision"] = game.get("action_revision", 0) + 1
             self.save(game)
-            sample(self.db, game, force=original_positions != dump(game["positions"]) or original_status != game["status"])
+            sample(self.db, game, force=changed)
 
     def snapshot(self, gid, log_limit=50):
         game = self.get(gid)

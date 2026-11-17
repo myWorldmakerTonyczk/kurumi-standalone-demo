@@ -11,7 +11,8 @@ RECORD_VOICE = (
     "价格、数量、触发条件和成交结果写准确。"
 )
 
-WRITE_ACTIONS = {"open", "close", "protect", "observe", "plan", "borrow", "repay"}
+WRITE_ACTIONS = {"open", "close", "protect", "observe", "plan", "borrow", "repay",
+                 "place_limit_order", "cancel_limit_order"}
 
 
 def lock_for(plugin, gid):
@@ -35,7 +36,7 @@ def public_snapshot(plugin, gid, log_limit=30, include_details=False):
         game = result["game"]
         keys = ("id", "name", "currency", "initial", "balance", "invested", "fees", "pairs", "leverage",
                 "fee_rate", "rules", "status", "drawdown", "loan_enabled", "loan_limit",
-                "loan_principal", "loan_interest", "interval", "action_revision")
+                "loan_principal", "loan_interest", "interval", "action_revision", "orders")
         result["game"] = {key: game[key] for key in keys if key in game}
         plan = game.get("plan", "")
         result["game"]["plan"] = plan if len(plan) <= 500 else plan[:500] + "…"
@@ -83,6 +84,8 @@ async def execute(plugin, gid, action, body, *, already_locked=False):
         # The synchronous action appends its audit entry before returning.
         entry = plugin.engine.logs(gid, limit=1)[0]
         receipt = dict(action=action, revision=result["revision"], log_id=entry["id"], currency=plugin.engine.get(gid)["currency"])
+        if action == "place_limit_order":
+            receipt.update(order_id=result["order_id"], state=result["state"])
         if action not in {"plan", "observe"}:
             receipt.update(balance=entry["balance"], detail=entry["detail"])
         return receipt

@@ -175,6 +175,8 @@ const labels = {
   loan_interest: "贷款计息",
   create: "创建游戏",
   open: "开仓",
+  place_limit_order: "提交限价单",
+  cancel_limit_order: "撤销限价单",
   close: "平仓",
   deposit: "追加本金",
   pause: "暂停",
@@ -527,7 +529,7 @@ async function post(route, body) {
     .forEach((b) => (b.disabled = true));
   try {
     const r = await bridge.apiPost(route, body);
-    message(r.message || "操作已完成");
+    message(r.message || (r.state === "waiting" ? "限价单已提交，等待符合条件的报价" : "操作已完成"));
     return r;
   } catch (e) {
     message(e.message || "操作失败", true);
@@ -548,7 +550,7 @@ async function post(route, body) {
 async function action(name, params) {
   const control = {pause: "pause", resume: "pause", borrow: "loan", repay: "loan"}[name];
   if (remote && (control ? !state?.controls?.[control]
-    : !state?.current?.game.trade || !["open", "close", "protect"].includes(name))) {
+    : !state?.current?.game.trade || !["open", "close", "protect", "place_limit_order", "cancel_limit_order"].includes(name))) {
     message("管理员已禁止此操作", true);
     return;
   }
@@ -745,6 +747,7 @@ function render() {
   $("loan").closest(".loan-panel").hidden = remote && !state.controls?.loan;
   $("pause-automation").disabled = g.status === "ended";
   renderPositions(g, v, selected.market_error);
+  renderLimitOrders(g);
   renderWatch();
   const lev = $("order-leverage");
   lev.max = g.leverage;
@@ -758,9 +761,6 @@ function render() {
     : "本局未开启虚拟借款";
   $("loan-info").textContent =
     `待还 ¥${money(v?.debt || 0)} · 本金上限 ¥${money(g.loan_limit || Number(g.initial) * 2)} · 日利率 ${(Number(g.loan_rate || 0.0001) * 100).toFixed(2)}%（真实时间）`;
-  $("trade")
-    .querySelectorAll("button[type=submit]")
-    .forEach((b) => (b.disabled = g.status === "ended" || !v));
   $("loan")
     .querySelectorAll("button[type=submit]")
     .forEach(
@@ -867,8 +867,9 @@ function submit(id, handler) {
 }
 submit("trade", async (p, button) => {
   p.side = button?.value || "buy";
-  if (!p.reason) p.reason = "人类手动市价单";
-  await action("open", p);
+  const limit = $("order-type").value === "limit";
+  if (!p.reason) p.reason = limit ? "人类手动限价单" : "人类手动市价单";
+  await action(limit ? "place_limit_order" : "open", p);
 });
 submit("deposit", async (p) => {
   await action("deposit", { ...p, reason: "人类追加虚拟本金" });
@@ -1031,6 +1032,43 @@ function renderPositions(g, v, error) {
       ),
     );
 }
+function renderLimitOrders(game) {
+  const target = $("limit-orders");
+  const orders = (game.orders || []).filter(order => order.limit_price);
+  target.hidden = !orders.length;
+  if (!orders.length) {
+    target.replaceChildren();
+    return;
+  }
+  const entries = orders.map(order => {
+    const cancel = node("button", "撤单");
+    cancel.type = "button";
+    cancel.disabled = (remote && !game.trade) || game.status === "ended";
+    cancel.onclick = async () => {
+      if (!await confirmAction({title: "撤销限价单", message: "确认撤销这笔 " + order.pair + " 限价单？", confirmText: "撤单"})) return;
+      cancel.disabled = true;
+      try {
+        await action("cancel_limit_order", {order_id: order.id, reason: "人类手动撤销限价单"});
+      } catch (error) {
+        if (!error.noticeShown) tradingNotices.failed(error.message);
+      } finally {
+        if (cancel.isConnected) cancel.disabled = false;
+      }
+    };
+    const size = order.margin ? "保证金 ¥" + money(order.margin) : "数量 " + order.units;
+    const origin = order.source === "ai" ? "智能体" : "手动";
+    const row = node("div", undefined, "limit-order-row");
+    const description = node("div");
+    description.append(
+      node("strong", order.pair + " · " + (order.side === "buy" ? "限价买入" : "限价卖出") + " " + order.limit_price),
+      node("p", size + " · " + origin + (order.source === "ai" && game.status === "paused" ? " · 已暂停" : " · 待成交"), "caption"),
+      order.sl || order.tp ? node("p", "止损 " + (order.sl || "—") + " · 止盈 " + (order.tp || "—"), "caption") : "",
+    );
+    row.append(description, cancel);
+    return row;
+  });
+  target.replaceChildren(node("h3", "待成交限价单"), ...entries);
+}
 function estimate() {
   const g = state?.current?.game;
   if (!g) return;
@@ -1039,6 +1077,17 @@ function estimate() {
     pair = $("trade-pair").value,
     q = state.current.quotes[pair];
   $("leverage-value").textContent = `${lev}×`;
+  const limit = $("order-type").value === "limit";
+  $("limit-price-label").hidden = !limit;
+  form.elements.limit_price.disabled = !limit;
+  form.elements.limit_price.required = limit;
+  for (const button of form.querySelectorAll("button[type=submit]")) {
+    const blocked = remote && !g.trade;
+    button.disabled = posting || (!blocked && (g.status === "ended" || (!limit && !state.current.valuation)));
+    button.dataset.permissionDisabled = String(button.disabled && !posting);
+    button.textContent = button.value === "buy"
+      ? (limit ? "提交限价买单" : "↗ 做多 / 买入") : (limit ? "提交限价卖单" : "↘ 做空 / 卖出");
+  }
   const marginMode = $("order-mode").value === "margin";
   $("margin-label").hidden = !marginMode;
   $("units-label").hidden = marginMode;
@@ -1046,7 +1095,8 @@ function estimate() {
   form.elements.units.disabled = marginMode;
   const mid = quote => quote?.tradeable ? (Number(quote.bid) + Number(quote.ask)) / 2 : NaN;
   const yenPerDollar = mid(state.current.quotes["USD/JPY"]);
-  const unitJPY = pair.startsWith("USD/") ? yenPerDollar : mid(q) * yenPerDollar;
+  const price = limit && form.elements.limit_price.value ? Number(form.elements.limit_price.value) : mid(q);
+  const unitJPY = pair === "USD/JPY" && limit ? price : pair.startsWith("USD/") ? yenPerDollar : price * yenPerDollar;
   const notional = marginMode
     ? Number(form.elements.margin.value) * lev
     : Number(form.elements.units.value) * unitJPY;
@@ -1059,6 +1109,7 @@ function estimate() {
 $("trade").addEventListener("input", estimate);
 $("trade-pair").onchange = estimate;
 $("order-mode").onchange = estimate;
+$("order-type").onchange = estimate;
 $("order-max").onclick = () => {
   const v = state?.current?.valuation,
     g = state?.current?.game;

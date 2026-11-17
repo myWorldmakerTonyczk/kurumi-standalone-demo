@@ -2503,3 +2503,8 @@ body.community-groups-collapsed .workspace > main { grid-column: 1; }
 .task-trace-tool { margin-inline-start: .75rem; }
 .task-trace-payload { margin: .5rem 0 .6rem 1rem; min-width: 0; }
 .task-trace-panel pre { margin: .35rem 0 .6rem; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.limit-order-row { display: flex; justify-content: space-between; align-items: center; gap: .8rem; padding-block: .65rem; }
+.limit-order-row + .limit-order-row { border-block-start: 1px solid var(--line, #dfcedc); }
+.limit-order-row p { margin: .3rem 0 0; }
+.limit-order-row button { flex-shrink: 0; }

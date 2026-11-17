@@ -257,7 +257,8 @@ class Dashboard:
             game.update(auto=body.get("auto") is True, interval=max(30, int(body.get("interval", 3600))))
             self.engine.save(game)
             self.demo.accounts.allow_trade(gid, body.get("portal_trade") is True)
-        elif name in {"open", "close", "protect", "deposit", "pause", "resume", "borrow", "repay", "start", "plan", "notes"}:
+        elif name in {"open", "close", "protect", "deposit", "pause", "resume", "borrow", "repay", "start", "plan", "notes",
+                      "place_limit_order", "cancel_limit_order"}:
             async with lock_for(self.demo, gid):
                 return self.engine.action(gid, name, params, "human", body.get("request_id"))
         else:

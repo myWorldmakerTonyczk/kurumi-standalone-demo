@@ -34,6 +34,43 @@ class LedgerTests(unittest.TestCase):
         p.update(kwargs)
         return self.e.action(self.gid, "open", p)
 
+    def test_limit_orders_fill_at_favorable_quotes_only_once(self):
+        order = dict(pair="EUR/USD", units="1000", reason="limit", side="buy", limit_price="1.1001")
+        placed = self.e.action(self.gid, "place_limit_order", order, key="same")
+        self.assertEqual(placed, self.e.action(self.gid, "place_limit_order", order, key="same"))
+        self.e.action(self.gid, "place_limit_order", order | {"side": "sell", "limit_price": "1.1003"})
+        self.e.tick(self.gid)
+        self.assertFalse(self.e.get(self.gid)["positions"])
+        self.quote("EUR/USD", "1.0998", "1.0999", age=40)
+        self.e.tick(self.gid)
+        self.assertEqual(len(self.e.get(self.gid)["orders"]), 2)
+        self.quote("EUR/USD", "1.0998", "1.0999")
+        self.e.tick(self.gid)
+        self.e.tick(self.gid)
+        self.assertEqual([p["entry"] for p in self.e.get(self.gid)["positions"]], ["1.0999"])
+        self.quote("EUR/USD", "1.1004", "1.1005")
+        self.e.tick(self.gid)
+        game = self.e.get(self.gid)
+        self.assertEqual([p["entry"] for p in game["positions"]], ["1.0999", "1.1004"])
+        self.assertEqual(game["orders"], [])
+
+    def test_limits_respect_pause_cancel_and_insufficient_margin(self):
+        order = dict(pair="EUR/USD", units="1000", reason="limit", side="buy", limit_price="1.1002")
+        ai = self.e.action(self.gid, "place_limit_order", order, "ai")
+        self.e.action(self.gid, "pause", {})
+        self.e.action(self.gid, "place_limit_order", order)
+        self.e.action(self.gid, "place_limit_order", order | {"units": "100000000"})
+        self.e.tick(self.gid)
+        game = self.e.get(self.gid)
+        self.assertEqual(len(game["positions"]), 1)
+        self.assertEqual([item["id"] for item in game["orders"]], [ai["order_id"]])
+        rejected = self.e.logs(self.gid)[0]
+        self.assertEqual(rejected["status"], "rejected")
+        self.e.action(self.gid, "cancel_limit_order", {"order_id": ai["order_id"]})
+        self.e.action(self.gid, "resume", {})
+        self.e.tick(self.gid)
+        self.assertEqual(len(self.e.get(self.gid)["positions"]), 1)
+
     def test_same_pair_multi_positions_keep_independent_ids(self):
         self.buy(units="1000", sl="1.09")
         self.buy(units="2000", tp="1.12")

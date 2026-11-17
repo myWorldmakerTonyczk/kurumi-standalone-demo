@@ -118,7 +118,7 @@ async def review(plugin, gid, pair="", days=1, end=0, *, private=True, include_c
         ):
             jid, action, status = row
             job_operations[jid].append((action, status))
-    operation_types = {"open", "close", "protect", "plan", "borrow", "repay"}
+    operation_types = {"open", "close", "protect", "plan", "borrow", "repay", "place_limit_order", "cancel_limit_order"}
     for jid, trigger, status, created, updated, result, error, risks in jobs[:300]:
         operations = job_operations[jid]
         if status in {"success", "failed"} and updated > end:

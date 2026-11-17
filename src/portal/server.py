@@ -347,6 +347,10 @@ class Portal(Operations):
         public_game.update(self.describe_game(game, session["mode"]))
         public_game.update(plan=redact(game.get("plan") or ""), notes=redact(game.get("notes") or ""))
         public_game["positions"] = [self.public_position(row) for row in game["positions"]]
+        if session["mode"] == "account":
+            public_game["orders"] = [
+                self.public_order(row) for row in game.get("orders", []) if "limit_price" in row
+            ]
         valuation = snapshot["valuation"]
         if valuation:
             valuation = {key: valuation[key] for key in (
@@ -370,6 +374,12 @@ class Portal(Operations):
     def public_position(row):
         return {key: row[key] for key in (
             "id", "pair", "side", "units", "entry", "current", "pnl", "sl", "tp", "leverage", "margin",
+        ) if key in row}
+
+    @staticmethod
+    def public_order(row):
+        return {key: row[key] for key in (
+            "id", "pair", "side", "limit_price", "units", "margin", "sl", "tp", "leverage", "source",
         ) if key in row}
 
     async def history(self, request):
@@ -424,6 +434,11 @@ class Portal(Operations):
                 if isinstance(detail.get(key), str)}
         if isinstance(detail.get("position"), dict):
             safe["position"] = self.public_position(detail["position"])
+        if isinstance(detail.get("order"), dict):
+            safe["order"] = self.public_order(detail["order"])
+        for key in ("order_id", "limit_price"):
+            if isinstance(detail.get(key), str):
+                safe[key] = detail[key]
         return dict(id=row["id"], created=row["created"], action=row["action"], source=row["source"],
                     status=row["status"], reason=redact(row.get("reason") or ""), detail=safe)
 

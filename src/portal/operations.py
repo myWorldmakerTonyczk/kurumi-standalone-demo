@@ -9,6 +9,8 @@ from ..diary.store import redact
 
 ACTIONS = {
     "open": {"pair", "side", "units", "margin", "leverage", "sl", "tp"},
+    "place_limit_order": {"pair", "side", "units", "margin", "leverage", "sl", "tp", "limit_price"},
+    "cancel_limit_order": {"order_id"},
     "close": {"position"},
     "protect": {"position", "sl", "tp"},
 }

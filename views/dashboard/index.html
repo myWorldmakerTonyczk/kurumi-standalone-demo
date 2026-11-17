@@ -285,6 +285,7 @@
                   </p>
                 </section>
                 <section class="panel" id="positions"></section>
+                <section class="panel" id="limit-orders" hidden></section>
               </div>
               <div class="order-column">
                 <section class="panel order-panel">
@@ -295,6 +296,14 @@
                     <label
                       >交易货币对<select name="pair" id="trade-pair"></select
                     ></label>
+                    <label>订单类型<select id="order-type">
+                      <option value="market">市价单</option>
+                      <option value="limit">限价单</option>
+                    </select></label>
+                    <label id="limit-price-label" hidden>限价
+                      <input name="limit_price" type="number" step="any" min="0.00000001" disabled />
+                      <small>买入价不高于限价，卖出价不低于限价。成交时检查保证金。</small>
+                    </label>
                     <label
                       >下单方式<select id="order-mode">
                         <option value="margin">按投入保证金</option>

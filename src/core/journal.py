@@ -51,7 +51,7 @@ def journal(engine, gid, *, pair="", page=1, page_size=20, pages=1,
     params = [gid, before]
     clauses = ["game=?", "seq<?"]
     if pair:
-        clauses.append("json_extract(data,'$.detail.position.pair')=?")
+        clauses.append("coalesce(json_extract(data,'$.detail.position.pair'),json_extract(data,'$.detail.order.pair'))=?")
         params.append(pair)
     if source != "all":
         clauses.append("json_extract(data,'$.source')=?")
@@ -60,7 +60,7 @@ def journal(engine, gid, *, pair="", page=1, page_size=20, pages=1,
         clauses.append("json_extract(data,'$.status')='rejected'")
     elif filter != "all":
         clauses.append("json_extract(data,'$.status')='success'")
-        actions = "'open','close'" if filter == "fills" else "'open','close','protect','deposit','borrow','repay','loan_config','update_pairs','pause','resume','end'"
+        actions = "'open','close'" if filter == "fills" else "'open','close','protect','deposit','borrow','repay','loan_config','update_pairs','pause','resume','end','place_limit_order','cancel_limit_order'"
         clauses.append(f"json_extract(data,'$.action') IN ({actions})")
     where = " AND ".join(clauses)
     rows = engine.db.execute(

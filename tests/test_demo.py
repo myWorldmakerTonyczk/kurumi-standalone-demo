@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from app import Demo
 from src.core.replay import review
+from src.agent.mcp.registry import user_workspace_groups
 
 
 class DemoFlow(unittest.IsolatedAsyncioTestCase):
@@ -106,6 +107,25 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
                                     params=dict(pair="EUR/USD", side="buy", units="100", reason="手动交易")))
                                 self.assertEqual(trade.status, 200, await trade.text())
                                 self.assertEqual(len(demo.engine.get(gid)["positions"]), 1)
+                                placed = await user.post("/api/action", params={"game": gid}, json={
+                                    "action": "place_limit_order", "request_id": "1123456789abcdef",
+                                    "params": {"pair": "EUR/USD", "side": "buy", "units": "100",
+                                               "limit_price": "0.5", "reason": "limit"},
+                                })
+                                self.assertEqual(placed.status, 200, await placed.text())
+                                order_id = (await placed.json())["order_id"]
+                                workspace = await user.get("/api/workspace", params={"game": gid})
+                                self.assertEqual((await workspace.json())["current"]["game"]["orders"][0]["id"], order_id)
+                                cancelled = await user.post("/api/action", params={"game": gid}, json={
+                                    "action": "cancel_limit_order", "request_id": "2123456789abcdef",
+                                    "params": {"order_id": order_id, "reason": "cancel"},
+                                })
+                                self.assertEqual(cancelled.status, 200, await cancelled.text())
+                                demo.engine.action(gid, "resume", {})
+                                game = demo.engine.get(gid)
+                                groups = user_workspace_groups(demo, gid, writable=True, revision=game["action_revision"])
+                                place = next(tool for tool in groups["trading"] if tool.__name__ == "place_limit_order")
+                                self.assertIn('"state": "waiting"', await place("sell", 100, "2", "automated test"))
                     await demo.refresh()
                     job = asyncio.create_task(demo.jobs())
                     try:

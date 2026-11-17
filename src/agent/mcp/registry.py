@@ -7,7 +7,7 @@ from .market_review import (generate_trade_review, get_current_workspace, market
                             read_journal, read_market_bulletins, send_review_image, watch_market)
 from .media import save_image, search_images, send_panel, send_saved_image, sticker
 from .memory import search_memory, write_memory
-from .trading import (close_position, open_trade, record_observation, set_notifications,
+from .trading import (cancel_limit_order, close_position, open_trade, place_limit_order, record_observation, set_notifications,
                       set_protection, virtual_loan, write_plan)
 from .trading.execution import bind_trade
 from .timeline import get_task_report, query_task_timeline, schedule_task
@@ -41,7 +41,7 @@ def user_workspace_groups(app, gid, *, writable, revision, attachments=None, use
     if writable:
         trade = bind_trade(app, gid, revision)
         groups["trading"] = [part.build(trade) for part in (
-            open_trade, close_position, set_protection, virtual_loan, write_plan, record_observation)]
+            open_trade, place_limit_order, cancel_limit_order, close_position, set_protection, virtual_loan, write_plan, record_observation)]
     if attachments is not None:
         groups["market_review"] += [generate_trade_review.build(app, gid), send_review_image.build(app, gid, attachments)]
         groups["community"] = [forum.build(app, owner), group_chat.build(app, owner),
