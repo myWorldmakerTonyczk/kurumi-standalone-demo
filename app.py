@@ -1174,6 +1174,8 @@ class Demo:
                 return web.json_response(result, headers={"Cache-Control": "no-store"})
             if action == "inbox" and session["mode"] == "account":
                 if request.method == "POST":
+                    if body.get("all") is True:
+                        return web.json_response({"ok": True, "marked": self.community.mark_inbox_read_all(owner)})
                     self.community.mark_inbox_read(owner, body.get("kind"), body.get("id"))
                     return web.json_response({"ok": True})
                 if request.method == "GET":

@@ -109,6 +109,42 @@ class CommunityTests(unittest.TestCase):
         c.groups('u1', 'POST', room, {'action': 'leave'})
         self.assertFalse(any(row['kind'] == 'group' for row in c.inbox('u1')))
 
+    def test_mark_all_clears_all_sources_and_only_the_current_memberships(self):
+        self.db.executescript("""
+            INSERT INTO sim_users VALUES('u2', 'Other');
+            CREATE TABLE games(id TEXT PRIMARY KEY, data TEXT);
+            INSERT INTO games VALUES('g1','{"owner_id":"u1"}'), ('g2','{"owner_id":"u1"}'),
+                ('other','{"owner_id":"u2"}');
+            CREATE TABLE demo_chat(id INTEGER PRIMARY KEY, game TEXT, role TEXT, content TEXT, created REAL);
+            INSERT INTO demo_chat(game,role,content,created)
+                VALUES('g2','assistant','older instance',unixepoch()), ('other','assistant','other user',unixepoch());
+        """)
+        self.db.executemany("""INSERT INTO demo_chat(game,role,content,created)
+                               VALUES('g1','assistant',?,unixepoch())""", ((str(i),) for i in range(105)))
+        c = self.community
+        thread = str(c.handle("u1", "POST", "", {"title": "Thread", "body": "Body"})["id"])
+        c.handle("u2", "POST", thread, {"body": "Forum reply"})
+        room = str(c.groups("u2", "POST", "", {"name": "Shared room"})["id"])
+        c.groups("u1", "POST", room, {"action": "join"})
+        c.groups("u2", "POST", room, {"body": "@测试用户 Group mention"})
+        c.groups("u2", "POST", room, {"body": "A normal group message"})
+        newest = c.groups("u1", "POST", room, {"body": "My own message"})["id"]
+        self.assertEqual(len(c.inbox("u1", unread_only=True)), 100)
+        self.assertEqual(c.groups("u1", "GET", room, {})["group"]["unread"], 2)
+
+        self.assertEqual(c.mark_inbox_read_all("u1"), 108)
+        self.assertEqual(c.inbox("u1", unread_only=True), [])
+        self.assertEqual(c.groups("u1", "GET", room, {})["group"]["unread"], 0)
+        cursor = self.db.execute("""SELECT last_read_message FROM community_group_members
+                                     WHERE owner='u1' AND room=?""", (room,)).fetchone()[0]
+        self.assertEqual(cursor, newest)
+        self.assertTrue(c.inbox("u2", unread_only=True))
+        self.assertEqual(c.groups("u2", "GET", room, {})["group"]["unread"], 1)
+        self.assertEqual(c.mark_inbox_read_all("u1"), 0)
+        c.groups("u2", "POST", room, {"body": "@测试用户 New mention"})
+        self.assertEqual(c.groups("u1", "GET", room, {})["group"]["unread"], 1)
+        self.assertEqual(len(c.inbox("u1", unread_only=True)), 1)
+
     def test_thread_reports_comment_count(self):
         post = self.community.handle("u1", "POST", "", {"title": "标题", "body": "正文"})["id"]
         self.community.handle("u1", "POST", str(post), {"body": "评论"})

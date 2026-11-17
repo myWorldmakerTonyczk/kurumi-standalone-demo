@@ -353,7 +353,7 @@ class Community:
             raise web.HTTPNotFound(reason="评论不存在或已删除")
         return value
 
-    def inbox(self, owner, *, unread_only=False):
+    def inbox_rows(self, owner, *, unread_only, bulk=False):
         account = self.db.execute("""
             SELECT u.nickname, (SELECT count(*) FROM sim_users other
                   WHERE other.nickname=u.nickname COLLATE NOCASE AND other.id<u.id) AS duplicate
@@ -372,8 +372,8 @@ class Community:
             LEFT JOIN community_messages parent ON parent.id=m.reply_to
             WHERE m.status='active' AND p.status='active' AND (m.owner<>? OR m.is_agent)
               AND (p.owner=? OR parent.owner=? OR instr(m.body, '@')>0)
-            ORDER BY m.id DESC LIMIT 1000
-        """, (owner, owner, owner, owner, owner)).fetchall()
+            ORDER BY m.id DESC LIMIT ?
+        """, (owner, owner, owner, owner, owner, -1 if bulk else 1000)).fetchall()
         forum = [row for row in forum if row["addressed"] or mention.search(row["body"])]
         private = self.db.execute("""
             SELECT 'private' AS kind,c.id,? AS owner,1 AS is_agent,u.nickname,
@@ -383,8 +383,8 @@ class Community:
               AND (NOT ? OR NOT EXISTS (
                   SELECT 1 FROM community_inbox_seen s WHERE s.owner=? AND s.kind='private' AND s.source=c.id
               ))
-            ORDER BY c.id DESC LIMIT 100
-        """, (owner, owner, owner, unread_only, owner)).fetchall()
+            ORDER BY c.id DESC LIMIT ?
+        """, (owner, owner, owner, unread_only, owner, -1 if bulk else 100)).fetchall()
         group = self.db.execute("""
             SELECT 'group' AS kind,m.id,m.owner,m.is_agent,u.nickname,m.body,m.created,
                    m.room AS target,g.name AS label,m.mentions
@@ -392,14 +392,17 @@ class Community:
             JOIN community_group_messages m ON m.room=g.id JOIN sim_users u ON u.id=m.owner
             WHERE gm.owner=? AND m.status='active' AND (m.owner<>? OR m.is_agent) AND m.created>=gm.joined
               AND instr(m.body, '@')>0
-            ORDER BY m.id DESC LIMIT 1000
-        """, (owner, owner)).fetchall()
+            ORDER BY m.id DESC LIMIT ?
+        """, (owner, owner, -1 if bulk else 1000)).fetchall()
         group_mentions = []
         for row in group:
             targets = _json(row["mentions"], None)
             if (f"user:{owner}" in targets if targets is not None else mention.search(row["body"])):
                 group_mentions.append(row)
-        entries = sorted([*forum, *private, *group_mentions],
+        return [*forum, *private, *group_mentions]
+
+    def inbox(self, owner, *, unread_only=False):
+        entries = sorted(self.inbox_rows(owner, unread_only=unread_only),
                          key=lambda row: (row["created"] or 0, row["id"]), reverse=True)
         seen = {(row["kind"], row["source"]) for row in self.db.execute(
             "SELECT kind,source FROM community_inbox_seen WHERE owner=?", (owner,))}
@@ -422,6 +425,25 @@ class Community:
             """, (owner, owner, source, source))
         else:
             self.db.execute("INSERT OR IGNORE INTO community_inbox_seen VALUES(?,?,?)", (owner, kind, source))
+
+    def mark_inbox_read_all(self, owner):
+        self.db.execute("SAVEPOINT mark_all_inbox_read")
+        try:
+            rows = self.inbox_rows(owner, unread_only=True, bulk=True)
+            marked = self.db.executemany(
+                "INSERT OR IGNORE INTO community_inbox_seen(owner,kind,source) VALUES(?,?,?)",
+                ((owner, row["kind"], row["id"]) for row in rows),
+            ).rowcount
+            self.db.execute("""UPDATE community_group_members AS member SET last_read_message=max(
+                member.last_read_message, coalesce((SELECT max(id) FROM community_group_messages
+                    WHERE room=member.room AND status='active'), 0))
+                WHERE member.owner=?""", (owner,))
+            return marked
+        except BaseException:
+            self.db.execute("ROLLBACK TO mark_all_inbox_read")
+            raise
+        finally:
+            self.db.execute("RELEASE mark_all_inbox_read")
 
     @staticmethod
     def _vote_target(comment):

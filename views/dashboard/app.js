@@ -1,5 +1,5 @@
 import { mountAgentMode } from "/assets/agent-mode.js";
-import {confirmAction, toast} from "/assets/ui/feedback.js";
+import {confirmAction, toast, withBusy} from "/assets/ui/feedback.js";
 import {renderMarkdown} from "/assets/ui/markdown.js";
 import {h, relativeTime} from "/assets/ui/dom.js";
 import {api} from "/assets/ui/api.js";
@@ -217,16 +217,22 @@ function options(el, items, value) {
   );
   if (value !== undefined) el.value = value;
 }
-function mountInbox(shortcuts, openEntry) {
+function mountInbox(shortcuts, openEntry, refreshGroups) {
   const count = h("span", {class: "ui-count", hidden: true});
   const launcher = h("button", {type: "button", class: "inbox-launch", "aria-expanded": "false",
     "aria-controls": "workspace-inbox"}, "邮箱", count);
   const list = h("div", {class: "inbox-list"});
   const status = h("p", {role: "status", class: "ui-muted", hidden: true});
+  const markAll = h("button", {type: "button", disabled: true, "aria-label": "将消息邮箱和群聊全部标为已读"}, "全部已读");
   const panel = h("section", {id: "workspace-inbox", class: "workspace-inbox", hidden: true, "aria-label": "消息邮箱"},
     h("header", {}, h("strong", {}, "消息邮箱"),
-      h("button", {type: "button", "aria-label": "关闭邮箱", onClick: () => toggle(false)}, "×")), status, list);
+      h("div", {class: "inbox-actions"}, markAll,
+        h("button", {type: "button", "aria-label": "关闭邮箱", onClick: () => toggle(false)}, "×"))), status, list);
   let signature = "", loadingInbox = false, refreshQueued = false;
+  let unreadMail = 0, unreadGroups = 0, markingAll = false;
+  function updateMarkAll() {
+    markAll.disabled = markingAll || unreadMail + unreadGroups === 0;
+  }
   const types = {group: "群聊 @", forum: "论坛评论", private: "私聊消息"};
   const sections = new Map(Object.entries(types).map(([kind, title]) => {
     const label = h("span");
@@ -253,9 +259,10 @@ function mountInbox(shortcuts, openEntry) {
     loadingInbox = true;
     try {
       const {entries} = await api("inbox", {query: {unread: 1}});
-      const unread = entries.length;
-      count.hidden = unread === 0;
-      count.textContent = String(unread);
+      unreadMail = entries.length;
+      count.hidden = unreadMail === 0;
+      count.textContent = String(unreadMail);
+      updateMarkAll();
       const next = JSON.stringify(entries.map(({kind, id, unread}) => [kind, id, unread]));
       status.hidden = true;
       if (next === signature) return;
@@ -300,6 +307,22 @@ function mountInbox(shortcuts, openEntry) {
     }
   }
 
+  markAll.onclick = async () => {
+    markingAll = true;
+    try {
+      await withBusy(markAll, async () => {
+        await api("inbox", {method: "POST", body: {all: true}});
+        window.dispatchEvent(new Event("kurumi-inbox-read"));
+        await refreshGroups();
+        toast("已全部标为已读", "success");
+      }, "标记中…");
+    } catch (error) {
+      toast("标记失败：" + error.message, "error");
+    } finally {
+      markingAll = false;
+      updateMarkAll();
+    }
+  };
   launcher.onclick = () => toggle(panel.hidden);
   panel.addEventListener("keydown", event => { if (event.key === "Escape") toggle(false); });
   document.body.append(panel);
@@ -307,6 +330,7 @@ function mountInbox(shortcuts, openEntry) {
   refresh();
   window.addEventListener("kurumi-inbox-read", refresh);
   setInterval(() => { if (!document.hidden) refresh(); }, 15000);
+  return total => { unreadGroups = total; updateMarkAll(); };
 }
 
 let activeChat;
@@ -1634,13 +1658,16 @@ if (bridge) {
       message("管理员已禁止此操作", true);
     }, true);
     const unreadBadges = [];
+    let updateInboxGroupCount;
     const badge = () => { const el = node("span", "", "ui-count"); el.hidden = true; unreadBadges.push(el); return el; };
     const setUnread = total => {
+      updateInboxGroupCount?.(total);
       for (const el of unreadBadges) {
         el.hidden = total <= 0;
         el.textContent = total > 99 ? "99+" : String(total);
         el.setAttribute("aria-label", `${total} 条未读群消息`);
       }
+      if (state?.current) homeView?.update(state, state.current);
     };
     const picker = node("select");
     picker.setAttribute("aria-label", "交易实例");
@@ -1759,7 +1786,7 @@ if (bridge) {
       shortcut.append(" ", badge());
       const chatShortcuts = h("div", {class: "workspace-shortcuts"}, activeChat?.launcher, shortcut);
       document.body.append(chatShortcuts);
-      mountInbox(chatShortcuts, async entry => {
+      updateInboxGroupCount = mountInbox(chatShortcuts, async entry => {
         if (entry.kind === "private") {
           if (!activeChat) throw Error("当前工作区没有私聊窗口");
           if (gid !== entry.target) {
@@ -1772,7 +1799,7 @@ if (bridge) {
         workspace("community");
         if (entry.kind === "group") await communityView.openGroup(entry.target, entry.id);
         else await communityView.openPost(entry.target, entry.id);
-      });
+      }, () => communityView.warm());
       communityView.warm();
       defaultPage = "home";
       instancePage = "home";

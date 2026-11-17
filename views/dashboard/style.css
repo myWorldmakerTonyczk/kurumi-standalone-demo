@@ -2222,6 +2222,7 @@ body:has(.workspace.catalog-mode) .workspace-back { left: 12px; }
 .workspace-inbox[hidden], .workspace-back[hidden] { display: none; }
 .chat-message:focus, .chat-image-message:focus { outline: 2px solid #984576; outline-offset: 2px; }
 .workspace-inbox header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.inbox-actions { display: flex; align-items: center; gap: 6px; }
 .inbox-list { display: grid; gap: 6px; overflow: auto; }
 .inbox-section { border: 1px solid #e5d6e4; border-radius: 10px; background: #fff; }
 .inbox-section > summary { padding: 10px; cursor: pointer; color: #402e43; }

@@ -64,6 +64,13 @@ class CommunityApiFlow(unittest.IsolatedAsyncioTestCase):
                 private = await user.get(f"/api/chat-message?game={game_id}&id={private_id}")
                 self.assertEqual(private.status, 200, await private.text())
                 self.assertEqual((await private.json())["entry"]["content"], "邮箱测试")
+                demo.db.execute("""INSERT INTO demo_chat(game,role,content,created)
+                                   VALUES(?,'assistant','bulk read test',unixepoch())""", (game_id,))
+                bulk = await user.post("/api/inbox", json={"all": True})
+                self.assertEqual(bulk.status, 200, await bulk.text())
+                self.assertGreaterEqual((await bulk.json())["marked"], 1)
+                unread = await user.get("/api/inbox?unread=1")
+                self.assertEqual((await unread.json())["entries"], [])
 
                 own_delete = await user.delete(f"/api/forum?comment={comment_id}")
                 self.assertEqual(own_delete.status, 200, await own_delete.text())
