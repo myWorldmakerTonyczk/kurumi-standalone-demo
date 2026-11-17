@@ -417,9 +417,8 @@ class Social:
                 agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")),
                     tools=flatten(groups),
                     middleware=[ToolGroups(groups, initial=("read_inbox",)), ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
-                    system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("patrol")
+                    system_prompt=workflow("patrol") + "\n\n" + social_system_prompt(self.app.agent_persona(owner, profile))
                     + "\n" + workflow("forum_authorship")
-                    + "\n有需要时可先用 read_inbox 预览或收取持续到达的邮箱消息，再决定是否查看原文。"
                     + "\n" + TOOL_INSTRUCTIONS
                     + ("\n近期任务时间线：" + dump(self.app.timeline.context(owner)) if hasattr(self.app, "timeline") else ""))
                 await agent.ainvoke({"messages": [HumanMessage(content=dump(
