@@ -908,6 +908,14 @@ class Demo:
                         raise web.HTTPNotFound(reason="用户没有登录账号")
                     return web.json_response(dict(username=username, password=self.accounts.admin_password(owner) or None),
                                              headers={"Cache-Control": "no-store"})
+                if action == "market-bulletin-trace" and request.method == "GET":
+                    ident = request.query.get("id", "")
+                    if not ident.isascii() or not ident.isdecimal() or len(ident) > 18:
+                        raise ValueError("日志编号无效")
+                    steps = self.market_bulletin.trace_detail(int(ident))
+                    if steps is None:
+                        raise web.HTTPNotFound()
+                    return web.json_response({"steps": steps}, headers={"Cache-Control": "no-store"})
                 if action == "market-bulletin":
                     if request.method == "POST":
                         operation = body.get("action", "save")

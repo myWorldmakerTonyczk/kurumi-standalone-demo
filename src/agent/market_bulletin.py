@@ -8,6 +8,7 @@ import os
 import re
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -22,6 +23,7 @@ from yarl import URL
 
 from src.core.availability import WEEKEND, inside_weekly_window
 from src.core.engine import PAIRS
+from .call_logs import CallTrace, clean_log, error_label
 from .model_registry import model_client
 from .workflow import workflow
 
@@ -67,8 +69,9 @@ BUILTIN_SOURCE_URLS = frozenset(value[1] for value in SOURCES.values() if value[
 )
 KINDS = {"live": "实时报告", "day": "日报", "week": "周报", "month": "月报", "event": "指标跟踪"}
 DEFAULT = {"enabled": True, "interval": 60, "time": "08:30", "periods": ["day", "week", "month"],
-           "pairs": list(PAIRS)[:4], "url": "", "model": "", "key": ""}
+           "pairs": list(PAIRS)[:4], "url": "", "model": "", "key": "", "trace_enabled": False}
 log = logging.getLogger("kurumi")
+_bulletin_trace = ContextVar("bulletin_trace", default=None)
 
 
 class PublicSourceResolver(ThreadedResolver):
@@ -267,6 +270,9 @@ class MarketBulletin:
                 id TEXT PRIMARY KEY, kind TEXT, label TEXT, body TEXT, generated INTEGER, details TEXT);
             CREATE TABLE IF NOT EXISTS platform_bulletin_runs(
                 kind TEXT PRIMARY KEY, attempted INTEGER, success INTEGER, error TEXT);
+            CREATE TABLE IF NOT EXISTS platform_bulletin_trace(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, started REAL NOT NULL,
+                elapsed_ms INTEGER NOT NULL, state TEXT NOT NULL, steps TEXT NOT NULL);
         """)
         if "source" not in {row[1] for row in self.db.execute("PRAGMA table_info(platform_bulletin_events)")}:
             self.db.execute("ALTER TABLE platform_bulletin_events ADD COLUMN source TEXT NOT NULL DEFAULT '美国劳工统计局'")
@@ -327,6 +333,8 @@ class MarketBulletin:
             for key in SOURCES
             for address in [overrides.get(key, old["sources"][key]) or SOURCES[key][1]]
         }
+        if type(config["trace_enabled"]) is not bool:
+            raise ValueError("日志开关无效")
         if type(config["enabled"]) is not bool:
             raise ValueError("请设置启用状态")
         if type(config["interval"]) is not int or not 1 <= config["interval"] <= 1440:
@@ -419,7 +427,30 @@ class MarketBulletin:
                 "search": search_keys | {"active": provider,
                     "brave_env": bool(os.environ.get("BRAVE_SEARCH_API_KEY", "").strip())},
                 "runs": [dict(row) for row in self.db.execute("SELECT * FROM platform_bulletin_runs")],
-                "reports": self.reports(8)}
+                "reports": self.reports(8), "traces": [dict(row) for row in self.db.execute(
+                    "SELECT id,kind,started,elapsed_ms,state FROM platform_bulletin_trace ORDER BY id DESC LIMIT 50")]}
+
+    def trace_detail(self, ident):
+        row = self.db.execute("SELECT steps FROM platform_bulletin_trace WHERE id=?", (ident,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    @staticmethod
+    def trace_step(kind, label, **data):
+        if (steps := _bulletin_trace.get()) is not None:
+            steps.append({"kind": kind, "label": label, "time": time.time(), **data})
+
+    async def search_traced(self, query):
+        started = time.monotonic()
+        config = self.config()
+        provider, _ = self.search_credentials(config)
+        try:
+            items, error = await self.search_news(query)
+        except Exception as exc:
+            self.trace_step("search", provider, query=query, error=error_label(exc), message=str(exc))
+            raise
+        self.trace_step("search", provider or "未启用", query=query, count=len(items),
+                        error=error, elapsed_ms=round((time.monotonic() - started) * 1000))
+        return items, error
 
     def manage_task(self, action, event):
         if not isinstance(event, str):
@@ -542,9 +573,11 @@ class MarketBulletin:
 
     async def collect(self):
         async def read(session, label, source, address, calendar=False):
+            started = time.monotonic()
             weekly = address == FOREX_FACTORY_CALENDAR
             checked, previous_error = self.weekly_calendar_check
             if weekly and checked and time.monotonic() - checked < 900:
+                self.trace_step("source", label, state="cached", error=previous_error)
                 return [], previous_error
             try:
                 payload = await self.fetch(session, address)
@@ -565,13 +598,19 @@ class MarketBulletin:
                         self.db.execute("RELEASE refresh_bulletin_calendar")
                     if weekly:
                         self.weekly_calendar_check = (time.monotonic(), "")
+                    self.trace_step("source", label, state="ok", count=len(events),
+                                    elapsed_ms=round((time.monotonic() - started) * 1000))
                     return [], ""
                 items = parse_source(payload, source, False, address)
                 if not items:
                     raise ValueError("RSS 暂无可解析条目")
+                self.trace_step("source", label, state="ok", count=len(items),
+                                elapsed_ms=round((time.monotonic() - started) * 1000))
                 return items, ""
             except Exception as error:
                 reason = self.source_error(error)
+                self.trace_step("source", label, state="failed", error=reason,
+                                elapsed_ms=round((time.monotonic() - started) * 1000))
                 if weekly:
                     self.weekly_calendar_check = (time.monotonic(), reason)
                 log.info("Bulletin source unavailable: %s (%s)", label, reason)
@@ -585,7 +624,7 @@ class MarketBulletin:
                                                  label, source, address, calendar)
                                              for label, source, calendar, address in sources))
         failed = [f"{source[0]}（{error}）" for source, (_, error) in zip(sources, results) if error]
-        media, search_error = await self.search_news("forex dollar euro yen central banks inflation jobs economic data markets")
+        media, search_error = await self.search_traced("forex dollar euro yen central banks inflation jobs economic data markets")
         issues = failed + ([search_error] if search_error else [])
         warning = "暂未同步 " + "、".join(issues) if issues else ""
         if len(failed) == len(sources) and not media:
@@ -635,10 +674,21 @@ class MarketBulletin:
 
     async def ask(self, config, instruction, payload):
         """Use the administrator model with public sources and no model-callable tools."""
-        result = await model_client(config, self.app.model_url).ainvoke([
+        messages = [
             SystemMessage(content=workflow("market_bulletin") + "\n" + instruction),
             HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
-        ])
+        ]
+        started = time.monotonic()
+        request = [CallTrace.message(message) for message in messages] if _bulletin_trace.get() is not None else None
+        try:
+            result = await model_client(config, self.app.model_url).ainvoke(messages)
+        except Exception as exc:
+            self.trace_step("model", config["model"], request=request, error=error_label(exc),
+                            message=str(exc), elapsed_ms=round((time.monotonic() - started) * 1000))
+            raise
+        if request is not None:
+            self.trace_step("model", config["model"], request=request, response=CallTrace.message(result),
+                            elapsed_ms=round((time.monotonic() - started) * 1000))
         text = result.text.strip()
         if not text:
             raise ValueError("模型返回空内容")
@@ -664,8 +714,10 @@ class MarketBulletin:
                 continue
             event, task = item.get("event"), item.get("task")
             if isinstance(event, str) and event in candidates and isinstance(task, str) and task.strip():
-                self.db.execute("""INSERT OR IGNORE INTO platform_bulletin_wakeups(event, task)
+                saved = self.db.execute("""INSERT OR IGNORE INTO platform_bulletin_wakeups(event, task)
                     VALUES(?,?)""", (event, task.strip()[:240]))
+                if saved.rowcount:
+                    self.trace_step("scheduled", candidates[event]["title"], event=event, task=task.strip()[:240])
 
     async def publish(self, kind, config, generation, *, event=None, source_warning="", event_media=()):
         now = datetime.now(ZONE)
@@ -743,6 +795,7 @@ class MarketBulletin:
     def save_report(self, ident, kind, label, body, details):
         self.db.execute("INSERT OR REPLACE INTO platform_bulletins VALUES(?,?,?,?,?,?)",
                         (ident, kind, label, body[:7000], int(time.time()), json.dumps(details)))
+        self.trace_step("publication", label, report_id=ident, report_kind=kind)
         inbox = getattr(self.app, "agent_inbox", None)
         if inbox:
             inbox.market(ident, kind, f"{KINDS[kind]} · {label}")
@@ -795,12 +848,38 @@ class MarketBulletin:
         return warning if note and warning else note
 
     async def track(self, name, job):
+        config = self.config()
+        if not config["trace_enabled"]:
+            return await self.run_tracked(name, job)
+        steps = []
+        token = _bulletin_trace.set(steps)
+        started, clock = time.time(), time.monotonic()
+        state = "interrupted"
+        try:
+            ok = await self.run_tracked(name, job)
+            state = "ok" if ok else "failed" if any(step["kind"] == "error" for step in steps) else "skipped"
+            return ok
+        finally:
+            _bulletin_trace.reset(token)
+            secrets = {config[field] for field in ("key", *SEARCH_KEYS) if config[field]}
+            _, active_key = self.search_credentials(config)
+            if active_key:
+                secrets.add(active_key)
+            duration = round((time.monotonic() - clock) * 1000)
+            self.db.execute("INSERT INTO platform_bulletin_trace(kind,started,elapsed_ms,state,steps) VALUES(?,?,?,?,?)",
+                            (name, started, duration, state, clean_log(steps, sorted(secrets, key=len, reverse=True),
+                                                                      limit=None, json_payload=True)))
+            self.db.execute("""DELETE FROM platform_bulletin_trace WHERE id < (
+                SELECT id FROM platform_bulletin_trace ORDER BY id DESC LIMIT 1 OFFSET 49)""")
+
+    async def run_tracked(self, name, job):
         now = int(time.time())
         self.db.execute("""INSERT INTO platform_bulletin_runs(kind,attempted) VALUES(?,?)
             ON CONFLICT(kind) DO UPDATE SET attempted=excluded.attempted""", (name, now))
         try:
             note = await job
         except Exception as error:
+            self.trace_step("error", error_label(error), message=str(error))
             log.warning("Market bulletin %s failed (%s)", name, type(error).__name__)
             self.db.execute("UPDATE platform_bulletin_runs SET error=? WHERE kind=?", (
                 str(error) if isinstance(error, ValueError) and str(error).startswith("暂未同步")
@@ -808,6 +887,8 @@ class MarketBulletin:
             return False
         if note is False:
             return False
+        if isinstance(note, str) and note:
+            self.trace_step("warning", "采集提示", message=note)
         self.db.execute("UPDATE platform_bulletin_runs SET success=?,error=? WHERE kind=?",
                         (int(time.time()), note if isinstance(note, str) else "", name))
         return True
@@ -840,7 +921,7 @@ class MarketBulletin:
                 fresh = self.db.execute("""SELECT 1 FROM platform_bulletin_news WHERE
                     source=? AND published>=? AND published<=? LIMIT 1""",
                     (event["source"], event["due"] - 60, time.time())).fetchone()
-                media, search_warning = await self.search_news(event["title"] + " release actual result")
+                media, search_warning = await self.search_traced(event["title"] + " release actual result")
                 if generation != self.generation:
                     return False
                 media = [item for item in media if event["due"] - 60 <= item[4] <= time.time()]

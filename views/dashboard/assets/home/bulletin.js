@@ -129,6 +129,9 @@ export function mountBulletinAdmin(root, bridge) {
   const reports = h("div");
   const operations = h("div", {class: "bulletin-actions"});
   const runs = h("dl", {class: "bulletin-runs"});
+  const traceEnabled = h("input", {type: "checkbox", name: "trace_enabled"});
+  const traceList = h("div", {class: "bulletin-task-list"});
+  let traceSignature = "";
   let initial = false;
   let busy = false;
   let dirty = false;
@@ -167,7 +170,9 @@ export function mountBulletinAdmin(root, bridge) {
       h("fieldset", {}, h("legend", {}, "首页关注品种"), pairs)),
     h("section", {class: "bulletin-admin-card"}, h("h3", {}, "管理员模型"),
       label("模型预设", preset), label("API Base URL", endpoint), label("模型 ID", model), label("API Key", key),
-      h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。")),
+      h("p", {class: "bulletin-muted"}, "密钥仅供平台播报使用，用户侧不会收到模型配置。"),
+      label("记录详细运行日志", traceEnabled),
+      h("small", {class: "bulletin-muted"}, "默认关闭。开启后最多保留最近 50 次运行。")),
     h("section", {class: "bulletin-admin-card bulletin-source-card"}, h("h3", {}, "联网新闻搜索（选填）"),
       label("搜索服务", searchProvider), deepseekSearchField, braveSearchField,
       h("p", {class: "bulletin-muted"}, "自动选择优先用 DeepSeek，其次用 Brave。DeepSeek 可复用官方模型密钥，Brave 可读取服务器环境变量。RSS 和日历可独立使用。"),
@@ -182,7 +187,8 @@ export function mountBulletinAdmin(root, bridge) {
       h("p", {}, "共用一套采集计划，向全部用户发布。")),
       h("div", {class: "bulletin-switch"}, signal, label("启用", enabled))),
     status, form,
-    h("section", {class: "bulletin-admin-card"}, h("h3", {}, "运行记录"), operations, runs),
+    h("section", {class: "bulletin-admin-card"}, h("h3", {}, "运行记录"), operations, runs,
+      h("details", {}, h("summary", {}, "详细运行日志"), traceList)),
     h("div", {class: "bulletin-admin-grid"},
       h("section", {class: "bulletin-admin-card"}, h("h3", {}, "Agent 唤起任务"), schedule),
       h("section", {class: "bulletin-admin-card"}, h("h3", {}, "近期发布日历"), calendar)),
@@ -194,6 +200,7 @@ export function mountBulletinAdmin(root, bridge) {
     const config = data.config;
     if (fill) {
       enabled.checked = config.enabled;
+      traceEnabled.checked = config.trace_enabled;
       interval.value = config.interval;
       publishAt.value = config.time;
       model.value = config.model;
@@ -270,6 +277,40 @@ export function mountBulletinAdmin(root, bridge) {
       h("p", {class: "bulletin-calendar-row"}, h("time", {}, time(item.due)), h("span", {}, item.title, item.source?.startsWith("非官方") ? h("small", {}, " · " + item.source) : null)))
       : [h("p", {class: "bulletin-muted"}, "暂无已同步的日历事件")]));
     reports.replaceChildren(reportList(data.reports));
+    const entries = data.traces || [];
+    const signature = JSON.stringify([config.trace_enabled, entries.map(item => item.id)]);
+    if (signature !== traceSignature) {
+      traceSignature = signature;
+      const labels = {scan: "消息采集", event: "指标跟踪", ...PERIODS};
+      const states = {ok: "已完成", failed: "失败", skipped: "已跳过", interrupted: "已中断"};
+      traceList.replaceChildren(...entries.map(entry => {
+        const body = h("div", {class: "bulletin-task-list"});
+        const details = h("details", {}, h("summary", {}, time(entry.started) + " · " +
+          (labels[entry.kind] || entry.kind) + " · " + states[entry.state] + " · " + entry.elapsed_ms + " ms"), body);
+        details.ontoggle = async () => {
+          if (!details.open || details.dataset.loaded) return;
+          details.dataset.loaded = "true";
+          body.replaceChildren(h("p", {}, "正在读取…"));
+          try {
+            const {steps} = await bridge.apiGet("market-bulletin-trace", {id: entry.id});
+            const kinds = {source: "订阅", search: "搜索", model: "模型", publication: "发布", scheduled: "预约", error: "失败", warning: "提示"};
+            body.replaceChildren(...steps.map(({kind, label, ...payload}) => {
+              const result = payload.error || (payload.count != null ? payload.count + " 条" : "");
+              return h("details", {class: "task-trace-panel"}, h("summary", {},
+                (kinds[kind] || kind) + " · " + label + (result ? " · " + result : "")),
+                h("pre", {class: "markdown-copy"}, JSON.stringify(payload, null, 2)));
+            }));
+            if (!steps.length) body.append(h("p", {}, "本次没有详细步骤。"));
+          } catch (error) {
+            delete details.dataset.loaded;
+            body.textContent = error.message;
+          }
+        };
+        return details;
+      }));
+      if (!entries.length) traceList.append(h("p", {class: "bulletin-muted"}, config.trace_enabled ?
+        "开启后产生的采集、整理和发布记录会显示在这里。" : "尚无记录。在设置中开启「记录详细运行日志」，再保存。"));
+    }
   }
 
   async function request(body, fill = false, silent = false) {
@@ -296,6 +337,7 @@ export function mountBulletinAdmin(root, bridge) {
     event.preventDefault();
     request({action: "save", enabled: enabled.checked, interval: Number(interval.value), time: publishAt.value,
       model: model.value, url: endpoint.value, key: key.value, search_provider: searchProvider.value,
+      trace_enabled: traceEnabled.checked,
       deepseek_search_key: deepseekSearchKey.value, brave_search_key: braveSearchKey.value,
       sources: Object.fromEntries([...sources.querySelectorAll("input[data-source]")].map(input =>
         [input.dataset.source, input.value.trim()])),

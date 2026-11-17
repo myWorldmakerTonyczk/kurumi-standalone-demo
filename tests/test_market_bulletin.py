@@ -7,6 +7,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from langchain_core.messages import AIMessage
+
 from src.agent.market_bulletin import BEA_CALENDAR_JSON, DOL_BLS_RELEASES, DOL_BLS_SOURCE, FOREX_FACTORY_CALENDAR, LEGACY_BLS_SOURCES, MarketBulletin, ZONE, parse_calendar, parse_rss, parse_source, period_window
 
 
@@ -40,6 +42,41 @@ class MarketBulletinTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("example-key", json.dumps(self.agent.public()))
         self.agent.save({"url": "https://other.example/v1"})
         self.assertFalse(self.agent.admin()["config"]["has_key"])
+
+    async def test_admin_trace_is_opt_in_and_redacts_configured_keys(self):
+        self.agent.save({"url": "https://test.example/v1", "model": "test", "key": "private-admin-key"})
+
+        async def job():
+            config = self.agent.config()
+            await self.agent.ask(config, "Summarize public material", {"value": "private-admin-key"})
+            self.agent.save_report("day:test", "day", "Daily report", "body", {})
+            return True
+
+        response = AIMessage(content="report", additional_kwargs={"reasoning_content": "provider rationale"},
+                             usage_metadata={"input_tokens": 10, "output_tokens": 4, "total_tokens": 14})
+        with patch("src.agent.market_bulletin.model_client", return_value=SimpleNamespace(
+                ainvoke=AsyncMock(return_value=response))):
+            self.assertTrue(await self.agent.track("day", job()))
+            self.assertEqual(self.agent.admin()["traces"], [])
+            self.agent.save({"trace_enabled": True})
+            self.assertTrue(await self.agent.track("day", job()))
+
+        entry = self.agent.admin()["traces"][0]
+        self.assertEqual(entry["state"], "ok")
+        model, published = self.agent.trace_detail(entry["id"])
+        self.assertEqual(model["response"]["reasoning_content"], "provider rationale")
+        self.assertEqual(model["response"]["usage_metadata"]["total_tokens"], 14)
+        self.assertEqual(published["report_id"], "day:test")
+        self.assertNotIn("private-admin-key", json.dumps(model))
+        self.assertNotIn("traces", self.agent.public())
+
+        async def broken():
+            raise ValueError("bad result")
+
+        self.assertFalse(await self.agent.track("scan", broken()))
+        failed = self.agent.admin()["traces"][0]
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(self.agent.trace_detail(failed["id"])[0]["message"], "bad result")
 
     async def test_agent_reads_only_published_bulletins(self):
         self.agent.save({"enabled": True, "key": "private-admin-key"})
