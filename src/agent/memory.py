@@ -11,6 +11,7 @@ from aiohttp import web
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .workflow import workflow
+from .timeline import task_trace
 from .memory_profiles import MemoryProfiles
 from .model_registry import model_client
 
@@ -73,9 +74,10 @@ def query_terms(text):
 
 
 class Memory:
-    def __init__(self, db, call_logs=None):
+    def __init__(self, db, call_logs=None, timeline=None):
         self.db = db
         self.call_logs = call_logs
+        self.timeline = timeline
         self.profiles = MemoryProfiles(db, call_logs)
         self.tasks = {}
         self.last_seen = {}
@@ -305,6 +307,11 @@ class Memory:
         else:
             self.last_seen.pop(key, None)
 
+    async def trace_batch(self, key, kind, operation):
+        if self.timeline:
+            return await self.timeline.trace_background(key[0], kind, {"stream": key[1]}, operation)
+        return await operation()
+
     async def drain(self, key, model, validate_url):
         loop = asyncio.get_running_loop()
         try:
@@ -312,7 +319,9 @@ class Memory:
                 rows = self.batch(key)
                 if not self.ready(key[1], rows):
                     async with self.slots:
-                        await self.profiles.consolidate(*key, model, validate_url)
+                        if self.profiles.pending(*key):
+                            await self.trace_batch(key, "memory_portrait",
+                                                   lambda: self.profiles.consolidate(*key, model, validate_url))
                     self.results.pop(key, None)
                     if not self.ready(key[1], self.batch(key)):
                         return
@@ -322,7 +331,8 @@ class Memory:
                     await asyncio.sleep(remaining)
                     continue
                 async with self.slots:
-                    await self.extract(key, model, validate_url, self.batch(key))
+                    await self.trace_batch(key, "memory_generation",
+                                           lambda: self.extract(key, model, validate_url, self.batch(key)))
                     self.results.pop(key, None)
         except Exception as exc:
             self.results[key] = time.monotonic()
@@ -366,6 +376,8 @@ class Memory:
         evidence = {row["seq"]: row["subject"] for row in rows}
         existing = {row["id"]: row for row in known}
         now = time.time()
+        trace = task_trace(owner)
+        saved = []
         self.db.execute("SAVEPOINT save_memory_batch")
         try:
             seen = set()
@@ -393,11 +405,20 @@ class Memory:
                             if isinstance(tag, str) and tag.strip()))[:6] if isinstance(tags, list) else []
                 if match:
                     combined = list(dict.fromkeys(match["tags"] + tags))[:6]
-                    self.db.execute("UPDATE agent_memory SET updated=?,initial=?,tags=? WHERE id=? AND owner=?",
-                                    (now, min(1, max(initial, match["strength"] + 0.2)), json.dumps(combined), match["id"], owner))
+                    strength_after = min(1, max(initial, match["strength"] + 0.2))
+                    cursor = self.db.execute("UPDATE agent_memory SET updated=?,initial=?,tags=? WHERE id=? AND owner=?",
+                                             (now, strength_after, json.dumps(combined), match["id"], owner))
+                    if trace and cursor.rowcount:
+                        saved.append({"action": "reinforced", "id": match["id"], "subject": subject,
+                                      "text": match["text"], "tags": combined, "strength": strength_after,
+                                      "event": item["event"]})
                 elif len(self.user_entries(owner)) < 200:
-                    self.db.execute("""INSERT OR IGNORE INTO agent_memory(owner,subject,text,updated,created,kind,tags,initial)
+                    cursor = self.db.execute("""INSERT OR IGNORE INTO agent_memory(owner,subject,text,updated,created,kind,tags,initial)
                         VALUES(?,?,?,?,?,?,?,?)""", (owner, subject, text, now, now, kind, json.dumps(tags), initial))
+                    if trace and cursor.rowcount:
+                        saved.append({"action": "created", "id": cursor.lastrowid, "subject": subject,
+                                      "text": text, "kind": kind, "tags": tags, "strength": initial,
+                                      "event": item["event"]})
             self.db.executemany("UPDATE agent_memory_events SET done=1,text='',reply='' WHERE seq=?",
                                 [(row["seq"],) for row in rows])
         except BaseException:
@@ -405,3 +426,5 @@ class Memory:
             raise
         finally:
             self.db.execute("RELEASE save_memory_batch")
+        if trace:
+            trace.event("memory_write", "memory", {"candidates": len(items), "processed_events": len(rows), "saved": saved})

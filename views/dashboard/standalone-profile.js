@@ -1186,6 +1186,14 @@ function renderTaskTrace(report) {
       title = count ? "注入 " + count + " 条记忆" : "本轮未注入记忆";
       hint = input.enabled ? ({system_prompt: "私聊 · 系统提示词", "input.profiles": "群聊 · 输入中的对象画像"}[input.location]) : "长期记忆已关闭";
       fields = [["注入内容", input.injected]];
+    } else if (event.kind === "memory_write") {
+      title = event.label === "portrait" ? "写入对象画像" : "写入长期记忆";
+      hint = "处理 " + input.processed_events + " 条消息 · 模型提出 " + input.candidates + " 条 · 实际写入或更新 " + input.saved.length + " 条";
+      fields = [["实际保存内容", input.saved]];
+    } else if (event.kind === "error") {
+      title = "整理失败 · " + event.label;
+      hint = input.error;
+      fields = [["错误详情", input.message]];
     } else if (event.kind === "inbox") {
       title = "邮箱 · " + (inboxActions[event.label] || event.label);
       hint = input.total + " 条";
@@ -1232,7 +1240,7 @@ function mountAgentTimeline(panel) {
   const tasks = h("ul", {class: "agent-inbox-items"});
   const logs = h("ul", {class: "agent-inbox-items"});
   const filterControl = h("select", {"aria-label": "筛选任务"}, h("option", {value: ""}, "全部任务"),
-    h("option", {value: "memory"}, "记忆注入检查"));
+    h("option", {value: "memory"}, "记忆注入检查"), h("option", {value: "memory-generation"}, "记忆整理"));
   const content = h("section", {hidden: true}, filterControl, refresh, tasks,
     h("details", {}, h("summary", {}, "状态日志"), logs));
   panel.className = "profile-settings";
@@ -1309,9 +1317,9 @@ function mountAgentTimeline(panel) {
   toggle.onchange = () => load(toggle.checked);
   refresh.onclick = () => load();
   filterControl.onchange = () => { filter = filterControl.value; focusTask = undefined; load(); };
-  return ({task, memory = false} = {}) => {
+  return ({task, traceFilter = ""} = {}) => {
     focusTask = task;
-    filter = memory ? "memory" : "";
+    filter = traceFilter;
     filterControl.value = filter;
     load();
     loadEvents();
@@ -1350,7 +1358,9 @@ export function mountAdvanced(container) {
   memoryTab.textContent = "记忆模组";
   const loadStickers = stickerTab.onclick;
   const loadMemory = mountMemory(memory);
-  memory.prepend(h("button", {type: "button", onclick: () => openTimeline({memory: true})}, "查看记忆注入日志"));
+  memory.prepend(h("div", {class: "call-log-actions"},
+    h("button", {type: "button", onclick: () => openTimeline({traceFilter: "memory"})}, "查看记忆注入日志"),
+    h("button", {type: "button", onclick: () => openTimeline({traceFilter: "memory-generation"})}, "查看记忆整理日志")));
   const logTab = document.createElement("button");
   logTab.type = "button";
   logTab.textContent = "模型调用日志";

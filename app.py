@@ -106,7 +106,7 @@ class Demo:
         self.call_logs = CallLogs(self.db, self.profile)
         self.images = ImageLibrary(self)
         self.market_bulletin = MarketBulletin(self)
-        self.memory = Memory(self.db, call_logs=self.call_logs)
+        self.memory = Memory(self.db, call_logs=self.call_logs, timeline=self.timeline)
         self.external = ExternalAgent(self)
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS demo_profiles(owner TEXT PRIMARY KEY, data TEXT);
@@ -1029,7 +1029,7 @@ class Demo:
                         raise web.HTTPNotFound()
                     task["trace"] = self.timeline.trace_events(owner, int(task_id))
                     return web.json_response(task, headers={"Cache-Control": "no-store"})
-                trace_kind = "memory" if request.query.get("filter") == "memory" else ""
+                trace_kind = {"memory": "memory", "memory-generation": "memory-generation"}.get(request.query.get("filter"), "")
                 return web.json_response({"enabled": enabled,
                     "tasks": self.timeline.history(owner, limit=50, trace_kind=trace_kind) if enabled else [],
                     "logs": self.timeline.logs(owner) if enabled else []}, headers={"Cache-Control": "no-store"})

@@ -2,10 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from langchain.agents import create_agent
+from langchain_core.messages import AIMessage
 
 from app import Demo
 from src.agent.mcp.inbox.read_inbox import build
@@ -82,6 +84,42 @@ class TaskTraceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(config["key"], json.dumps(events))
                 self.assertEqual(demo.timeline.trace_events(other, second), [])
                 self.assertEqual(demo.call_logs.entries(owner), [])
+            finally:
+                await demo.timeline.close()
+                demo.db.close()
+
+    async def test_background_memory_trace_records_committed_items_and_failures(self):
+        with tempfile.TemporaryDirectory() as root:
+            demo = Demo(Path(root) / "test.sqlite3")
+            try:
+                owner = await demo.accounts.create_web_user("memory-trace", "temporary-test-password")
+                demo.db.execute("INSERT OR REPLACE INTO demo_profiles VALUES(?,?)",
+                                (owner, json.dumps({"timeline_debug": True})))
+                key = (owner, "private:trace-fixture")
+                demo.db.executemany("""INSERT INTO agent_memory_events(owner,stream,event,subject,text,reply)
+                    VALUES(?,?,?,'self',?,'')""", ((*key, f"user:{i}", f"Memory evidence {i}") for i in range(1, 6)))
+                seq = demo.memory.batch(key)[0]["seq"]
+                answer = AIMessage(content=json.dumps([{"event": seq, "text": "A real memory", "tags": ["test"]}]))
+                with patch("src.agent.memory.model_client") as client:
+                    client.return_value.ainvoke = AsyncMock(return_value=answer)
+                    await demo.memory.drain(key, {}, lambda url: url)
+                tasks = demo.timeline.history(owner, trace_kind="memory-generation")
+                task = next(item for item in tasks if item["kind"] == "memory_generation")
+                event = next(item for item in demo.timeline.trace_events(owner, task["id"]) if item["kind"] == "memory_write")
+                saved = event["request"]["saved"]
+                self.assertEqual([(item["action"], item["text"]) for item in saved], [("created", "A real memory")])
+                self.assertEqual(demo.memory.user_entries(owner)[0]["id"], saved[0]["id"])
+                self.assertEqual(demo.timeline.context(owner)["recent"], [])
+
+                async def broken():
+                    raise ValueError("invalid model JSON")
+
+                with self.assertRaisesRegex(ValueError, "invalid model JSON"):
+                    await demo.timeline.trace_background(owner, "memory_generation", {"stream": key[1]}, broken)
+                failed = demo.timeline.history(owner, trace_kind="memory-generation")[0]
+                self.assertEqual(failed["state"], "failed")
+                events = demo.timeline.trace_events(owner, failed["id"])
+                self.assertEqual(events[1]["request"]["message"], "invalid model JSON")
             finally:
                 await demo.timeline.close()
                 demo.db.close()

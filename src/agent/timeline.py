@@ -59,7 +59,7 @@ PRIORITY = {"private": 0, "group_mention": 1, "account_check": 1, "manual_watch"
             "proactive": 6, "patrol": 7}
 LABELS = {"private": "私聊", "group_mention": "群聊提及", "group": "群聊", "account_check": "账户事件检查",
           "watch": "定时看盘", "manual_watch": "手动看盘", "diary": "日记",
-          "proactive": "主动私聊", "patrol": "社区巡视", "private_followup": "私聊跟进",
+          "proactive": "主动私聊", "patrol": "社区巡视", "memory_generation": "记忆整理", "memory_portrait": "对象画像整理", "private_followup": "私聊跟进",
           "group_followup": "群聊跟进", "trade_review": "交易复盘", "group_summary": "群聊摘要"}
 
 
@@ -166,17 +166,46 @@ class AgentTimeline:
                                     (state, time.time(), outcome, ident))
                     self.debug(owner, ident, state, error)
                     if trace:
-                        trace.closed = True
-                        self.db.execute("""DELETE FROM agent_task_trace WHERE task IN (
-                            SELECT DISTINCT t.id FROM agent_tasks t JOIN agent_task_trace e ON e.task=t.id
-                            WHERE t.owner=? AND t.ended IS NOT NULL ORDER BY t.id DESC LIMIT -1 OFFSET 50)""",
-                            (owner,))
+                        self.close_trace(trace)
                     if key is not None:
                         self.dedup.pop((owner, key), None)
         finally:
             self.workers.pop(owner, None)
             self.queues.pop(owner, None)
             self.interrupt_pending(owner, queue)
+
+    def close_trace(self, trace):
+        trace.closed = True
+        self.db.execute("""DELETE FROM agent_task_trace WHERE task IN (
+            SELECT DISTINCT t.id FROM agent_tasks t JOIN agent_task_trace e ON e.task=t.id
+            WHERE t.owner=? AND t.ended IS NOT NULL ORDER BY t.id DESC LIMIT -1 OFFSET 50)""", (trace.owner,))
+
+    async def trace_background(self, owner, kind, details, execute):
+        settings = self.preferences(owner)
+        if not settings.get("timeline_debug"):
+            return await execute()
+        now = time.time()
+        ident = self.db.execute("INSERT INTO agent_tasks(owner,kind,state,created,started) VALUES(?,?,'running',?,?)",
+                                (owner, kind, now, now)).lastrowid
+        trace = TaskTrace(self.db, ident, owner, settings)
+        token = _active_task.set((owner, ident, trace))
+        state, outcome = "completed", "已完成"
+        trace.event("task", kind, details)
+        try:
+            return await execute()
+        except asyncio.CancelledError:
+            state, outcome = "interrupted", "已中断"
+            raise
+        except Exception as exc:
+            state, outcome = "failed", "整理失败"
+            trace.event("error", type(exc).__name__, {"error": error_label(exc), "message": str(exc)}, state)
+            raise
+        finally:
+            trace.event("result", outcome, {}, state)
+            _active_task.reset(token)
+            self.db.execute("UPDATE agent_tasks SET state=?,ended=?,outcome=? WHERE id=?",
+                            (state, time.time(), outcome, ident))
+            self.close_trace(trace)
 
     def interrupt_pending(self, owner, queue):
         for _, _, ident, _, _, future, key, _ in queue:
@@ -233,16 +262,17 @@ class AgentTimeline:
 
     def history(self, owner, limit=30, trace_kind=""):
         rows = self.db.execute("""SELECT id,kind,state,created,started,ended,outcome FROM agent_tasks
-            WHERE owner=? AND (?='' OR EXISTS (SELECT 1 FROM agent_task_trace e WHERE e.task=agent_tasks.id AND e.kind=?))
-            ORDER BY id DESC LIMIT ?""", (owner, trace_kind, trace_kind, limit))
+            WHERE owner=? AND (?='' OR (?='memory-generation' AND kind IN ('memory_generation','memory_portrait'))
+                OR EXISTS (SELECT 1 FROM agent_task_trace e WHERE e.task=agent_tasks.id AND e.kind=?))
+            ORDER BY id DESC LIMIT ?""", (owner, trace_kind, trace_kind, trace_kind, limit))
         return [dict(row) | {"label": LABELS.get(row["kind"], row["kind"])} for row in rows]
 
     def context(self, owner):
         rows = self.db.execute("""SELECT kind,state,ended,outcome FROM agent_tasks
-            WHERE owner=? AND ended IS NOT NULL ORDER BY ended DESC,id DESC LIMIT 8""", (owner,))
+            WHERE owner=? AND kind NOT IN ('memory_generation','memory_portrait') AND ended IS NOT NULL ORDER BY ended DESC,id DESC LIMIT 8""", (owner,))
         recent = [{"task": LABELS.get(row["kind"], row["kind"]), "result": row["outcome"], "ended": row["ended"]}
                   for row in reversed(rows.fetchall())]
-        active = self.db.execute("SELECT kind FROM agent_tasks WHERE owner=? AND state='running' ORDER BY id DESC LIMIT 1",
+        active = self.db.execute("SELECT kind FROM agent_tasks WHERE owner=? AND kind NOT IN ('memory_generation','memory_portrait') AND state='running' ORDER BY id DESC LIMIT 1",
                                  (owner,)).fetchone()
         return {"current": LABELS.get(active["kind"], active["kind"]) if active else None, "recent": recent}
 

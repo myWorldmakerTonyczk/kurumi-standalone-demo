@@ -1,5 +1,7 @@
 """Evidence-backed portraits, scoped to the conversation that supplied them."""
 import json
+
+from .timeline import task_trace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -135,10 +137,14 @@ class MemoryProfiles:
             actions = json.loads(raw)
             if not isinstance(actions, list):
                 raise ValueError("Expected memory profile array")
+        trace = task_trace(owner)
+        saved = []
         self.db.execute("SAVEPOINT consolidate_profiles")
         try:
             for action in actions[:16]:
-                self.apply(owner, stream, action, sources, existing)
+                applied = self.apply(owner, stream, action, sources, existing)
+                if trace and applied:
+                    saved.append(applied)
             self.db.execute("""INSERT INTO agent_memory_profile_progress VALUES(?,?,?)
                 ON CONFLICT(owner,stream) DO UPDATE SET last_seq=max(last_seq,excluded.last_seq)""",
                 (owner, stream, through))
@@ -147,6 +153,8 @@ class MemoryProfiles:
             raise
         finally:
             self.db.execute("RELEASE consolidate_profiles")
+        if trace:
+            trace.event("memory_write", "portrait", {"candidates": len(actions), "processed_events": len(sources), "saved": saved})
 
     def apply(self, owner, stream, action, sources, existing):
         if not isinstance(action, dict):
@@ -176,6 +184,7 @@ class MemoryProfiles:
             WHERE agent_memory_profiles.evidence<>excluded.evidence OR agent_memory_profiles.basis<>excluded.basis
             RETURNING id""", (owner, stream, subject, dimension, text.strip(), basis, evidence))
         saved = cursor.fetchone()
+        changed = saved is not None
         if not saved:
             saved = self.db.execute("""SELECT id FROM agent_memory_profiles WHERE
                 owner=? AND stream=? AND subject=? AND dimension=? AND text=?""",
@@ -185,3 +194,6 @@ class MemoryProfiles:
                             [(owner, stream, target) for target in replaced])
         for target in replaced:
             existing.pop(target)
+        if changed or replaced:
+            return {"id": saved[0], "subject": subject, "dimension": dimension, "text": text.strip(), "basis": basis,
+                    "evidence": json.loads(evidence), "replaced": sorted(replaced)}
