@@ -34,7 +34,7 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
         <button type="button" data-dock aria-pressed="false">固定</button>
         <button type="button" data-close aria-label="收起聊天">×</button>
       </div>
-      <div class="chat-log" role="log"></div>
+      <div class="chat-log" role="log"><button type="button" data-older hidden>加载更早消息</button></div>
       <form>
         <div class="chat-upload-preview" hidden><img alt="待发送图片"><button type="button" data-remove-image>移除</button></div>
         <textarea aria-label="消息" name="message" rows="2" maxlength="2000" placeholder="Enter 发送 · Shift + Enter 换行"></textarea>
@@ -47,6 +47,7 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
   const find = selector => root.querySelector(selector);
   const windowBox = find(".chat-window"), launch = find(".chat-launch");
   const log = find(".chat-log"), form = find("form"), status = find("[role=status]");
+  const older = find("[data-older]");
   const dock = find("[data-dock]");
   const expand = find("[data-expand]");
   let identity = {nickname:"你", agent_name:"久留美"};
@@ -81,6 +82,7 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
   let floatingPosition, drag, loadedGame, busy = false;
   let sending = 0, typing;
   let lastProactiveId = 0, polling = false;
+  let historyCursor = 0, loadingOlder = false, jumpId, jumpNodes = [];
   let previousTime, shownAssistant = 0, markedAssistant = 0, marking = false;
 
   async function markChatRead() {
@@ -108,13 +110,14 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     if (!response.ok) throw Error(result.error || "请求失败");
     return result;
   }
-  function add(role, content, attachments = [], id, created) {
+  function add(role, content, attachments = [], id, created, target = log, clock = null, follow = true) {
     if (created) {
-      const marker = chatTimeMarker(created, previousTime);
-      if (marker) log.append(marker);
-      previousTime = created;
+      const marker = chatTimeMarker(created, clock ? clock.previous : previousTime);
+      if (marker) target.append(marker);
+      if (clock) clock.previous = created;
+      else previousTime = created;
     }
-    if (id && role === "assistant") shownAssistant = Math.max(shownAssistant, Number(id));
+    if (target === log && id && role === "assistant") shownAssistant = Math.max(shownAssistant, Number(id));
     const row = document.createElement("div");
     row.className = role === "user" ? "chat-user" : "chat-assistant";
     row.classList.add("chat-message");
@@ -154,7 +157,7 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
     const user = role === "user";
     const hasBubble = Boolean(content || row.childNodes.length);
     if (hasBubble) decorate(row, user);
-    if (hasBubble || !attachments.length) log.append(row);
+    if (hasBubble || !attachments.length) target.append(row);
     for (const [index, image] of images.entries()) {
       const media = document.createElement("div");
       media.className = user ? "chat-image-message from-user" : "chat-image-message";
@@ -163,11 +166,57 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
         if (id) { media.id = row.id; media.tabIndex = -1; }
       }
       media.append(image);
-      log.append(media);
+      target.append(media);
     }
-    log.scrollTop = log.scrollHeight;
+    if (target === log && follow) log.scrollTop = log.scrollHeight;
     return row;
   }
+  async function appendHistory(entries, target) {
+    const clock = target === log ? null : {};
+    for (const message of entries) {
+      const parts = message.role === "assistant" ? await splitReply(message.content) : [message.content];
+      parts.forEach((part, i) => add(message.role, part, i === 0 ? message.attachments : [],
+        i === 0 ? message.id : undefined, i === 0 ? message.created : undefined, target, clock));
+    }
+  }
+
+  async function loadOlder() {
+    if (busy || sending || loadingOlder || older.hidden || !historyCursor || loadedGame !== gameId()) return;
+    const gid = loadedGame, before = historyCursor;
+    loadingOlder = true;
+    older.disabled = true;
+    older.textContent = "正在加载…";
+    try {
+      const {entries, has_more} = await request("chat-history", gid, undefined, {before});
+      const page = document.createDocumentFragment();
+      await appendHistory(entries, page);
+      if (busy || loadedGame !== gid || gid !== gameId() || historyCursor !== before) return;
+      const anchor = older.nextElementSibling;
+      const top = anchor?.getBoundingClientRect().top;
+      if (entries.some(entry => entry.id === jumpId)) {
+        jumpNodes.forEach(node => node.remove());
+        jumpNodes = [];
+        jumpId = undefined;
+      }
+      older.after(page);
+      historyCursor = entries[0]?.id ?? before;
+      older.hidden = !has_more;
+      if (anchor) log.scrollTop += anchor.getBoundingClientRect().top - top;
+    } catch {
+      older.textContent = "加载失败，点击重试";
+    } finally {
+      if (older.textContent === "正在加载…") older.textContent = "加载更早消息";
+      older.disabled = false;
+      loadingOlder = false;
+    }
+  }
+
+  older.onclick = loadOlder;
+  log.style.overflowAnchor = "none";
+  log.addEventListener("scroll", () => {
+    if (log.scrollTop <= 16 && older.textContent !== "加载失败，点击重试") loadOlder();
+  }, {passive: true});
+
   function position(left, top) {
     floatingPosition = {
       left: Math.max(8, Math.min(left, innerWidth - windowBox.offsetWidth - 8)),
@@ -222,19 +271,22 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
       const data = await request("state", gid);
       updateIdentity(data);
       const {chat} = data;
-      if (messageId && !chat.some(message => message.id === messageId)) {
+      const jump = document.createDocumentFragment();
+      jumpId = undefined;
+      if (messageId && !chat.some(message => message.id === Number(messageId))) {
         const {entry} = await request("chat-message", gid, undefined, {id: messageId});
-        chat.unshift(entry);
+        await appendHistory([entry], jump);
+        jumpId = entry.id;
       }
-      log.replaceChildren();
+      jumpNodes = Array.from(jump.childNodes);
+      log.replaceChildren(jump, older);
+      historyCursor = chat[0]?.id ?? 0;
+      older.hidden = !data.chat_has_more;
+      older.textContent = "加载更早消息";
       previousTime = undefined;
-      shownAssistant = 0;
+      shownAssistant = jumpId ?? 0;
       if (loadedGame !== gid) markedAssistant = 0;
-      for (const message of chat) {
-        const parts = message.role === "assistant" ? await splitReply(message.content) : [message.content];
-        parts.forEach((part, i) => add(message.role, part, i === 0 ? message.attachments : [], i === 0 ? message.id : undefined,
-          i === 0 ? message.created : undefined));
-      }
+      await appendHistory(chat, log);
       lastProactiveId = chat.at(-1)?.id ?? 0;
       loadedGame = gid;
       await markChatRead();
@@ -258,7 +310,8 @@ export function mountChat(gameId, {onExpand, onCollapse}) {
       const {entries} = await request("proactive-chat", gid, undefined, {after: lastProactiveId});
       if (busy || sending || gid !== loadedGame || gameId() !== gid) return;
       for (const entry of entries) {
-        add("assistant", entry.content, [], entry.id, entry.created);
+        const nearBottom = log.scrollHeight - log.clientHeight - log.scrollTop < 40;
+        add("assistant", entry.content, [], entry.id, entry.created, log, null, nearBottom);
         lastProactiveId = entry.id;
       }
       await markChatRead();

@@ -70,6 +70,21 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(len(state["chat"]), 4)
                             if name == "乙":
                                 gid = state["state"]["game"]["id"]
+                                demo.db.executemany("INSERT INTO demo_chat(game,role,content) VALUES(?,?,?)",
+                                                    ((gid, "user", str(i)) for i in range(45)))
+                                latest = await (await user.get("/api/state")).json()
+                                before = latest["chat"][0]["id"]
+                                history = []
+                                while before:
+                                    page = await user.get("/api/chat-history", params={"game": gid, "before": before})
+                                    self.assertEqual(page.status, 200, await page.text())
+                                    older = await page.json()
+                                    self.assertLessEqual(len(older["entries"]), 20)
+                                    history = older["entries"] + history
+                                    before = older["entries"][0]["id"] if older["has_more"] else 0
+                                combined = history + latest["chat"]
+                                self.assertEqual(len(combined), 49)
+                                self.assertEqual([item["id"] for item in combined], sorted({item["id"] for item in combined}))
                                 await demo.refresh()
                                 demo.engine.action(gid, "pause", {})
                                 trade = await user.post("/api/action", params={"game": gid}, json=dict(

@@ -1454,6 +1454,16 @@ class Demo:
                     raise ValueError("请输入 1～2000 个字符或添加一张图片")
                 reply, attachments, entry = await self.social.user_chat(game, message, user_image=user_image)
                 return web.json_response({"reply": reply, "attachments": attachments, "entry": entry})
+            if action == "chat-history" and request.method == "GET" and session["mode"] == "account" and game:
+                before = int(request.query.get("before", "0"))
+                if not 0 < before < 2**63:
+                    raise ValueError("私聊历史游标无效")
+                rows = self.db.execute("""SELECT id,role,content,attachments,created FROM demo_chat
+                    WHERE game=? AND id<? ORDER BY id DESC LIMIT 21""", (game["id"], before)).fetchall()
+                return web.json_response({
+                    "entries": [dict(row, attachments=json.loads(row["attachments"])) for row in reversed(rows[:20])],
+                    "has_more": len(rows) > 20,
+                }, headers={"Cache-Control": "no-store"})
             if action == "chat-message" and request.method == "GET" and session["mode"] == "account" and game:
                 entry = self.db.execute("""SELECT id,role,content,attachments,created FROM demo_chat
                     WHERE game=? AND id=? AND role='assistant'""", (game["id"], request.query.get("id", ""))).fetchone()
@@ -1462,7 +1472,7 @@ class Demo:
                 return web.json_response({"entry": dict(entry, attachments=json.loads(entry["attachments"]))},
                                          headers={"Cache-Control": "no-store"})
             if action == "state" and request.method == "GET":
-                rows = self.db.execute("SELECT id,role,content,attachments,created FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 20",
+                rows = self.db.execute("SELECT id,role,content,attachments,created FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 21",
                                        (game["id"],)).fetchall() if game else []
                 return web.json_response(dict(avatar=current.get("avatar", "user-avatar.svg"),
                     nickname=self.db.execute("SELECT nickname FROM sim_users WHERE id=?", (owner,)).fetchone()[0],
@@ -1470,7 +1480,8 @@ class Demo:
                     split_delay_min=current.get("split_delay_min", 1.5),
                     split_delay_max=current.get("split_delay_max", 3),
                     agent_mode=current.get("agent_mode", "platform"), split_pattern=current.get("split_pattern", ""), split_reply=current.get("split_reply", True), agent_name=current.get("agent_name", "久留美"), agent_avatar=current.get("agent_avatar", "avatar.png"), state=public_snapshot(self, game["id"], 20) if game else None,
-                    chat=[dict(row, attachments=json.loads(row["attachments"])) for row in reversed(rows)], profile={k: current.get(k, "")
+                    chat=[dict(row, attachments=json.loads(row["attachments"])) for row in reversed(rows[:20])],
+                    chat_has_more=len(rows) > 20, profile={k: current.get(k, "")
                     for k in ("persona", "url", "model")} | {"persona": persona_body(current.get("persona") or ""),
                         "user_relationship": current.get("user_relationship") or "朋友"},
                     has_key=bool(selected(current).get("key")), demo=self.demo))
