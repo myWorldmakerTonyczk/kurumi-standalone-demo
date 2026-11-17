@@ -67,6 +67,14 @@ flowchart LR
 - **LangChain / LangChain OpenAI** 负责模型与工具调用。模型可以选择操作，成交价格、权限和结果由本地模拟引擎校验和记录。
 - 前端使用原生 JavaScript、CSS、HTML，使用 **TradingView Lightweight Charts** 绘制行情，不需要前端构建步骤。
 
+### 智能体按需加载工具
+
+普通用户的智能体通过 `load_tool_group` 加载当前任务所需的工具组。
+
+- 传 `{}` 查看当前场景可用的工具组及用途。
+- 传 `{"categories": ["inbox", "community"]}` 一次加载邮箱和社区工具组。返回结果按组列出工具名，下一轮模型调用会收到这些工具的完整定义。
+- 旧的单组调用 `{"category": "inbox"}` 仍可使用。批量请求中的类别会去重。如果有当前场景不可用的类别，该次请求会返回不可用的类别，整批暂不加载。
+
 ## 起点声明与赛期工作
 
 项目起点是已有的 [AstrBot 久留美模拟器插件](https://github.com/myWorldmakerTonyczk/astrbot_plugin_kurumi_simulator)。虚拟账本、结算、行情接入和原面板风格有赛前基础，独立版沿用了这些实现。

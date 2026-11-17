@@ -13,7 +13,12 @@ CATALOG = {
     "timeline": "预约任务、查任务时间线与执行报告。",
 }
 
-INSTRUCTIONS = "需要工具时可调用 load_tool_group。知道类别就用 categories 传入所需类别列表，不确定时留空查目录。没有工具需求可直接回复。"
+INSTRUCTIONS = (
+    '需要工具时可调用 load_tool_group。传 {} 查看当前可用目录。'
+    '如果已知需要哪些组，请一次传入所需类别，例如 {"categories": ["inbox", "community"]}。'
+    '加载结果列出各组工具名，从下一轮开始可以按工具定义直接调用。没有工具需求可直接回复。'
+)
+
 
 
 def tool_name(tool):
@@ -30,7 +35,15 @@ class ToolGroups(AgentMiddleware):
 
     def _loader(self):
         def load_tool_group(category: str = "", categories: list[str] | None = None) -> str:
-            """启用一个或多个工具组。categories 接收类别列表，category 接收单个类别。留空查看目录。"""
+            """按需加载当前场景的工具组。
+
+            无参数时返回可用类别。用 categories 一次加载多组，
+            例如 {"categories": ["inbox", "community"]}。成功后下一轮即可调用这些工具。
+
+            Args:
+                category: 单个类别，兼容旧调用。
+                categories: 要一起加载的类别列表。重复类别会去重。
+            """
             requested = dict.fromkeys(([category] if category else []) + (categories or []))
             if not requested:
                 return dump({"groups": {name: CATALOG[name] for name in self.groups}})
@@ -45,7 +58,9 @@ class ToolGroups(AgentMiddleware):
                 }})
             return dump({"ok": True, "enabled": category, "tools": [tool_name(tool) for tool in self.groups[category]]})
 
-        load_tool_group.__doc__ += " 可用类别：" + "、".join(self.groups)
+        load_tool_group.__doc__ = load_tool_group.__doc__.replace(
+            "            Args:", "            可用类别为 " + "、".join(self.groups) + "。\n\n            Args:"
+        )
         return load_tool_group
 
     def available(self):
