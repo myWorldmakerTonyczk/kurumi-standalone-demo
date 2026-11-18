@@ -328,6 +328,7 @@ class Social:
                                 for row in rows if not row["is_agent"]]
                     portrait = self.app.memory.profiles.context(owner, f"group:{room}", subjects)
                     if portrait:
+                        prompt += "\n当前时间（北京时间）：" + datetime.now(ZONE).isoformat(timespec="seconds")
                         prompt += "\n" + workflow("private_memory_context")
                 from .vision import describe_image
 

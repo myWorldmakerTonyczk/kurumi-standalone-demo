@@ -4,8 +4,10 @@ import json
 import logging
 import math
 from collections import Counter
+from datetime import datetime
 import re
 import time
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -17,6 +19,7 @@ from .model_registry import model_client
 
 log = logging.getLogger(__name__)
 MEMORY_DAYS = 90
+BEIJING = ZoneInfo("Asia/Shanghai")
 BATCH_THRESHOLD = 5
 FORUM_COMMENT_THRESHOLD = 6
 CHARACTER_MEMORIES = (
@@ -172,7 +175,7 @@ class Memory:
             return []
 
         rows = self.db.execute(
-            """SELECT text,tags,updated,created,initial FROM agent_memory
+            """SELECT text,tags,updated,created,initial,kind FROM agent_memory
                WHERE owner=? AND subject=? AND initial > 0 AND updated > ?""",
             (owner, subject, time.time() - MEMORY_DAYS * 86400),
         )
@@ -216,7 +219,12 @@ class Memory:
             if normalized in seen:
                 continue
             seen.add(normalized)
-            result.append({"text": text, "created": int(row["created"] or row["updated"])})
+            entry = {"text": text, "kind": row["kind"]}
+            if row["created"]:
+                entry["created_at"] = datetime.fromtimestamp(row["created"], BEIJING).isoformat(timespec="seconds")
+            elif not row.get("permanent"):
+                entry["updated_at"] = datetime.fromtimestamp(row["updated"], BEIJING).isoformat(timespec="seconds")
+            result.append(entry)
             if len(result) == 5:
                 break
         return result
@@ -249,8 +257,9 @@ class Memory:
         if action == "add":
             if len(self.user_entries(owner)) >= 200:
                 raise ValueError("最多保存 200 条记忆")
-            self.db.execute("INSERT OR IGNORE INTO agent_memory(owner,subject,text,updated) VALUES(?,?,?,?)",
-                            (owner, subject, text.strip(), time.time()))
+            now = time.time()
+            self.db.execute("INSERT OR IGNORE INTO agent_memory(owner,subject,text,updated,created) VALUES(?,?,?,?,?)",
+                            (owner, subject, text.strip(), now, now))
             return
         entry = body.get("id")
         if type(entry) is not int or not 0 < entry < 2**63:

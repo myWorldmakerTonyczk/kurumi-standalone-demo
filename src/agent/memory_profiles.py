@@ -66,10 +66,17 @@ class MemoryProfiles:
     def context(self, owner, stream, subjects):
         result = []
         for subject in dict.fromkeys(subjects):
-            rows = self.db.execute("""SELECT dimension,text,basis FROM agent_memory_profiles
+            rows = self.db.execute("""SELECT dimension,text,basis,evidence,updated FROM agent_memory_profiles
                 WHERE owner=? AND stream=? AND subject=?
                 ORDER BY (basis='declared') DESC,updated DESC,id DESC LIMIT 3""", (owner, stream, subject))
-            result.extend(dict(row) | {"subject": subject} for row in rows)
+            for row in rows:
+                entry = {key: row[key] for key in ("dimension", "text", "basis")}
+                entry["subject"] = subject
+                entry["updated_at"] = datetime.fromtimestamp(row["updated"], ZONE).isoformat(timespec="seconds")
+                dates = [item["date"] for item in json.loads(row["evidence"]) if item.get("date")]
+                if dates:
+                    entry["last_evidence_date"] = max(dates)
+                result.append(entry)
             if len(result) >= 6:
                 break
         return result[:6]

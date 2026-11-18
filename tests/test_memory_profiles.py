@@ -50,6 +50,25 @@ class MemoryProfileTests(unittest.IsolatedAsyncioTestCase):
         current = profiles.context("owner", scope, ["self"])
         self.assertEqual([item["text"] for item in current], [correction["text"]])
         self.assertEqual(current[0]["basis"], "declared")
+        self.assertEqual(current[0]["last_evidence_date"], proof[3]["date"])
+        self.assertTrue(current[0]["updated_at"].endswith("+08:00"))
+
+    def test_automatic_recall_keeps_creation_time_after_reinforcement(self):
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        db.row_factory = sqlite3.Row
+        db.executescript("CREATE TABLE sim_users(id TEXT PRIMARY KEY); INSERT INTO sim_users VALUES('owner');")
+        memory = Memory(db)
+        db.execute("INSERT INTO agent_memory(owner,text,created,updated,kind) VALUES(?,?,?,?,?)",
+                   ("owner", "Previous EURUSD plan", 1700043200, 1700648000, "event"))
+        db.execute("INSERT INTO agent_memory(owner,text,created,updated,kind) VALUES(?,?,?,?,?)",
+                   ("owner", "Legacy EURUSD note", 0, 1700648000, "knowledge"))
+        with patch("src.agent.memory.time.time", return_value=1701252800):
+            entries = {item["text"]: item for item in memory.recall("owner", "EURUSD")}
+        self.assertEqual(entries["Previous EURUSD plan"]["created_at"], "2023-11-15T18:13:20+08:00")
+        self.assertNotIn("created_at", entries["Legacy EURUSD note"])
+        self.assertTrue(entries["Legacy EURUSD note"]["updated_at"].endswith("+08:00"))
+
 
     async def test_failed_model_call_preserves_unprocessed_profile_evidence(self):
         db = sqlite3.connect(":memory:", isolation_level=None)
