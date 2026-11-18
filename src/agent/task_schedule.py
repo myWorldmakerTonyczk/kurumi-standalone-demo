@@ -19,11 +19,15 @@ class TaskSchedule:
           kind TEXT NOT NULL, purpose TEXT NOT NULL, trigger TEXT NOT NULL, target TEXT NOT NULL,
           created REAL NOT NULL, expires REAL NOT NULL, state TEXT NOT NULL DEFAULT 'waiting',
           previous TEXT, task INTEGER);
+        CREATE TABLE IF NOT EXISTS agent_watch_postponements(
+          owner TEXT PRIMARY KEY REFERENCES sim_users(id) ON DELETE CASCADE, triggered REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_task_events(
           id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, event_key TEXT NOT NULL,
           owner TEXT, payload TEXT NOT NULL, created REAL NOT NULL, handled INTEGER NOT NULL DEFAULT 0,
           UNIQUE(kind,event_key));
         """)
+        if "created_by" not in {row[1] for row in self.db.execute("PRAGMA table_info(agent_task_appointments)")}:
+            self.db.execute("ALTER TABLE agent_task_appointments ADD COLUMN created_by TEXT")
 
     def account_event(self, game, entry):
         if not game.get("owner_id") or entry["status"] != "success":
@@ -57,7 +61,33 @@ class TaskSchedule:
         except InvalidOperation:
             raise ValueError("价格须为正数") from None
 
-    def schedule(self, owner, kind, purpose, trigger, *, room_id=0, bulletin_id="", message_id=0):
+    def pending(self, owner, *, room=None):
+        rows = self.db.execute("""SELECT id,kind,purpose,trigger,target FROM agent_task_appointments
+            WHERE owner=? AND state='waiting' AND expires>=? ORDER BY id""", (owner, time.time()))
+        return [{"id": row["id"], "kind": row["kind"], "purpose": row["purpose"], "trigger": json.loads(row["trigger"])}
+                for row in rows if room is None or (row["kind"] == "group_followup"
+                and str(json.loads(row["target"]).get("room_id")) == str(room))]
+
+    def cancel(self, owner, appointment_id):
+        if type(appointment_id) is not int or not 0 < appointment_id < 2**63:
+            raise ValueError("预约编号无效")
+        result = self.db.execute("""UPDATE agent_task_appointments SET state='cancelled'
+            WHERE id=? AND owner=? AND state='waiting' AND expires>=?""",
+            (appointment_id, owner, time.time()))
+        if not result.rowcount:
+            raise ValueError("没有可取消的待执行预约")
+        return {"ok": True, "appointment_id": appointment_id, "state": "cancelled"}
+
+    def postpone_watch(self, owner, now):
+        self.db.execute("INSERT OR REPLACE INTO agent_watch_postponements VALUES(?,?)", (owner, now))
+        self.db.execute("""INSERT OR REPLACE INTO demo_schedule(game,due)
+            SELECT id,? FROM games WHERE json_extract(data,'$.owner_id')=?""", (now + 3600, owner))
+
+    def watch_was_postponed(self, owner, queued_at):
+        return self.db.execute("SELECT 1 FROM agent_watch_postponements WHERE owner=? AND triggered>?",
+                               (owner, queued_at)).fetchone() is not None
+
+    def schedule(self, owner, kind, purpose, trigger, *, room_id=0, bulletin_id="", message_id=0, created_by=None):
         if kind not in ("watch", "patrol", "private_followup", "group_followup") or not 1 <= len(purpose.strip()) <= 240:
             raise ValueError("任务类型无效，或任务目的超过 240 字")
         if kind == "group_followup" and (not room_id or not self.app.social.joined(room_id, owner)):
@@ -80,7 +110,7 @@ class TaskSchedule:
             delay = trigger.get("seconds")
             if type(delay) not in (int, float) or not math.isfinite(delay) or not 0 < delay <= 30 * 86400:
                 raise ValueError("延迟须在 30 天以内")
-            rule["due"] = now + delay
+            rule.update(due=now + delay, seconds=delay)
         elif mode == "at":
             stamp = datetime.fromisoformat(str(trigger.get("time", "")))
             if stamp.tzinfo is None or not now <= stamp.timestamp() <= now + 30 * 86400:
@@ -116,15 +146,34 @@ class TaskSchedule:
         else:
             raise ValueError("未知触发类型")
         target = dump({"room_id": room_id, "bulletin_id": bulletin_id, "message_id": message_id})
-        pending = self.db.execute("""SELECT id FROM agent_task_appointments WHERE owner=? AND kind=? AND purpose=?
-            AND trigger=? AND target=? AND state='waiting'""", (owner, kind, purpose, dump(rule), target)).fetchone()
-        if pending:
-            return {"appointment_id": pending["id"], "state": "waiting"}
+        pending = self.db.execute("""SELECT id,purpose,trigger,created FROM agent_task_appointments
+            WHERE owner=? AND kind=? AND target=? AND state='waiting' AND expires>=? ORDER BY id""",
+            (owner, kind, target, now)).fetchall()
+        for row in pending:
+            previous = json.loads(row["trigger"])
+            if previous["type"] == "delay" and "seconds" not in previous:
+                previous["seconds"] = round(previous["due"] - row["created"], 6)
+            if (kind == "watch" or row["purpose"] == purpose.strip()) and self.matches_waiting_rule(rule, previous):
+                return {"appointment_id": row["id"], "state": "waiting", "existing": True, "due": previous.get("due")}
         if self.db.execute("SELECT count(*) FROM agent_task_appointments WHERE owner=? AND state='waiting'", (owner,)).fetchone()[0] >= 30:
             raise ValueError("每个智能体最多等待 30 个预约")
-        ident = self.db.execute("""INSERT INTO agent_task_appointments(owner,kind,purpose,trigger,target,created,expires)
-            VALUES(?,?,?,?,?,?,?)""", (owner, kind, purpose.strip(), dump(rule), target, now, now + 30 * 86400 + 60)).lastrowid
+        ident = self.db.execute("""INSERT INTO agent_task_appointments(owner,kind,purpose,trigger,target,created,expires,created_by)
+            VALUES(?,?,?,?,?,?,?,?)""", (owner, kind, purpose.strip(), dump(rule), target, now, now + 30 * 86400 + 60, created_by)).lastrowid
         return {"appointment_id": ident, "state": "waiting", "due": rule.get("due")}
+
+    @staticmethod
+    def matches_waiting_rule(rule, previous):
+        if rule["type"] != previous["type"]:
+            return False
+        if rule["type"] == "quote":
+            values = ("low", "high") if rule["condition"] == "enter_range" else ("price",)
+            return (all(rule.get(k) == previous.get(k) for k in ("pair", "side", "condition"))
+                    and all(Decimal(rule[k]) == Decimal(previous[k]) for k in values))
+        if rule["type"] == "immediate":
+            return True
+        if rule["type"] == "delay" and "seconds" in previous:
+            return rule["seconds"] == previous["seconds"]
+        return rule == previous
 
     def quote_match(self, row, rule, now):
         quote = self.app.engine.quotes.get(rule["pair"], {})
@@ -178,9 +227,10 @@ class TaskSchedule:
             prompt = "处理预约看盘任务。目的：" + purpose + "\n触发证据：" + dump(evidence)
             return await self.app._agent(game, task_instruction=prompt, readonly=readonly)
 
+        origin = "account_and_appointment" if readonly and evidence.get("appointments") else "account_event" if readonly else "appointment"
         ident, _ = self.app.timeline.enqueue(owner, "account_check" if readonly else kind, execute, key=key,
             outcome=lambda result: ("已完成账户检查" if readonly else "已完成预约任务") if result else "已跳过",
-            report={"purpose": purpose, "trigger": evidence, "dispatch_key": dispatch_key,
+            report={"purpose": purpose, "trigger": evidence, "dispatch_key": dispatch_key, "origin": origin,
                     "appointment_dispatch": {"kind": kind, "target": target, "readonly": readonly}})
         return ident
 
@@ -233,13 +283,15 @@ class TaskSchedule:
                 if system:
                     purposes.insert(0, "检查" + EVENT_LABELS[kind])
                 evidence = {"event": kind, "event_id": event["id"], "event_at": event["created"], "match": payload,
-                            "system": system, "appointments": [{"id": row["id"], "condition": rule} for row, rule in matches]}
+                            "system": system, "appointments": [{"id": row["id"], "condition": rule, "created_by": row["created_by"]} for row, rule in matches]}
                 if (kind == "mention" and payload.get("normal_reply") and task_kind == "group_followup"
                         and target.get("room_id") == payload.get("room_id")):
                     ident = None  # The existing directed group task handles this mention.
                 else:
                     ident = self.dispatch(recipient, task_kind, "；".join(purposes), target, evidence,
                                           readonly=system, key=("event", event["id"], task_kind) if task_kind == "watch" else None)
+                if matches:
+                    self.postpone_watch(recipient, now)
                 for row, _ in matches:
                     self.db.execute("UPDATE agent_task_appointments SET state='triggered',task=? WHERE id=?", (ident, row["id"]))
             self.db.execute("UPDATE agent_task_events SET handled=1 WHERE id=?", (event["id"],))
@@ -251,5 +303,6 @@ class TaskSchedule:
             if match is None:
                 continue
             ident = self.dispatch(row["owner"], row["kind"], row["purpose"], json.loads(row["target"]),
-                                  {"appointment_id": row["id"], "condition": rule, "match": match})
+                                  {"appointment_id": row["id"], "condition": rule, "match": match, "created_by": row["created_by"]})
+            self.postpone_watch(row["owner"], now)
             self.db.execute("UPDATE agent_task_appointments SET state='triggered',task=? WHERE id=?", (ident, row["id"]))

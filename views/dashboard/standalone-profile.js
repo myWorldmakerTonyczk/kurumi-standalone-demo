@@ -1298,6 +1298,8 @@ function mountAgentTimeline(panel) {
         if (task.id === focusTask) open.open = true;
         return h("li", {},
         h("strong", {}, task.label + " · " + labels[task.state]),
+        task.origin ? h("small", {}, ({automatic: "自动定时", manual: "用户手动", appointment: "预约触发",
+          account_event: "账户事件", account_and_appointment: "账户事件与预约合并"})[task.origin]) : null,
         h("small", {}, "#" + task.id + " · " + formatTime(task.created)),
         task.outcome ? h("p", {}, task.outcome) : null, open);
       }));

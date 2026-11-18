@@ -10,7 +10,7 @@ from .memory import search_memory, write_memory
 from .trading import (cancel_limit_order, close_position, open_trade, place_limit_order, record_observation, set_notifications,
                       set_protection, virtual_loan, write_plan)
 from .trading.execution import bind_trade
-from .timeline import get_task_report, query_task_timeline, schedule_task
+from .timeline import cancel_scheduled_task, get_task_report, query_task_timeline, schedule_task
 
 
 def flatten(groups):
@@ -24,8 +24,11 @@ def inbox_group(app, owner):
 def timeline_group(app, owner, *, public=False):
     if not hasattr(app, "task_schedule"):
         return []
-    return [schedule_task.build(app, owner, public), get_task_report.build(app, owner, public),
-            query_task_timeline.build(app, owner)]
+    tools = [schedule_task.build(app, owner, public), get_task_report.build(app, owner, public),
+             query_task_timeline.build(app, owner, public)]
+    if not public:
+        tools.append(cancel_scheduled_task.build(app, owner))
+    return tools
 
 
 def user_workspace_groups(app, gid, *, writable, revision, attachments=None, user_image=None,

@@ -99,6 +99,7 @@ class Demo:
         self.default_persona = DEFAULT_PERSONA
         self.timeline = AgentTimeline(self.db, self.profile)
         self.task_schedule = TaskSchedule(self)
+        self.timeline.pending_appointments = self.task_schedule.pending
         self.social = Social(self)
         self.stickers = Stickers(self.db)
         self.agent_inbox = AgentInbox(self.engine)
@@ -155,8 +156,16 @@ class Demo:
 
     def enqueue_decision(self, game, *, manual=False):
         kind = "manual_watch" if manual else "watch"
-        return self.timeline.enqueue(game["owner_id"], kind,
-            lambda: self._run_decision(self.engine.get(game["id"]), manual=manual),
+        queued_at = time.time()
+
+        async def execute_decision():
+            if not manual and self.task_schedule.watch_was_postponed(game["owner_id"], queued_at):
+                self.timeline.note(game["owner_id"], {"skip_reason": "预约已触发，自动看盘重新计时"})
+                return ""
+            return await self._run_decision(self.engine.get(game["id"]), manual=manual)
+
+        return self.timeline.enqueue(game["owner_id"], kind, execute_decision,
+            report={"origin": "manual" if manual else "automatic"},
             key=None if manual else ("watch", game["id"]),
             outcome=lambda result: "已完成看盘" if result else "已跳过")
 
@@ -468,13 +477,15 @@ class Demo:
                     handoff=message is None and diary_prompt is None and self.external.settings(owner)["mode"] == "platform")
                 tools = flatten(groups)
                 instructions = workflow("private") + "\n" + workflow("forum_authorship")
-                instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner))
+                instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner)) + "\n预约前先检查 pending_appointments。已有相同条件时沿用。工具明确拒绝本轮写入时不要重复重试。"
                 if attachments is not None:
                     initial_tools = ()
                     if message is not None:
                         initial_tools = ("watch_market", "read_journal")
                         if any(word in message for word in ("提醒", "唤醒", "预约", "叫醒我", "叫我")):
                             initial_tools += ("schedule_task",)
+                            if any(word in message for word in ("取消", "撤销")):
+                                initial_tools += ("cancel_scheduled_task",)
                         instructions += "\n" + workflow("private_tool_reads")
                     middleware.insert(1, ToolGroups(groups, initial=initial_tools))
                     instructions += "\n" + TOOL_INSTRUCTIONS

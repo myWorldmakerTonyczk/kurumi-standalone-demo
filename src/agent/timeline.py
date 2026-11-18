@@ -68,6 +68,7 @@ class AgentTimeline:
         self.db, self.preferences = db, preferences
         self.queues, self.workers, self.dedup = {}, {}, {}
         self.order = itertools.count()
+        self.pending_appointments = None
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS agent_tasks(
             id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL REFERENCES sim_users(id) ON DELETE CASCADE,
@@ -261,20 +262,27 @@ class AgentTimeline:
                 "next_before": rows[limit-1]["id"] if len(rows) > limit else None}
 
     def history(self, owner, limit=30, trace_kind=""):
-        rows = self.db.execute("""SELECT id,kind,state,created,started,ended,outcome FROM agent_tasks
-            WHERE owner=? AND (?='' OR (?='memory-generation' AND kind IN ('memory_generation','memory_portrait'))
+        rows = self.db.execute("""SELECT id,kind,state,created,started,ended,outcome,
+            (SELECT coalesce(json_extract(data,'$.origin'), CASE
+                WHEN agent_tasks.kind='account_check' THEN 'account_event'
+                WHEN json_extract(data,'$.appointment_dispatch') IS NOT NULL THEN 'appointment'
+                WHEN agent_tasks.kind='watch' THEN 'automatic'
+                WHEN agent_tasks.kind='manual_watch' THEN 'manual' END)
+                FROM agent_task_reports WHERE task=agent_tasks.id) AS origin
+            FROM agent_tasks WHERE owner=? AND (?='' OR (?='memory-generation' AND kind IN ('memory_generation','memory_portrait'))
                 OR EXISTS (SELECT 1 FROM agent_task_trace e WHERE e.task=agent_tasks.id AND e.kind=?))
             ORDER BY id DESC LIMIT ?""", (owner, trace_kind, trace_kind, trace_kind, limit))
         return [dict(row) | {"label": LABELS.get(row["kind"], row["kind"])} for row in rows]
 
-    def context(self, owner):
+    def context(self, owner, *, room=None):
         rows = self.db.execute("""SELECT kind,state,ended,outcome FROM agent_tasks
             WHERE owner=? AND kind NOT IN ('memory_generation','memory_portrait') AND ended IS NOT NULL ORDER BY ended DESC,id DESC LIMIT 8""", (owner,))
         recent = [{"task": LABELS.get(row["kind"], row["kind"]), "result": row["outcome"], "ended": row["ended"]}
                   for row in reversed(rows.fetchall())]
         active = self.db.execute("SELECT kind FROM agent_tasks WHERE owner=? AND kind NOT IN ('memory_generation','memory_portrait') AND state='running' ORDER BY id DESC LIMIT 1",
                                  (owner,)).fetchone()
-        return {"current": LABELS.get(active["kind"], active["kind"]) if active else None, "recent": recent}
+        return {"current": LABELS.get(active["kind"], active["kind"]) if active else None, "recent": recent,
+                "pending_appointments": self.pending_appointments(owner, room=room) if self.pending_appointments else []}
 
     def logs(self, owner):
         return [dict(row) for row in self.db.execute("""SELECT d.task,d.created,d.state,d.error_type

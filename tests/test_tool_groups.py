@@ -41,7 +41,9 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
 
                 observe = ("record_observation", {"reason": "tool observation"})
                 opening = ("open_trade", {"side": "buy", "units": 100, "reason": "simulated trade"})
-                for calls, expected in [([], ["observe"]), ([observe, observe], ["observe"]), ([opening, observe], ["open"])]:
+                plan = ("write_plan", {"text": "Next step", "reason": "updated after opening"})
+                for calls, expected in [([], ["observe"]), ([observe, observe], ["observe"]),
+                                        ([opening, observe], ["open"]), ([opening, plan], ["plan", "open"])]:
                     with self.subTest(calls=calls):
                         count = len(app.engine.logs(gid))
                         responses = [AIMessage(content="", tool_calls=[dict(name=name, args=args, id=f"call-{index}")])

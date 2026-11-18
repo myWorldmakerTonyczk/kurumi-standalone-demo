@@ -365,7 +365,7 @@ class Social:
                 agent = create_agent(model, tools=flatten(groups),
                     middleware=[TraceTools(), ToolGroups(groups, initial=("mention_group_member",))],
                     system_prompt=prompt + "\n" + TOOL_INSTRUCTIONS + "\n近期任务时间线：" +
-                    dump(self.app.timeline.context(owner)))
+                    dump(self.app.timeline.context(owner, room=room)))
                 if trace := task_trace(owner):
                     trace.event("memory", "group", {"location": "input.profiles", "enabled": memory_config.get("enabled", True),
                                                    "injected": {"profiles": portrait}})
@@ -512,7 +512,7 @@ class Social:
                 "\n你在处理上一项任务交接的聊天跟进。根据当前会话的最新消息决定是否发送。"
                 "说明只是内部意图，不要复述内部任务信息或公开私聊、私有账户内容。"
                 "已经说过、时机不合适或无实际内容时只输出 [SKIP]。"
-                "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
+                "\n近期任务时间线：" + dump(self.app.timeline.context(owner, room=room_id if channel == "group" else None)))
         async with self.slots:
             result = await agent.ainvoke({"messages": [HumanMessage(content=dump(
                 {"channel": channel, "handoff": details, "history": history}))]}, config={"recursion_limit": 12})

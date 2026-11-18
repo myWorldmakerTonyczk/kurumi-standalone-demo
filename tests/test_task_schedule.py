@@ -29,6 +29,40 @@ class TaskScheduleTest(unittest.IsolatedAsyncioTestCase):
         self.app.task_schedule.tick()
         await asyncio.gather(*self.app.timeline.workers.values())
 
+    async def test_appointment_visibility_dedup_cancellation_and_hourly_reset(self):
+        scheduler = self.app.task_schedule
+        rule = {"type": "quote", "pair": "EUR/USD", "side": "bid", "condition": "cross_up", "price": "1.1"}
+        first = scheduler.schedule(self.owner, "watch", "first", rule, created_by="agent_tool")
+        second = scheduler.schedule(self.owner, "watch", "different wording", rule | {"price": "1.1000"})
+        self.assertEqual(first["appointment_id"], second["appointment_id"])
+        self.assertTrue(second["existing"])
+        context = self.app.timeline.context(self.owner)
+        self.assertEqual(context["pending_appointments"][0]["id"], first["appointment_id"])
+        self.assertEqual(self.app.timeline.context(self.owner, room=5)["pending_appointments"], [])
+        other = await self.app.accounts.create_web_user("other-scheduler", "temporary-password")
+        with self.assertRaises(ValueError):
+            scheduler.cancel(other, first["appointment_id"])
+        scheduler.cancel(self.owner, first["appointment_id"])
+        self.assertFalse(scheduler.pending(self.owner))
+
+        gid = self.game["id"]
+        now = time.time()
+        first = scheduler.schedule(self.owner, "watch", "first wakeup", {"type": "immediate"}, created_by="agent_tool")
+        _, queued = self.app.enqueue_decision(self.game)
+        await self.drain()
+        self.assertEqual(await queued, "")
+        self.assertTrue(scheduler.watch_was_postponed(self.owner, now))
+        due = self.app.db.execute("SELECT due FROM demo_schedule WHERE game=?", (gid,)).fetchone()[0]
+        self.assertGreaterEqual(due, now + 3600)
+        self.assertLess(due, time.time() + 3600)
+        second = scheduler.schedule(self.owner, "watch", "second wakeup", {"type": "immediate"})
+        await self.drain()
+        self.assertNotEqual(first["appointment_id"], second["appointment_id"])
+        self.assertGreater(self.app.db.execute("SELECT due FROM demo_schedule WHERE game=?", (gid,)).fetchone()[0], due)
+        history = self.app.timeline.history(self.owner)
+        self.assertEqual(history[0]["origin"], "appointment")
+        self.assertEqual(self.app._agent.await_count, 2)
+
     async def test_transaction_rollback_does_not_wake_agent(self):
         with self.assertRaises(RuntimeError):
             with self.app.engine.transaction():
