@@ -8,25 +8,22 @@ def build(app, owner, game=None, current_image=None):
                          private: bool = False, image_reference: str = "", image_id: int = 0) -> str:
         """群聊：list 列群、create 建群、join 入群、leave 退群、read 读消息。
         send 直接发送已确定的文字或图片，body 是配文，可只发图片。
-        handoff 排队交给目标群聊任务，等当前任务结束后读取群聊上下文再决定是否发，
-        body 是简短的交接目的，可附图片供该任务发送。群聊只能收到明确允许公开的内容。
+        群聊只能收到明确允许公开的内容。
         图片使用 image_reference（例如 current、private:302:0）或图库 image_id，两者选一。
-        变更须由用户明确要求。handoff 返回已排队，不能当作已经发送。
+        变更须由用户明确要求。
         """
         try:
-            if (image_reference or image_id) and action not in {"send", "handoff"}:
-                raise ValueError("图片参数只用于 send 或 handoff")
+            if (image_reference or image_id) and action != "send":
+                raise ValueError("图片参数只用于 send")
             if action in {"list", "create"}:
                 return dump(app.community.groups(owner, "GET" if action == "list" else "POST", "", {"name": name, "private": private}))
-            if action not in {"join", "leave", "read", "send", "handoff"} or room_id <= 0:
+            if action not in {"join", "leave", "read", "send"} or room_id <= 0:
                 raise ValueError("请指定有效的群操作及群编号")
-            if action in {"send", "handoff"}:
+            if action == "send":
                 if not app.social.joined(room_id, owner):
                     raise ValueError("智能体未加入该群")
                 attachment = app.images.attachment(owner, game, reference=image_reference,
                     image_id=image_id, current=current_image) if image_reference or image_id else None
-                if action == "handoff":
-                    return dump(app.social.queue_chat(owner, "group", body, room_id, attachment=attachment))
                 if not body.strip() and not attachment:
                     raise ValueError("请填写消息内容或指定图片")
                 if not app.social.send(owner, room_id, body.strip(), attachment):

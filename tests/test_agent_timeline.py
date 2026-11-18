@@ -88,7 +88,7 @@ class AgentTimelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.db.execute("SELECT content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 1",
                                        (game["id"],)).fetchone()[0], "跟进完成")
 
-    async def test_group_image_can_send_directly_or_wait_for_contextual_handoff(self):
+    async def test_group_chat_sends_an_authorized_image_directly(self):
         app, owner = self.app, self.owner
         app.db.execute("INSERT INTO demo_profiles VALUES(?,?)", (owner, dump({"model": "test", "key": "test"})))
         token = issue_id(app.db, owner)
@@ -106,26 +106,8 @@ class AgentTimelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(json.loads(await unauthorized("send", room, image_reference=reference))["ok"])
         self.assertTrue(json.loads(await tool("send", room, image_reference=reference))["sent"])
 
-        invoke = AsyncMock(return_value={"messages": [AIMessage(content="[SEND_IMAGE]")]})
-
-        async def private():
-            receipt = json.loads(await tool("handoff", room, body="Send if relevant", image_reference=reference))
-            self.assertEqual(receipt["state"], "queued")
-            self.assertFalse(receipt["sent"])
-            invoke.assert_not_awaited()
-
-        with patch("src.agent.social.model_client"), patch("langchain.agents.create_agent",
-                return_value=SimpleNamespace(ainvoke=invoke)):
-            await app.timeline.run(owner, "private", private)
-            worker = app.timeline.workers.get(owner)
-            if worker:
-                await asyncio.wait_for(asyncio.shield(worker), 2)
-        rows = app.db.execute("SELECT body,attachment FROM community_group_messages WHERE room=? ORDER BY id", (room,)).fetchall()
-        self.assertEqual([(row["body"], json.loads(row["attachment"])) for row in rows], [("", media), ("", media)])
-        context = invoke.await_args.args[0]["messages"][0].content
-        self.assertIn("chart", context)
-        self.assertNotIn("private context", context)
-        self.assertNotIn(media["src"], context)
+        rows = app.db.execute("SELECT body,attachment FROM community_group_messages WHERE room=?", (room,)).fetchall()
+        self.assertEqual([(row["body"], json.loads(row["attachment"])) for row in rows], [("", media)])
 
     async def test_debug_option_and_failed_task_log(self):
         async with TestClient(TestServer(self.app.app(False))) as client:
