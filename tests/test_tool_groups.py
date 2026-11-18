@@ -54,6 +54,14 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual([entry["action"] for entry in added], expected)
                         if calls == [observe, observe]:
                             self.assertEqual(added[0]["reason"], "tool observation")
+                for message, expected_appointment in [("Which trade closed last?", False), ("六点提醒我", True)]:
+                    TrackingModel.bindings.clear()
+                    with patch("app.model_client", return_value=TrackingModel(responses=[AIMessage(content="[SKIP]")])):
+                        await app.agent(app.engine.get(gid), message, attachments=[])
+                    expected = {"load_tool_group", "watch_market", "read_journal"}
+                    if expected_appointment:
+                        expected.add("schedule_task")
+                    self.assertEqual(set(TrackingModel.bindings[0]), expected)
             finally:
                 await app.timeline.close()
                 app.db.close()

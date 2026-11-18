@@ -470,7 +470,13 @@ class Demo:
                 instructions = workflow("private") + "\n" + workflow("forum_authorship")
                 instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner))
                 if attachments is not None:
-                    middleware.insert(1, ToolGroups(groups))
+                    initial_tools = ()
+                    if message is not None:
+                        initial_tools = ("watch_market", "read_journal")
+                        if any(word in message for word in ("提醒", "唤醒", "预约", "叫醒我", "叫我")):
+                            initial_tools += ("schedule_task",)
+                        instructions += "\n" + workflow("private_tool_reads")
+                    middleware.insert(1, ToolGroups(groups, initial=initial_tools))
                     instructions += "\n" + TOOL_INSTRUCTIONS
                 if any(tool_name(tool) == "sticker" for tool in tools):
                     instructions += "\n" + workflow("private_sticker")
