@@ -427,6 +427,7 @@ class Social:
                     middleware=[TraceTools(), tool_groups, ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
                     system_prompt=workflow("patrol") + "\n\n" + social_system_prompt(self.app.agent_persona(owner, profile))
                     + "\n" + workflow("forum_authorship")
+                    + "\n" + workflow("task_handoff")
                     + "\n" + TOOL_INSTRUCTIONS
                     + ("\n近期任务时间线：" + dump(self.app.timeline.context(owner)) if hasattr(self.app, "timeline") else ""))
                 await agent.ainvoke({"messages": [HumanMessage(content=dump(
@@ -440,12 +441,12 @@ class Social:
                 log.exception("Agent patrol failed")
                 raise
 
-    def queue_chat(self, owner, channel, purpose, room_id=0, bulletin_id="", message_id=0):
+    def queue_chat(self, owner, channel, purpose, room_id=0, bulletin_id="", message_id=0, *, attachment=None):
         if self.app.external.settings(owner)["mode"] != "platform":
             raise ValueError("当前账号未启用平台智能体")
         if channel not in ("private", "group") or not 1 <= len(purpose.strip()) <= 240:
             raise ValueError("请选择私聊或群聊，并填写 1～240 字的目的")
-        if channel == "private" and (room_id or message_id):
+        if channel == "private" and (room_id or message_id or attachment):
             raise ValueError("私聊交接只支持所属用户的会话")
         if channel == "group" and (not room_id or not self.joined(room_id, owner)):
             raise ValueError("智能体尚未加入该群")
@@ -457,13 +458,16 @@ class Social:
             "SELECT 1 FROM platform_bulletins WHERE id=?", (bulletin_id,)
         ).fetchone()):
             raise ValueError("找不到引用的市场播报")
+        key = ("chat_followup", channel, room_id)
+        if attachment:
+            key += (purpose.strip(), attachment["src"])
         ident, _ = self.app.timeline.enqueue(owner, channel + "_followup",
-            lambda: self._chat_handoff(owner, channel, purpose.strip(), room_id, bulletin_id, message_id),
-            key=("chat_followup", channel, room_id),
+            lambda: self._chat_handoff(owner, channel, purpose.strip(), room_id, bulletin_id, message_id, attachment),
+            key=key,
             outcome=lambda sent: "已发出聊天跟进" if sent else "已跳过")
         return {"ok": True, "task_id": ident, "state": "queued", "sent": False}
 
-    async def _chat_handoff(self, owner, channel, purpose, room_id, bulletin_id, message_id):
+    async def _chat_handoff(self, owner, channel, purpose, room_id, bulletin_id, message_id, attachment=None):
         from langchain.agents import create_agent
 
         profile = self.app.profile(owner)
@@ -472,6 +476,8 @@ class Social:
             return False
         attachments = []
         details = {"purpose": purpose}
+        if attachment:
+            details["image"] = {"label": attachment.get("label", "")}
         if bulletin_id:
             bulletin = self.db.execute("SELECT id,label,kind FROM platform_bulletins WHERE id=?", (bulletin_id,)).fetchone()
             if bulletin:
@@ -513,6 +519,7 @@ class Social:
             audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=tools, middleware=[TraceTools()],
             system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
                 "\n" + workflow("chat_handoff") +
+                ("\n" + workflow("group_handoff_image") if attachment else "") +
                 "\n近期任务时间线：" + dump(self.app.timeline.context(owner, room=room_id if channel == "group" else None)))
         async with self.slots:
             result = await agent.ainvoke({"messages": [HumanMessage(content=dump(
@@ -521,7 +528,9 @@ class Social:
         if not content or content == "[SKIP]" or self.app.external.settings(owner)["mode"] != "platform":
             return False
         if channel == "group":
-            return self.send(owner, room_id, content)
+            if attachment and content == "[SEND_IMAGE]":
+                content = ""
+            return self.send(owner, room_id, content, attachment)
         if self.chat_pending.get(gid) or self.direct_activity(gid) != activity:
             return False
         cursor = self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)

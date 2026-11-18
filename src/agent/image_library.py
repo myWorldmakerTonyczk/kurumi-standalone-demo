@@ -66,6 +66,17 @@ class ImageLibrary:
             return None
         return json.loads(row[0]) if row and row[0] else None
 
+    def attachment(self, owner, game, *, reference="", image_id=0, current=None):
+        if reference and image_id:
+            raise ValueError("图片引用与图库 ID 只填一个")
+        if image_id:
+            row = self.get(owner, image_id)
+            return {"kind": "image", "src": row["src"], "label": row["name"]}
+        media = self._source(owner, game, reference, current)
+        if not media or media.get("kind") != "image" or not IMAGE_URL.fullmatch(media.get("src", "")):
+            raise ValueError("图片不存在、无权访问或格式无效")
+        return {"kind": "image", "src": media["src"], "label": media.get("label", "")}
+
     @staticmethod
     def tags(values):
         if not isinstance(values, list) or any(not isinstance(value, str) for value in values):

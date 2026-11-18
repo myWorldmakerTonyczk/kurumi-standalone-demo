@@ -47,7 +47,7 @@ def user_workspace_groups(app, gid, *, writable, revision, attachments=None, use
             open_trade, place_limit_order, cancel_limit_order, close_position, set_protection, virtual_loan, write_plan, record_observation)]
     if attachments is not None:
         groups["market_review"] += [generate_trade_review.build(app, gid), send_review_image.build(app, gid, attachments)]
-        groups["community"] = [forum.build(app, owner), group_chat.build(app, owner),
+        groups["community"] = [forum.build(app, owner), group_chat.build(app, owner, gid, user_image),
             summarize_group.build(app, gid, owner), draft_forum_post.build(app, gid, owner)]
         if app.profile(owner).get("chat_memory", {}).get("enabled", True):
             groups["memory"] = [search_memory.build(app, owner), write_memory.build(app, owner, gid, message_ids)]

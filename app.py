@@ -488,6 +488,7 @@ class Demo:
                     instructions += "\n" + TOOL_INSTRUCTIONS
                     instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner))
                     instructions += "\n" + workflow("appointment_context")
+                    instructions += "\n" + workflow("task_handoff")
                 if any(tool_name(tool) == "sticker" for tool in tools):
                     instructions += "\n" + workflow("private_sticker")
                 if message is not None and attachments is not None:

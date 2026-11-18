@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import AIMessage
+from src.agent.mcp.community.group_chat import build as group_chat_tool
 from src.core.engine import dump
 from src.users.ownership import issue_id
 
@@ -86,6 +87,45 @@ class AgentTimelineTest(unittest.IsolatedAsyncioTestCase):
                                        (room,)).fetchone()[0], "跟进完成")
         self.assertEqual(app.db.execute("SELECT content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 1",
                                        (game["id"],)).fetchone()[0], "跟进完成")
+
+    async def test_group_image_can_send_directly_or_wait_for_contextual_handoff(self):
+        app, owner = self.app, self.owner
+        app.db.execute("INSERT INTO demo_profiles VALUES(?,?)", (owner, dump({"model": "test", "key": "test"})))
+        token = issue_id(app.db, owner)
+        game = app.engine.create({"user_binding": {"type": "random", "values": [token]}})
+        room = app.community.groups(owner, "POST", "", {"name": "image group"})["id"]
+        app.db.execute("INSERT INTO community_group_agents VALUES(?,?)", (room, owner))
+        media = {"kind": "image", "src": "data:image/webp;base64,QUJD", "label": "chart"}
+        image_message = app.db.execute(
+            "INSERT INTO demo_chat(game,role,content,created,attachments) VALUES(?,'user',?,1,?)",
+            (game["id"], "private context", dump([media])),
+        ).lastrowid
+        reference = f"private:{image_message}:0"
+        tool = group_chat_tool(app, owner, game["id"])
+        unauthorized = group_chat_tool(app, owner, "different-game")
+        self.assertFalse(json.loads(await unauthorized("send", room, image_reference=reference))["ok"])
+        self.assertTrue(json.loads(await tool("send", room, image_reference=reference))["sent"])
+
+        invoke = AsyncMock(return_value={"messages": [AIMessage(content="[SEND_IMAGE]")]})
+
+        async def private():
+            receipt = json.loads(await tool("handoff", room, body="Send if relevant", image_reference=reference))
+            self.assertEqual(receipt["state"], "queued")
+            self.assertFalse(receipt["sent"])
+            invoke.assert_not_awaited()
+
+        with patch("src.agent.social.model_client"), patch("langchain.agents.create_agent",
+                return_value=SimpleNamespace(ainvoke=invoke)):
+            await app.timeline.run(owner, "private", private)
+            worker = app.timeline.workers.get(owner)
+            if worker:
+                await asyncio.wait_for(asyncio.shield(worker), 2)
+        rows = app.db.execute("SELECT body,attachment FROM community_group_messages WHERE room=? ORDER BY id", (room,)).fetchall()
+        self.assertEqual([(row["body"], json.loads(row["attachment"])) for row in rows], [("", media), ("", media)])
+        context = invoke.await_args.args[0]["messages"][0].content
+        self.assertIn("chart", context)
+        self.assertNotIn("private context", context)
+        self.assertNotIn(media["src"], context)
 
     async def test_debug_option_and_failed_task_log(self):
         async with TestClient(TestServer(self.app.app(False))) as client:
