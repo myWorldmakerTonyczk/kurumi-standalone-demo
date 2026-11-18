@@ -9,17 +9,17 @@ CHAT_MEDIA_TOOLS = ("search_images", "send_saved_image", "send_review_image", "s
 CHAT_INITIAL = (INBOX_TOOLS + PRIVATE_TIMELINE_TOOLS + CHAT_MEDIA_TOOLS
                 + ("watch_market", "read_journal", "mention_group_member", "read_market_bulletins"))
 
-# Fixed tool lists for the first model call. On-demand tasks also get the loader.
-INITIAL_TOOLS = {
-    "chat": CHAT_INITIAL,
-    "watch": ("watch_market", "price_history", "read_journal"),
-    "patrol": ("read_inbox",),
-    "diary": ("read_journal",),
-    "trade_review": (),
-    "group_summary": (),
+# One place for what each task category starts with and whether it can load more.
+SCENES = {
+    "chat": {"initial": CHAT_INITIAL, "on_demand": True},
+    "watch": {"initial": ("watch_market", "price_history", "read_journal"), "on_demand": True},
+    "patrol": {"initial": ("read_inbox",), "on_demand": True},
+    "diary": {"initial": ("read_journal",), "on_demand": False},
+    "trade_review": {"initial": (), "on_demand": False},
+    "group_summary": {"initial": (), "on_demand": False},
 }
-
-ON_DEMAND_TASKS = {"chat", "watch", "patrol"}
+INITIAL_TOOLS = {name: scene["initial"] for name, scene in SCENES.items()}
+ON_DEMAND_TASKS = {name for name, scene in SCENES.items() if scene["on_demand"]}
 
 APPOINTMENT_WORDS = ("提醒", "唤醒", "预约", "叫醒我", "叫我")
 CANCELLATION_WORDS = ("取消", "撤销")

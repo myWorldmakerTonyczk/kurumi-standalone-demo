@@ -13,7 +13,9 @@ from aiohttp import web
 from langchain_core.messages import HumanMessage
 
 from src.core.engine import dump
-from src.portal.community import webp_data_url
+from .chat import chat_agent
+from .delivery import deliver_group, deliver_private
+from .media import normalize_attachment
 from .chat_debounce import ChatDebounce, debounce_config
 from .image_library import image_reference
 from .model_registry import model_client, selected
@@ -365,11 +367,9 @@ class Social:
                 prompt += "\n" + workflow("group_image_send")
                 if with_stickers:
                     prompt += "\n" + workflow("private_sticker")
-                from langchain.agents import create_agent
-
                 tools, tool_groups = task_tools("chat", groups)
-                agent = create_agent(model, tools=tools, middleware=[TraceTools(), tool_groups],
-                    system_prompt=prompt + "\n" + TOOL_INSTRUCTIONS + "\n近期任务时间线：" +
+                agent = chat_agent(model, tools, tool_groups,
+                    prompt + "\n" + TOOL_INSTRUCTIONS + "\n近期任务时间线：" +
                     dump(self.app.timeline.context(owner, room=room)))
                 if trace := task_trace(owner):
                     trace.event("memory", "group", {"location": "input.profiles", "enabled": memory_config.get("enabled", True),
@@ -395,8 +395,7 @@ class Social:
 
     def send(self, owner, room, content, attachment=None, *, mention_depth=0):
         if self.joined(room, owner) and self.app.external.settings(owner)["mode"] == "platform":
-            if attachment and attachment.get("kind") == "image":
-                attachment = {**attachment, "src": webp_data_url(attachment["src"])}
+            attachment = normalize_attachment(attachment)
             content = content[:1500]
             mentions = self.group_mentions(content, self.group_roster(room))
             cursor = self.db.execute("""INSERT INTO community_group_messages
@@ -470,8 +469,6 @@ class Social:
         return {"ok": True, "task_id": ident, "state": "queued", "sent": False}
 
     async def _chat_handoff(self, owner, channel, purpose, room_id, bulletin_id, message_id):
-        from langchain.agents import create_agent
-
         profile = self.app.profile(owner)
         config = selected(profile)
         if self.app.external.settings(owner)["mode"] != "platform" or not config.get("key") or not config.get("model"):
@@ -519,10 +516,9 @@ class Social:
             groups = {"inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner),
                       "media": media_group(self.app, owner, attachments, gid=gid, with_stickers=with_stickers)}
         tools, tool_groups = task_tools("chat", groups)
-        middleware = [TraceTools()] + ([tool_groups] if tool_groups is not None else [])
-        agent = create_agent(model_client(config, self.app.model_url,
-            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=tools, middleware=middleware,
-            system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
+        agent = chat_agent(model_client(config, self.app.model_url,
+            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools, tool_groups,
+            social_system_prompt(self.app.agent_persona(owner, profile)) +
                 "\n" + workflow("chat_handoff") +
                 ("\n" + TOOL_INSTRUCTIONS if tool_groups is not None else "") +
                 "\n近期任务时间线：" + dump(self.app.timeline.context(owner, room=room_id if channel == "group" else None)))
@@ -533,12 +529,11 @@ class Social:
         if (not content and not attachments) or content == "[SKIP]" or self.app.external.settings(owner)["mode"] != "platform":
             return False
         if channel == "group":
-            return self.send(owner, room_id, content, attachments[0] if attachments else None)
+            return deliver_group(self.app, owner, room_id, content,
+                                 attachments[0] if attachments else None)
         if self.chat_pending.get(gid) or self.direct_activity(gid) != activity:
             return False
-        cursor = self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive,attachments)
-            VALUES(?,'assistant',?,?,1,?)""", (gid, content[:1500], time.time(), dump(attachments)))
-        self.app.timeline.reference(owner, {"type": "private_message", "game_id": gid, "id": cursor.lastrowid})
+        deliver_private(self.app, {"id": gid, "owner_id": owner}, content, attachments, proactive=True)
         return True
 
     def unanswered(self, gid):
@@ -616,18 +611,15 @@ class Social:
                     return
                 history = [dict(row) for row in self.db.execute(
                     "SELECT role,content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 8", (gid,))]
-                from langchain.agents import create_agent
-
                 attachments = []
                 with_stickers = random.random() * 100 < profile.get("sticker_probability", 100)
                 tools, tool_groups = task_tools("chat", {
                     "inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner),
                     "media": media_group(self.app, owner, attachments, gid=gid, with_stickers=with_stickers),
                 })
-                middleware = [TraceTools()] + ([tool_groups] if tool_groups is not None else [])
-                agent = create_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
-                    tools=tools, middleware=middleware,
-                    system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
+                agent = chat_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
+                    tools, tool_groups,
+                    social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
                     + ("\n" + TOOL_INSTRUCTIONS if tool_groups is not None else "")
                     + "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
                 result = await agent.ainvoke({"messages": [
@@ -641,8 +633,7 @@ class Social:
                         and self.unanswered(gid) < latest["direct_limit"]
                         and self.app.external.settings(owner)["mode"] == "platform"
                         and any(item["id"] == gid and item["owner_id"] == owner for item in self.app.engine.games())):
-                    self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive,attachments)
-                        VALUES(?,'assistant',?,?,1,?)""", (gid, content[:1500], time.time(), dump(attachments)))
+                    deliver_private(self.app, {"id": gid, "owner_id": owner}, content, attachments, proactive=True)
                     return True
             except Exception:
                 log.exception("Proactive message failed")

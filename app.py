@@ -30,6 +30,7 @@ from src.agent.market_bulletin import MarketBulletin
 from src.agent.inbox import AgentInbox
 from src.agent.timeline import AgentTimeline, task_trace
 from src.agent.task_trace_middleware import TraceTools
+from src.agent.chat import chat_agent
 from src.agent.task_schedule import ACCOUNT_EVENTS, TaskSchedule
 from src.agent.mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, tool_name
 from src.agent.mcp.registry import user_workspace_groups
@@ -487,7 +488,6 @@ class Demo:
                 if kind in ("trade_review", "group_summary"):
                     instructions = workflow("summary_input_only")
                 if tool_groups is not None:
-                    middleware.insert(1, tool_groups)
                     instructions += "\n" + TOOL_INSTRUCTIONS
                     instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner))
                     instructions += "\n" + workflow("appointment_context")
@@ -518,7 +518,13 @@ class Demo:
                 system_prompt = prompt_persona + "\n" + instructions
                 if kind not in ("trade_review", "group_summary"):
                     system_prompt += "\n你的模拟外汇账户快照（话题涉及账户、行情或复盘时参考）：" + dump(state)
-                agent = create_agent(model, tools=tools, middleware=middleware, system_prompt=system_prompt)
+                if kind == "private":
+                    agent = chat_agent(model, tools, tool_groups, system_prompt,
+                                       extra_middleware=middleware[1:])
+                else:
+                    if tool_groups is not None:
+                        middleware.insert(1, tool_groups)
+                    agent = create_agent(model, tools=tools, middleware=middleware, system_prompt=system_prompt)
                 prompt = diary_prompt or (message if message is not None else workflow("watch") +
                     ("\n" + task_instruction if task_instruction else ""))
                 if chat_messages and (len(chat_messages) > 1 or chat_messages[0][2]):
