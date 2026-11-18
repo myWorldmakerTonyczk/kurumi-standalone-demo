@@ -1,11 +1,13 @@
 """Opt-in, account-scoped model call logs."""
 import json
+import math
 import re
 import time
 
 from langchain_core.callbacks import AsyncCallbackHandler
 
 from ..diary.store import redact
+from .context_tokens import estimate_text_tokens
 
 RETAIN = 150
 CONTENT_LIMIT = 40_000
@@ -48,6 +50,27 @@ def error_label(error):
     return type(error).__name__ + (f" (HTTP {status})" if isinstance(status, int) else "")
 
 
+def message_usage(messages):
+    return next((m["usage_metadata"] for m in messages if isinstance(m, dict) and m.get("usage_metadata")), None)
+
+
+def estimate_payload(payload):
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    return math.ceil(estimate_text_tokens(INLINE_MEDIA.sub("[media omitted]", text)))
+
+
+def call_usage(request, response, usage=None):
+    if usage and any(type(usage.get(key)) is int for key in ("input_tokens", "output_tokens", "total_tokens")):
+        result = dict(usage, source="provider")
+        if result.get("total_tokens") is None and all(type(result.get(key)) is int for key in ("input_tokens", "output_tokens")):
+            result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
+        return result
+    input_tokens = estimate_payload(request)
+    output_tokens = estimate_payload(response) if response is not None else None
+    return {"source": "estimate", "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens if output_tokens is not None else None}
+
+
 class CallLogs:
     def __init__(self, db, profile):
         self.db = db
@@ -61,6 +84,8 @@ class CallLogs:
               status TEXT NOT NULL, request TEXT NOT NULL, response TEXT NOT NULL, error TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS model_call_logs_owner ON model_call_logs(owner,id DESC);
         """)
+        if not any(row[1] == "usage" for row in db.execute("PRAGMA table_info(model_call_logs)")):
+            db.execute("ALTER TABLE model_call_logs ADD COLUMN usage TEXT NOT NULL DEFAULT ''")
 
     def enabled(self, owner):
         row = self.db.execute("SELECT enabled FROM model_call_log_settings WHERE owner=?", (owner,)).fetchone()
@@ -73,14 +98,29 @@ class CallLogs:
         self.db.execute("DELETE FROM model_call_logs WHERE owner=?", (owner,))
 
     def entries(self, owner, task=""):
-        query = """SELECT id,task,model,started,elapsed_ms,status,error FROM model_call_logs
+        query = """SELECT id,task,model,started,elapsed_ms,status,error,usage,
+                          CASE WHEN usage='' THEN response ELSE '' END AS legacy_response FROM model_call_logs
                    WHERE owner=? AND (?='' OR task=?) ORDER BY id DESC LIMIT ?"""
-        return [dict(row) for row in self.db.execute(query, (owner, task, task, RETAIN))]
+        return [self.with_usage(dict(row)) for row in self.db.execute(query, (owner, task, task, RETAIN))]
+
+    @staticmethod
+    def with_usage(entry):
+        legacy = entry.pop("legacy_response", entry.get("response", ""))
+        if entry["usage"]:
+            entry["usage"] = json.loads(entry["usage"])
+        else:
+            try:
+                messages = json.loads(legacy)
+            except (TypeError, ValueError):
+                messages = None
+            usage = message_usage(messages) if isinstance(messages, list) else None
+            entry["usage"] = call_usage(None, None, usage) if usage else None
+        return entry
 
     def detail(self, owner, entry_id):
-        row = self.db.execute("""SELECT id,task,model,started,elapsed_ms,status,request,response,error
+        row = self.db.execute("""SELECT id,task,model,started,elapsed_ms,status,request,response,error,usage
                               FROM model_call_logs WHERE owner=? AND id=?""", (owner, entry_id)).fetchone()
-        return dict(row) if row else None
+        return self.with_usage(dict(row)) if row else None
 
     def callback(self, owner, task):
         from .timeline import task_trace
@@ -88,11 +128,11 @@ class CallLogs:
         trace = task_trace(owner)
         return CallTrace(self, owner, task, trace) if trace or self.enabled(owner) else None
 
-    def insert(self, owner, task, model, started, request, response="", error=""):
-        self.db.execute("""INSERT INTO model_call_logs(owner,task,model,started,elapsed_ms,status,request,response,error)
-                          VALUES(?,?,?,?,?,?,?,?,?)""",
+    def insert(self, owner, task, model, started, request, response="", error="", *, usage=None):
+        self.db.execute("""INSERT INTO model_call_logs(owner,task,model,started,elapsed_ms,status,request,response,error,usage)
+                          VALUES(?,?,?,?,?,?,?,?,?,?)""",
                         (owner, task, model, started, max(0, int((time.time() - started) * 1000)),
-                         "failed" if error else "ok", request, response, error))
+                         "failed" if error else "ok", request, response, error, json.dumps(usage) if usage else ""))
         self.db.execute("""DELETE FROM model_call_logs WHERE owner=? AND id IN
                            (SELECT id FROM model_call_logs WHERE owner=? ORDER BY id DESC LIMIT -1 OFFSET ?)""",
                         (owner, owner, RETAIN))
@@ -154,7 +194,7 @@ class CallTrace(AsyncCallbackHandler):
     async def on_llm_end(self, response, *, run_id, **kwargs):
         messages = [self.message(generation.message) if hasattr(generation, "message") else generation.text
                     for batch in response.generations for generation in batch]
-        usage = next((m["usage_metadata"] for m in messages if isinstance(m, dict) and m.get("usage_metadata")), None)
+        usage = message_usage(messages)
         if usage is None:
             raw = (response.llm_output or {}).get("token_usage") or {}
             if raw:
@@ -170,9 +210,10 @@ class CallTrace(AsyncCallbackHandler):
         if start is None:
             return
         started, model, request, event = start
+        usage = call_usage(request, response, usage)
         if self.trace:
             self.trace.finish(event, {"messages": response, "usage": usage, "error": error, "message": message},
                               "failed" if error else "ok")
         if self.logs.enabled(self.owner):
             self.logs.insert(self.owner, self.task, self.clean(model), started, self.clean(request),
-                             self.clean(response) if response is not None else "", error)
+                             self.clean(response) if response is not None else "", error, usage=usage)

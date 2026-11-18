@@ -22,6 +22,11 @@ def _is_cjk(ch: str) -> bool:
     )
 
 
+def estimate_text_tokens(text: str) -> float:
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    return cjk / _CJK_PER_TOKEN + (len(text) - cjk) / _ASCII_CHARS_PER_TOKEN
+
+
 def count_tokens_cjk(messages: Iterable[AnyMessage]) -> int:
     """汉字按 ~1 token、ASCII 按 ~4 字符 1 token 分开算。
 
@@ -37,7 +42,6 @@ def count_tokens_cjk(messages: Iterable[AnyMessage]) -> int:
         parts = [content]
         parts += [str(c.get("args", "")) for c in getattr(m, "tool_calls", None) or []]
         for text in parts:
-            cjk = sum(1 for ch in text if _is_cjk(ch))
-            total += cjk / _CJK_PER_TOKEN + (len(text) - cjk) / _ASCII_CHARS_PER_TOKEN
+            total += estimate_text_tokens(text)
         total += _EXTRA_TOKENS_PER_MESSAGE
     return math.ceil(total)

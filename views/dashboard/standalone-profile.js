@@ -920,7 +920,7 @@ function mountCallLogs(container) {
     const title = document.createElement("summary");
     const when = new Date(entry.started * 1000).toLocaleString("zh-CN", {timeZone:"Asia/Shanghai"});
     title.textContent = [when, tasks[entry.task] || entry.task, entry.model,
-      entry.status === "ok" ? "成功" : entry.error || "失败", entry.elapsed_ms + " ms"].filter(Boolean).join(" · ");
+      entry.status === "ok" ? "成功" : entry.error || "失败", entry.elapsed_ms + " ms", tokenUsageLabel(entry.usage)].filter(Boolean).join(" · ");
     const body = document.createElement("div");
     item.append(title, body);
     let loaded = false;
@@ -1135,6 +1135,13 @@ function mountAgentInbox(panel, openTask) {
   return () => load();
 }
 
+function tokenUsageLabel(usage) {
+  if (!usage) return "Token 未记录";
+  const number = key => Number.isFinite(usage[key]) ? usage[key].toLocaleString("zh-CN") : "未记录";
+  return "Token" + (usage.source === "estimate" ? "（估算）" : "") +
+    " · 输入 " + number("input_tokens") + " / 输出 " + number("output_tokens") + " / 合计 " + number("total_tokens");
+}
+
 function renderTaskTrace(report) {
   const events = report.trace || [];
   if (!events.length) return h("p", {class: "caption"}, "这项任务没有详细调试记录。");
@@ -1146,7 +1153,7 @@ function renderTaskTrace(report) {
     if (!values.length) return "未返回";
     return values.reduce((total, value) => total + value, 0) + (values.length < usage.length ? "（部分）" : "");
   };
-  const displayedUsage = (usage, key) => usage?.[key] ?? "未返回";
+  const estimatedUsage = usage.some(item => item?.source === "estimate");
   const elapsed = event => event.ended ? Math.max(0, Math.round((event.ended - event.created) * 1000)) + " ms" : "进行中";
   const toolNames = tools => (tools || []).map(item => item.function?.name || item.name).filter(Boolean);
   const states = {running: "执行中", failed: "失败", interrupted: "中断", ok: "完成"};
@@ -1169,14 +1176,14 @@ function renderTaskTrace(report) {
         && JSON.stringify(previousModel.request.tools) === JSON.stringify(input.tools);
       title = "第 " + round + " 次模型请求 · " + (input.model || event.label) + (reissued ? " · 同一输入再次请求" : "");
       hint = [hint, names.length + " 个可用工具",
-        "输入 " + displayedUsage(output.usage, "input_tokens") + " / 输出 " + displayedUsage(output.usage, "output_tokens"),
+        tokenUsageLabel(output.usage),
         output.error, (previousModel && added.length ? "新增 " + added.join("、") : "")].filter(Boolean).join(" · ");
       for (const message of output.messages || []) {
         for (const call of message.tool_calls || []) roundByCall.set(call.id, round);
       }
       previousModel = event;
       fields = [["请求消息", input.messages], ["工具定义", input.tools], ["模型返回（含接口提供的推理内容）", output.messages],
-        ["接口用量", output.usage], ["错误详情", output.message]];
+        ["Token 用量", output.usage], ["错误详情", output.message]];
     } else if (event.kind === "tool") {
       const round = roundByCall.get(input.call_id);
       title = (round ? "第 " + round + " 次请求 · " : "") + (event.label === "load_tool_group" ? "加载工具组" : "执行 " + event.label);
@@ -1229,7 +1236,8 @@ function renderTaskTrace(report) {
   const duration = report.started && report.ended ? elapsed({created: report.started, ended: report.ended}) : "—";
   return h("div", {class: "task-trace"}, h("p", {class: "task-trace-summary"},
     models.length + " 次模型请求（失败 " + failedModels + "） · " + tools.length + " 次工具执行（加载工具组 " + loaders +
-    "） · 输入 " + sumTokens("input_tokens") + " / 输出 " + sumTokens("output_tokens") + " tokens · " + duration), list);
+    "） · 输入 " + sumTokens("input_tokens") + " / 输出 " + sumTokens("output_tokens") + " / 合计 " + sumTokens("total_tokens") + " tokens" +
+    (estimatedUsage ? "（含估算）" : "") + " · " + duration), list);
 }
 
 function mountAgentTimeline(panel) {

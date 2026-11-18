@@ -24,7 +24,7 @@ async def history_view(plugin, *, pair="", period="1h", limit=20, pages=1, befor
     if (pair not in PAIRS or type(limit) is not int or not 10 <= limit <= 200
             or type(pages) is not int or not 1 <= pages <= 5 or pages * limit > 200
             or type(include_bars) is not bool):
-        raise ValueError("历史行情参数无效，每次最多200根K线")
+        raise ValueError("历史行情参数无效：每页须为 10–200 根 K 线，总量最多 200 根")
     data = await plugin.history.page(
         dict(plugin.settings(), history_source="market"), pair, period, before, limit * pages
     )

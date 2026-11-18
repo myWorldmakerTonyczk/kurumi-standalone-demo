@@ -36,7 +36,8 @@ class TaskTraceTest(unittest.IsolatedAsyncioTestCase):
                 "id": "test", "model": "local-test", "object": "chat.completion", "created": 1,
                 "choices": [{"index": 0, "message": message,
                              "finish_reason": "tool_calls" if calls < 2 else "stop"}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
+                **({"usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}}
+                   if len(requests) != 7 else {}),
             })
 
         fake = web.Application()
@@ -66,6 +67,10 @@ class TaskTraceTest(unittest.IsolatedAsyncioTestCase):
                     demo.agent_inbox.add(owner, "system", "test-2", "Another event")
                     second, future = demo.timeline.enqueue(owner, "patrol", run)
                     await future
+                    self.assertEqual(demo.call_logs.entries(owner), [])
+                    demo.call_logs.set_enabled(owner, True)
+                    _, future = demo.timeline.enqueue(owner, "patrol", run)
+                    await future
 
                 events = demo.timeline.trace_events(owner, second)
                 self.assertEqual([event["kind"] for event in events],
@@ -80,10 +85,18 @@ class TaskTraceTest(unittest.IsolatedAsyncioTestCase):
                                  {"load_tool_group", "read_inbox"})
                 self.assertEqual(events[2]["request"]["call_id"], "call-0")
                 self.assertEqual(events[5]["request"]["total"], 1)
-                self.assertEqual(demo.agent_inbox.logs(owner)[0]["task"], second)
+                self.assertIn(second, [entry["task"] for entry in demo.agent_inbox.logs(owner)])
                 self.assertNotIn(config["key"], json.dumps(events))
                 self.assertEqual(demo.timeline.trace_events(other, second), [])
-                self.assertEqual(demo.call_logs.entries(owner), [])
+                entries = demo.call_logs.entries(owner, "patrol")
+                self.assertEqual(len(entries), 3)
+                self.assertEqual(entries[0]["usage"]["source"], "provider")
+                self.assertEqual(entries[0]["usage"]["total_tokens"], 110)
+                estimate = entries[-1]["usage"]
+                self.assertEqual(estimate["source"], "estimate")
+                self.assertGreater(estimate["input_tokens"], 0)
+                self.assertEqual(estimate["total_tokens"], estimate["input_tokens"] + estimate["output_tokens"])
+                self.assertEqual(demo.call_logs.detail(owner, entries[-1]["id"])["usage"], estimate)
             finally:
                 await demo.timeline.close()
                 demo.db.close()
