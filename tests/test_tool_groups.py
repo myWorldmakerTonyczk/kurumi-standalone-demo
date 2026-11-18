@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage
 
 from app import Demo
 from src.agent.mcp.load_tool_group import ToolGroups, tool_name
-from src.agent.mcp.registry import flatten, user_patrol_groups, user_workspace_groups
+from src.agent.mcp.registry import flatten, user_group_groups, user_patrol_groups, user_workspace_groups
 
 
 class TrackingModel(FakeMessagesListChatModel):
@@ -73,7 +73,13 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
                     TrackingModel.bindings.clear()
                     with patch("app.model_client", return_value=TrackingModel(responses=[AIMessage(content="[SKIP]")])):
                         await app.agent(app.engine.get(gid), message, attachments=[])
-                    expected = {"load_tool_group", "watch_market", "read_journal"}
+                    expected = {
+                        "load_tool_group", "watch_market", "read_journal",
+                        "read_inbox", "read_inbox_history", "mark_inbox_unread",
+                        "schedule_task", "get_task_report", "query_task_timeline", "cancel_scheduled_task",
+                        "search_images", "send_saved_image", "send_review_image", "sticker",
+                        "read_market_bulletins",
+                    }
                     self.assertEqual(set(TrackingModel.bindings[0]), expected | extra_tools)
                 for task, expected in [("diary", {"read_journal"}), ("trade_review", set()), ("group_summary", set())]:
                     with self.subTest(task=task):
@@ -83,6 +89,87 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(set(TrackingModel.bindings[0] if TrackingModel.bindings else ()), expected)
             finally:
                 await app.timeline.close()
+                app.db.close()
+
+    async def test_group_media_and_handoff_tasks_can_send_saved_images(self):
+        import time
+        from src.agent.mcp.task_tools import ON_DEMAND_TASKS, task_tools
+
+        with tempfile.TemporaryDirectory() as root:
+            app = Demo(Path(root) / "group-media.sqlite3")
+            try:
+                owner = await app.accounts.create_web_user("group-media", "temporary-test-password")
+                from src.users.ownership import issue_id
+                token = issue_id(app.db, owner)
+                app.engine.create({"user_binding": {"type": "random", "values": [token]}})
+                app.db.execute("""INSERT INTO agent_images
+                    (owner,digest,src,name,category,description,tags,sources,created)
+                    VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (owner, "digest", "data:image/webp;base64,QUJD", "图库图", "分类", "描述", "[]", "[]", time.time()))
+                attachments = []
+                groups = user_group_groups(app, owner, {}, f"agent:{owner}", attachments,
+                                           has_images=False, with_stickers=True)
+                names = {tool_name(tool) for tool in groups["media"]}
+                self.assertEqual(names, {"search_images", "send_saved_image", "save_image",
+                                         "send_review_image", "sticker"})
+                send = next(tool for tool in groups["media"] if tool_name(tool) == "send_saved_image")
+                self.assertTrue(json.loads(await send(1))["ok"])
+                self.assertEqual(len(attachments), 1)
+                blocked = json.loads(await send(1))
+                self.assertFalse(blocked["ok"])
+                self.assertIn("一个附件", blocked["error"])
+                self.assertEqual(len(attachments), 1)
+                for task in ("chat",):
+                    self.assertIn(task, ON_DEMAND_TASKS)
+                    tools, middleware = task_tools(task, groups)
+                    self.assertIsNotNone(middleware)
+                    self.assertTrue(tools)
+                    self.assertLessEqual({"search_images", "send_saved_image",
+                                          "send_review_image", "sticker"}, middleware.initial)
+            finally:
+                app.db.close()
+
+    async def test_forum_and_patrol_group_accept_direct_library_images(self):
+        import base64
+        import time
+        from io import BytesIO
+        from PIL import Image as PILImage
+        from src.agent.mcp.community.forum import build as forum_tool
+        from src.agent.mcp.community.patrol_group import build as patrol_group_tool
+
+        with tempfile.TemporaryDirectory() as root:
+            app = Demo(Path(root) / "direct-images.sqlite3")
+            try:
+                owner = await app.accounts.create_web_user("direct-images", "temporary-test-password")
+                from src.users.ownership import issue_id
+                token = issue_id(app.db, owner)
+                app.engine.create({"user_binding": {"type": "random", "values": [token]}})
+                output = BytesIO()
+                PILImage.new("RGB", (32, 32), (20, 120, 200)).save(output, "PNG")
+                src = "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+                image_id = app.db.execute("""INSERT INTO agent_images
+                    (owner,digest,src,name,category,description,tags,sources,created)
+                    VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (owner, "digest", src, "图库图", "分类", "描述", "[]", "[]", time.time())).lastrowid
+                room = app.community.groups(owner, "POST", "", {"name": "贴图群"})["id"]
+                app.db.execute("INSERT INTO community_group_agents VALUES(?,?)", (room, owner))
+
+                forum = forum_tool(app, owner)
+                result = json.loads(await forum("publish", title="带图帖子", body="正文",
+                                                title_image_id=image_id, image_id=image_id))
+                post = app.db.execute("SELECT title_media,media FROM community_posts WHERE id=?",
+                                      (result["id"],)).fetchone()
+                for value in (post["title_media"], post["media"]):
+                    media = json.loads(value)
+                    self.assertEqual(media["kind"], "image")
+                    self.assertTrue(media["src"].startswith("data:image/webp;base64,"))
+
+                group = patrol_group_tool(app.social, owner, [False])
+                self.assertIn("已发送", await group("send", str(room), "群图", image_id=image_id))
+                message = app.db.execute("""SELECT attachment FROM community_group_messages
+                    WHERE room=? ORDER BY id DESC LIMIT 1""", (room,)).fetchone()
+                self.assertTrue(json.loads(message["attachment"])["src"].startswith("data:image/webp;base64,"))
+            finally:
                 app.db.close()
 
     async def test_same_turn_load_and_no_carry_to_next_turn(self):

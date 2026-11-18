@@ -1,11 +1,11 @@
 from random import random
 
 from .community import (draft_forum_post, forum, group_chat, mention_group_member,
-                        patrol_forum, patrol_group, summarize_group)
+                        patrol_group, summarize_group)
 from .inbox import mark_inbox_unread, read_inbox, read_inbox_history
 from .market_review import (generate_trade_review, get_current_workspace, market, price_history, read_diary,
                             read_journal, read_market_bulletins, send_review_image, watch_market)
-from .media import save_image, search_images, send_panel, send_saved_image, sticker
+from .media import save_image, search_images, send_saved_image, sticker
 from .memory import search_memory, write_memory
 from .trading import (cancel_limit_order, close_position, open_trade, place_limit_order, record_observation, set_notifications,
                       set_protection, virtual_loan, write_plan)
@@ -31,6 +31,22 @@ def timeline_group(app, owner, *, public=False):
     return tools
 
 
+def owner_game(app, owner):
+    return next((game for game in app.engine.games() if game.get("owner_id") == owner), None)
+
+
+def media_group(app, owner, attachments, *, gid=None, game=None, current=None,
+                with_stickers=True, single=False):
+    tools = [search_images.build(app, owner),
+             send_saved_image.build(app, owner, attachments, single=single),
+             save_image.build(app, owner, gid if gid is not None else game, current)]
+    if gid:
+        tools.append(send_review_image.build(app, gid, attachments))
+    if with_stickers:
+        tools.append(sticker.build(app, owner, attachments, single=single))
+    return tools
+
+
 def user_workspace_groups(app, gid, *, writable, revision, attachments=None, user_image=None,
                           message_ids=(), diary=False, with_timeline=False, watch_actions=None):
     owner = app.engine.get(gid)["owner_id"]
@@ -46,15 +62,13 @@ def user_workspace_groups(app, gid, *, writable, revision, attachments=None, use
         groups["trading"] = [part.build(trade) for part in (
             open_trade, place_limit_order, cancel_limit_order, close_position, set_protection, virtual_loan, write_plan, record_observation)]
     if attachments is not None:
-        groups["market_review"] += [generate_trade_review.build(app, gid), send_review_image.build(app, gid, attachments)]
+        groups["market_review"] += [generate_trade_review.build(app, gid)]
         groups["community"] = [forum.build(app, owner), group_chat.build(app, owner, gid, user_image),
             summarize_group.build(app, gid, owner), draft_forum_post.build(app, gid, owner)]
         if app.profile(owner).get("chat_memory", {}).get("enabled", True):
             groups["memory"] = [search_memory.build(app, owner), write_memory.build(app, owner, gid, message_ids)]
-        groups["media"] = [send_panel.build(attachments), save_image.build(app, owner, gid, user_image),
-            search_images.build(app, owner), send_saved_image.build(app, owner, attachments)]
-        if random() * 100 < app.profile(owner).get("sticker_probability", 100):
-            groups["media"].append(sticker.build(app, owner, attachments))
+        groups["media"] = media_group(app, owner, attachments, gid=gid, current=user_image,
+            with_stickers=random() * 100 < app.profile(owner).get("sticker_probability", 100))
         if writable:
             groups["trading"].append(set_notifications.build(app, gid))
     return groups
@@ -63,13 +77,9 @@ def user_workspace_groups(app, gid, *, writable, revision, attachments=None, use
 def user_group_groups(app, owner, roster, self_id, attachments, *, has_images, with_stickers):
     groups = {"market_review": [read_market_bulletins.build(app)], "community": [mention_group_member.build(roster, self_id)], "inbox": inbox_group(app, owner)}
     groups["timeline"] = timeline_group(app, owner, public=True)
-    media = []
-    if has_images:
-        media.append(save_image.build(app, owner, None, None))
-    if with_stickers:
-        media.append(sticker.build(app, owner, attachments))
-    if media:
-        groups["media"] = media
+    game = owner_game(app, owner)
+    groups["media"] = media_group(app, owner, attachments, gid=game["id"] if game else None,
+                                  with_stickers=with_stickers, single=True)
     return groups
 
 
@@ -77,5 +87,5 @@ def user_patrol_groups(social, owner):
     app = social.app
     published = [False]
     return {"market_review": [market.build(app), read_market_bulletins.build(app)],
-            "community": [patrol_forum.build(social, owner, published), patrol_group.build(social, owner, published)],
+            "community": [forum.build(app, owner, published), patrol_group.build(social, owner, published)],
             "inbox": inbox_group(app, owner), "timeline": timeline_group(app, owner)}

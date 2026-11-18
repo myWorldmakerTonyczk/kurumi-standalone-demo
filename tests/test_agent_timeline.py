@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import AIMessage
 from src.agent.mcp.community.group_chat import build as group_chat_tool
+from src.agent.mcp.load_tool_group import tool_name
 from src.core.engine import dump
 from src.users.ownership import issue_id
 
@@ -108,6 +109,39 @@ class AgentTimelineTest(unittest.IsolatedAsyncioTestCase):
 
         rows = app.db.execute("SELECT body,attachment FROM community_group_messages WHERE room=?", (room,)).fetchall()
         self.assertEqual([(row["body"], json.loads(row["attachment"])) for row in rows], [("", media)])
+
+    async def test_group_handoff_can_send_a_library_image(self):
+        app, owner = self.app, self.owner
+        app.db.execute("INSERT INTO demo_profiles VALUES(?,?)", (owner, dump({"model": "test", "key": "test"})))
+        room = app.community.groups(owner, "POST", "", {"name": "handoff image group"})["id"]
+        app.db.execute("INSERT INTO community_group_agents VALUES(?,?)", (room, owner))
+        app.db.execute("""INSERT INTO agent_images
+            (owner,digest,src,name,category,description,tags,sources,created)
+            VALUES(?,?,?,?,?,?,?,?,1)""",
+            (owner, "digest", "data:image/webp;base64,QUJD", "图库图", "分类", "描述", "[]", "[]"))
+        captured, sent = {}, []
+
+        class ImageAgent:
+            def __init__(self, tools):
+                self.tools = {tool_name(tool): tool for tool in tools}
+
+            async def ainvoke(self, *args, **kwargs):
+                captured["tools"] = set(self.tools)
+                sent.append(await self.tools["send_saved_image"](1))
+                return {"messages": [AIMessage(content="图来了")]}
+
+        def build_agent(*args, **kwargs):
+            return ImageAgent(kwargs["tools"])
+
+        with patch("src.agent.social.model_client"), \
+                patch("langchain.agents.create_agent", side_effect=build_agent):
+            self.assertTrue(await app.social._chat_handoff(owner, "group", "发图库编号 1", room, "", 0))
+        self.assertIn("send_saved_image", captured["tools"])
+        self.assertTrue(json.loads(sent[0])["ok"])
+        row = app.db.execute("SELECT body,attachment FROM community_group_messages WHERE room=? ORDER BY id DESC LIMIT 1",
+                             (room,)).fetchone()
+        self.assertEqual(row["body"], "图来了")
+        self.assertEqual(json.loads(row["attachment"])["kind"], "image")
 
     async def test_debug_option_and_failed_task_log(self):
         async with TestClient(TestServer(self.app.app(False))) as client:

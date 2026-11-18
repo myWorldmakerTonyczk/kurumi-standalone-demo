@@ -13,13 +13,14 @@ from aiohttp import web
 from langchain_core.messages import HumanMessage
 
 from src.core.engine import dump
+from src.portal.community import webp_data_url
 from .chat_debounce import ChatDebounce, debounce_config
 from .image_library import image_reference
 from .model_registry import model_client, selected
 from .task_trace_middleware import TraceTools
 from .timeline import task_trace
 from .mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS
-from .mcp.registry import inbox_group, timeline_group, user_group_groups, user_patrol_groups
+from .mcp.registry import inbox_group, media_group, timeline_group, user_group_groups, user_patrol_groups
 from .mcp.task_tools import task_tools
 from .workflow import social_system_prompt, workflow
 
@@ -361,11 +362,12 @@ class Social:
                                            has_images=has_images, with_stickers=with_stickers)
                 if has_images:
                     prompt += "\n" + workflow("group_image")
+                prompt += "\n" + workflow("group_image_send")
                 if with_stickers:
                     prompt += "\n" + workflow("private_sticker")
                 from langchain.agents import create_agent
 
-                tools, tool_groups = task_tools(task, groups)
+                tools, tool_groups = task_tools("chat", groups)
                 agent = create_agent(model, tools=tools, middleware=[TraceTools(), tool_groups],
                     system_prompt=prompt + "\n" + TOOL_INSTRUCTIONS + "\n近期任务时间线：" +
                     dump(self.app.timeline.context(owner, room=room)))
@@ -393,6 +395,8 @@ class Social:
 
     def send(self, owner, room, content, attachment=None, *, mention_depth=0):
         if self.joined(room, owner) and self.app.external.settings(owner)["mode"] == "platform":
+            if attachment and attachment.get("kind") == "image":
+                attachment = {**attachment, "src": webp_data_url(attachment["src"])}
             content = content[:1500]
             mentions = self.group_mentions(content, self.group_roster(room))
             cursor = self.db.execute("""INSERT INTO community_group_messages
@@ -483,7 +487,9 @@ class Social:
                 return False
             roster = self.group_roster(room_id)
             self_id = f"agent:{owner}"
-            groups = user_group_groups(self.app, owner, roster, self_id, attachments, has_images=False, with_stickers=False)
+            with_stickers = random.random() * 100 < profile.get("sticker_probability", 100)
+            groups = user_group_groups(self.app, owner, roster, self_id, attachments,
+                                       has_images=False, with_stickers=with_stickers)
             rows = self.db.execute("""SELECT id,owner,is_agent,body,created FROM community_group_messages
                 WHERE room=? AND status='active' ORDER BY id DESC LIMIT 16""", (room_id,)).fetchall()
             history = []
@@ -509,25 +515,29 @@ class Social:
             rows = self.db.execute("""SELECT role,content,created FROM demo_chat WHERE game=?
                 ORDER BY id DESC LIMIT 12""", (gid,)).fetchall()
             history = [dict(row) for row in reversed(rows)]
-            groups = {"inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner)}
-        tools, _ = task_tools(f"{channel}_handoff", groups)
+            with_stickers = random.random() * 100 < profile.get("sticker_probability", 100)
+            groups = {"inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner),
+                      "media": media_group(self.app, owner, attachments, gid=gid, with_stickers=with_stickers)}
+        tools, tool_groups = task_tools("chat", groups)
+        middleware = [TraceTools()] + ([tool_groups] if tool_groups is not None else [])
         agent = create_agent(model_client(config, self.app.model_url,
-            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=tools, middleware=[TraceTools()],
+            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=tools, middleware=middleware,
             system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
                 "\n" + workflow("chat_handoff") +
+                ("\n" + TOOL_INSTRUCTIONS if tool_groups is not None else "") +
                 "\n近期任务时间线：" + dump(self.app.timeline.context(owner, room=room_id if channel == "group" else None)))
         async with self.slots:
             result = await agent.ainvoke({"messages": [HumanMessage(content=dump(
                 {"channel": channel, "handoff": details, "history": history}))]}, config={"recursion_limit": 12})
         content = result["messages"][-1].text.strip()
-        if not content or content == "[SKIP]" or self.app.external.settings(owner)["mode"] != "platform":
+        if (not content and not attachments) or content == "[SKIP]" or self.app.external.settings(owner)["mode"] != "platform":
             return False
         if channel == "group":
-            return self.send(owner, room_id, content)
+            return self.send(owner, room_id, content, attachments[0] if attachments else None)
         if self.chat_pending.get(gid) or self.direct_activity(gid) != activity:
             return False
-        cursor = self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)
-            VALUES(?,'assistant',?,?,1)""", (gid, content[:1500], time.time()))
+        cursor = self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive,attachments)
+            VALUES(?,'assistant',?,?,1,?)""", (gid, content[:1500], time.time(), dump(attachments)))
         self.app.timeline.reference(owner, {"type": "private_message", "game_id": gid, "id": cursor.lastrowid})
         return True
 
@@ -608,26 +618,31 @@ class Social:
                     "SELECT role,content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 8", (gid,))]
                 from langchain.agents import create_agent
 
-                tools, _ = task_tools("proactive", {
+                attachments = []
+                with_stickers = random.random() * 100 < profile.get("sticker_probability", 100)
+                tools, tool_groups = task_tools("chat", {
                     "inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner),
+                    "media": media_group(self.app, owner, attachments, gid=gid, with_stickers=with_stickers),
                 })
+                middleware = [TraceTools()] + ([tool_groups] if tool_groups is not None else [])
                 agent = create_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
-                    tools=tools, middleware=[TraceTools()],
+                    tools=tools, middleware=middleware,
                     system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
+                    + ("\n" + TOOL_INSTRUCTIONS if tool_groups is not None else "")
                     + "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
                 result = await agent.ainvoke({"messages": [
                     HumanMessage(content=dump({"time": datetime.now(ZONE).isoformat(), "history": history[::-1]})),
                 ]}, config={"recursion_limit": 12})
                 content = result["messages"][-1].text.strip()
                 latest = social_config(self.app.profile(owner).get("social", {}))
-                if (content and content != "[SKIP]" and latest == config
+                if ((content or attachments) and content != "[SKIP]" and latest == config
                         and not self.chat_pending.get(gid) and self.direct_activity(gid) == activity
                         and latest["direct_start"] <= datetime.now(ZONE).strftime("%H:%M") < latest["direct_end"]
                         and self.unanswered(gid) < latest["direct_limit"]
                         and self.app.external.settings(owner)["mode"] == "platform"
                         and any(item["id"] == gid and item["owner_id"] == owner for item in self.app.engine.games())):
-                    self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive)
-                        VALUES(?,'assistant',?,?,1)""", (gid, content[:1500], time.time()))
+                    self.db.execute("""INSERT INTO demo_chat(game,role,content,created,proactive,attachments)
+                        VALUES(?,'assistant',?,?,1,?)""", (gid, content[:1500], time.time(), dump(attachments)))
                     return True
             except Exception:
                 log.exception("Proactive message failed")

@@ -23,6 +23,35 @@ def _json(value, default):
     return result
 
 
+def webp_data_url(value):
+    """Return a WEBP data URL that fits community storage limits."""
+    prefix = "data:image/webp;base64,"
+    if not isinstance(value, str):
+        raise ValueError("图片格式无效")
+    if value.startswith(prefix) and len(value) <= 56000:
+        return value
+    match = re.fullmatch(r"data:image/(?:webp|png|jpe?g);base64,([A-Za-z0-9+/=]+)", value)
+    if not match:
+        raise ValueError("图片格式无效")
+    try:
+        raw = base64.b64decode(match[1], validate=True)
+        with Image.open(BytesIO(raw)) as source:
+            if getattr(source, "n_frames", 1) != 1:
+                raise ValueError("图片须为静态图片")
+            source.load()
+            image = source.convert("RGBA" if "A" in source.getbands() else "RGB")
+            image.thumbnail((960, 960))
+            for quality in (85, 75, 65, 55, 45, 35):
+                output = BytesIO()
+                image.save(output, "WEBP", quality=quality, method=4)
+                candidate = prefix + base64.b64encode(output.getvalue()).decode("ascii")
+                if len(candidate) <= 56000:
+                    return candidate
+    except (binascii.Error, OSError, Image.DecompressionBombError) as exc:
+        raise ValueError("图片无法读取") from exc
+    raise ValueError("图片过大，无法转为社区图片")
+
+
 def community_image(value):
     prefix = "data:image/webp;base64,"
     if not isinstance(value, str) or not value.startswith(prefix) or len(value) > 56000:

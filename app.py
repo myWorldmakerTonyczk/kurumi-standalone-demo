@@ -141,6 +141,9 @@ class Demo:
     def settings(self):
         return self.dashboard.get("market", {"history_source": "market"})
 
+    def owner_game(self, owner):
+        return next((game for game in self.engine.games() if game.get("owner_id") == owner), None)
+
     def public_url(self):
         return os.getenv("KURUMI_PUBLIC_URL") or self.dashboard.get("portal", {}).get("origin") or f"http://127.0.0.1:{listen_port(False)}"
 
@@ -477,7 +480,7 @@ class Demo:
                 kind = "private" if message is not None else "watch"
                 if diary_prompt is not None and message is None:
                     kind = audit_task if audit_task in ("trade_review", "group_summary") else "diary"
-                tools, tool_groups = task_tools(kind, groups, message or "")
+                tools, tool_groups = task_tools("chat" if kind == "private" else kind, groups, message or "")
                 instructions = ""
                 if kind == "private":
                     instructions = "\n".join(workflow(name) for name in ("private", "forum_authorship", "private_tool_reads"))
