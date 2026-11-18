@@ -18,8 +18,9 @@ from .image_library import image_reference
 from .model_registry import model_client, selected
 from .task_trace_middleware import TraceTools
 from .timeline import task_trace
-from .mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups
-from .mcp.registry import flatten, inbox_group, timeline_group, user_group_groups, user_patrol_groups
+from .mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS
+from .mcp.registry import inbox_group, timeline_group, user_group_groups, user_patrol_groups
+from .mcp.task_tools import task_tools
 from .workflow import social_system_prompt, workflow
 
 log = logging.getLogger(__name__)
@@ -315,7 +316,8 @@ class Social:
                     if ref:
                         entry["image"] = ref
                         has_images = True
-                task_prompt = workflow("group_followup" if followup else "group")
+                task = "group_followup" if followup else "group"
+                task_prompt = workflow(task)
                 model = model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "group_chat"))
                 persona = self.app.agent_persona(owner, profile)
                 prompt = social_system_prompt(persona) + "\n" + task_prompt
@@ -357,13 +359,13 @@ class Social:
                 groups = user_group_groups(self.app, owner, roster, self_id, attachments,
                                            has_images=has_images, with_stickers=with_stickers)
                 if has_images:
-                    prompt += "\n可用 save_image 收藏当前群聊中值得留存的图片，使用消息附带的 reference。"
+                    prompt += "\n" + workflow("group_image")
                 if with_stickers:
                     prompt += "\n" + workflow("private_sticker")
                 from langchain.agents import create_agent
 
-                agent = create_agent(model, tools=flatten(groups),
-                    middleware=[TraceTools(), ToolGroups(groups, initial=("mention_group_member",))],
+                tools, tool_groups = task_tools(task, groups)
+                agent = create_agent(model, tools=tools, middleware=[TraceTools(), tool_groups],
                     system_prompt=prompt + "\n" + TOOL_INSTRUCTIONS + "\n近期任务时间线：" +
                     dump(self.app.timeline.context(owner, room=room)))
                 if trace := task_trace(owner):
@@ -419,10 +421,10 @@ class Social:
                 if not config.get("key") or self.app.external.settings(owner)["mode"] != "platform":
                     return
 
-                groups = user_patrol_groups(self, owner)
+                tools, tool_groups = task_tools("patrol", user_patrol_groups(self, owner))
                 agent = create_agent(model_client(config, self.app.model_url, audit=self.app.call_logs.callback(owner, "patrol")),
-                    tools=flatten(groups),
-                    middleware=[TraceTools(), ToolGroups(groups, initial=("read_inbox",)), ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
+                    tools=tools,
+                    middleware=[TraceTools(), tool_groups, ModelCallLimitMiddleware(run_limit=8, exit_behavior="end")],
                     system_prompt=workflow("patrol") + "\n\n" + social_system_prompt(self.app.agent_persona(owner, profile))
                     + "\n" + workflow("forum_authorship")
                     + "\n" + TOOL_INSTRUCTIONS
@@ -506,12 +508,11 @@ class Social:
                 ORDER BY id DESC LIMIT 12""", (gid,)).fetchall()
             history = [dict(row) for row in reversed(rows)]
             groups = {"inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner)}
+        tools, _ = task_tools(f"{channel}_handoff", groups)
         agent = create_agent(model_client(config, self.app.model_url,
-            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=flatten(groups), middleware=[TraceTools()],
+            audit=self.app.call_logs.callback(owner, "chat_handoff")), tools=tools, middleware=[TraceTools()],
             system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) +
-                "\n你在处理上一项任务交接的聊天跟进。根据当前会话的最新消息决定是否发送。"
-                "说明只是内部意图，不要复述内部任务信息或公开私聊、私有账户内容。"
-                "已经说过、时机不合适或无实际内容时只输出 [SKIP]。"
+                "\n" + workflow("chat_handoff") +
                 "\n近期任务时间线：" + dump(self.app.timeline.context(owner, room=room_id if channel == "group" else None)))
         async with self.slots:
             result = await agent.ainvoke({"messages": [HumanMessage(content=dump(
@@ -605,8 +606,11 @@ class Social:
                     "SELECT role,content FROM demo_chat WHERE game=? ORDER BY id DESC LIMIT 8", (gid,))]
                 from langchain.agents import create_agent
 
+                tools, _ = task_tools("proactive", {
+                    "inbox": inbox_group(self.app, owner), "timeline": timeline_group(self.app, owner),
+                })
                 agent = create_agent(model_client(model, self.app.model_url, audit=self.app.call_logs.callback(owner, "proactive")),
-                    tools=inbox_group(self.app, owner) + timeline_group(self.app, owner), middleware=[TraceTools()],
+                    tools=tools, middleware=[TraceTools()],
                     system_prompt=social_system_prompt(self.app.agent_persona(owner, profile)) + "\n" + workflow("proactive")
                     + "\n近期任务时间线：" + dump(self.app.timeline.context(owner)))
                 result = await agent.ainvoke({"messages": [

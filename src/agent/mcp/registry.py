@@ -32,14 +32,14 @@ def timeline_group(app, owner, *, public=False):
 
 
 def user_workspace_groups(app, gid, *, writable, revision, attachments=None, user_image=None,
-                          message_ids=(), diary=False, handoff=False, watch_actions=None):
+                          message_ids=(), diary=False, with_timeline=False, watch_actions=None):
     owner = app.engine.get(gid)["owner_id"]
     groups = {"market_review": [read_market_bulletins.build(app), watch_market.build(app, gid),
         price_history.build(app), read_journal.build(app, gid), read_diary.build(app, gid),
         get_current_workspace.build(app, gid)]}
     if not diary:
         groups["inbox"] = inbox_group(app, owner)
-    if handoff or attachments is not None or diary:
+    if with_timeline:
         groups["timeline"] = timeline_group(app, owner)
     if writable:
         trade = bind_trade(app, gid, revision, watch_actions=watch_actions)

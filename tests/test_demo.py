@@ -22,12 +22,17 @@ class DemoFlow(unittest.IsolatedAsyncioTestCase):
         async def model(request):
             body = await request.json()
             requests.append((request.headers["Authorization"], body))
-            has_tool_result = any(m["role"] == "tool" for m in body["messages"])
+            names = {tool["function"]["name"] for tool in body.get("tools", [])}
+            completed_calls = {m.get("tool_call_id") for m in body["messages"] if m["role"] == "tool"}
             output = dict(role="assistant", content="已收到")
-            if body.get("tools") and not has_tool_result:
+            if "open_trade" in names and "call_trade" not in completed_calls:
                 output = dict(role="assistant", content=None, tool_calls=[dict(
-                    id="call_1", type="function", function=dict(name="open_trade",
+                    id="call_trade", type="function", function=dict(name="open_trade",
                     arguments='{"side":"buy","units":100,"reason":"测试看盘"}'))])
+            elif "price_history" in names and "load_tool_group" in names and "call_load" not in completed_calls:
+                output = dict(role="assistant", content=None, tool_calls=[dict(
+                    id="call_load", type="function", function=dict(name="load_tool_group",
+                    arguments='{"categories":["trading"]}'))])
             return web.json_response(dict(id="test", object="chat.completion", created=1,
                 model="local-test", choices=[dict(index=0, message=output,
                 finish_reason="tool_calls" if output.get("tool_calls") else "stop")]))

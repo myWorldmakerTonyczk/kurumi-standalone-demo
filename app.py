@@ -31,8 +31,9 @@ from src.agent.inbox import AgentInbox
 from src.agent.timeline import AgentTimeline, task_trace
 from src.agent.task_trace_middleware import TraceTools
 from src.agent.task_schedule import ACCOUNT_EVENTS, TaskSchedule
-from src.agent.mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, ToolGroups, tool_name
-from src.agent.mcp.registry import flatten, user_workspace_groups
+from src.agent.mcp.load_tool_group import INSTRUCTIONS as TOOL_INSTRUCTIONS, tool_name
+from src.agent.mcp.registry import user_workspace_groups
+from src.agent.mcp.task_tools import task_tools
 from src.agent.mcp.trading.execution import WATCH_OUTCOME_ACTIONS
 from src.agent.workflow import agent_real_name, character_persona, persona_body, social_system_prompt, workflow
 from src.agent.chat_debounce import debounce_config
@@ -267,8 +268,7 @@ class Demo:
                    f"当前数据来自模拟账本，不能代表真实收益。")
         publishable = summary + "\n风险提示：" + "；".join(risk_points) + "。"
         if self.profile(game["owner_id"]).get("key") and self.profile(game["owner_id"]).get("model"):
-            prompt = ("请把下面这份模拟交易复盘改写成简洁中文社区摘要，只能使用给出的统计，"
-                      "不得添加不存在的交易或账户隐私。\n" + publishable)
+            prompt = workflow("trade_review") + "\n" + publishable
             try:
                 model_text = await self.agent(game, diary_prompt=prompt, audit_task="trade_review")
                 if model_text and not model_text.startswith("离线演示日记："):
@@ -292,8 +292,7 @@ class Demo:
                 topics.append(pair)
         if self.profile(owner).get("key") and self.profile(owner).get("model") and game:
             try:
-                generated = await self.agent(game, diary_prompt=("请总结以下公开群聊，输出主要观点、风险提醒、争议点和待验证事项，"
-                    "不要暴露账户或私聊信息。\n" + text[:6000]), audit_task="group_summary")
+                generated = await self.agent(game, diary_prompt=workflow("group_summary") + "\n" + text[:6000], audit_task="group_summary")
                 if generated and not generated.startswith("离线演示日记："):
                     return dict(room=int(room), name=data["name"], messages=len(messages), summary=generated[:6000],
                                 topics=topics, risk_points=["AI 摘要仍需人工核对原消息"])
@@ -381,7 +380,7 @@ class Demo:
             config = selected(self.profile(owner))
             audit = self.call_logs.callback(owner, audit_task)
             result = await model_client(config, self.model_url, audit=audit).ainvoke([
-                SystemMessage(content="按任务要求生成摘要，仅使用提供的资料。"),
+                SystemMessage(content=workflow("summary_input_only")),
                 HumanMessage(content=diary_prompt),
             ])
             return result.text
@@ -474,25 +473,25 @@ class Demo:
                     writable=not readonly and diary_prompt is None and game["status"] == "running"
                     and (message is None or self.accounts.trade_allowed(game)),
                     message_ids=[entry[0] for entry in chat_messages], diary=diary_prompt is not None, watch_actions=watch_actions,
-                    handoff=message is None and diary_prompt is None and self.external.settings(owner)["mode"] == "platform")
-                tools = flatten(groups)
-                instructions = workflow("private") + "\n" + workflow("forum_authorship")
-                instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner)) + "\n预约前先检查 pending_appointments。已有相同条件时沿用。工具明确拒绝本轮写入时不要重复重试。"
-                if attachments is not None:
-                    initial_tools = ()
-                    if message is not None:
-                        initial_tools = ("watch_market", "read_journal")
-                        if any(word in message for word in ("提醒", "唤醒", "预约", "叫醒我", "叫我")):
-                            initial_tools += ("schedule_task",)
-                            if any(word in message for word in ("取消", "撤销")):
-                                initial_tools += ("cancel_scheduled_task",)
-                        instructions += "\n" + workflow("private_tool_reads")
-                    middleware.insert(1, ToolGroups(groups, initial=initial_tools))
+                    with_timeline=message is not None or (diary_prompt is None and self.external.settings(owner)["mode"] == "platform"))
+                kind = "private" if message is not None else "watch"
+                if diary_prompt is not None and message is None:
+                    kind = audit_task if audit_task in ("trade_review", "group_summary") else "diary"
+                tools, tool_groups = task_tools(kind, groups, message or "")
+                instructions = ""
+                if kind == "private":
+                    instructions = "\n".join(workflow(name) for name in ("private", "forum_authorship", "private_tool_reads"))
+                if kind in ("trade_review", "group_summary"):
+                    instructions = workflow("summary_input_only")
+                if tool_groups is not None:
+                    middleware.insert(1, tool_groups)
                     instructions += "\n" + TOOL_INSTRUCTIONS
+                    instructions += "\n近期任务时间线（只用于衔接当前任务）：" + dump(self.timeline.context(owner))
+                    instructions += "\n" + workflow("appointment_context")
                 if any(tool_name(tool) == "sticker" for tool in tools):
                     instructions += "\n" + workflow("private_sticker")
                 if message is not None and attachments is not None:
-                    instructions += "\n当前私聊允许自然结束。如果这一轮无需发消息，只输出 [SKIP]，不附带图片、语音或表情。"
+                    instructions += "\n" + workflow("private_skip")
                 memory_context = None
                 if message is not None and memory.get("enabled", True):
                     recalled = self.memory.recall(owner, message, recent=recent_user_messages)
@@ -512,9 +511,10 @@ class Demo:
                 if user_image or any(image for _, _, image in chat_messages):
                     instructions += "\n" + workflow("vision_context")
                 prompt_persona = social_system_prompt(persona) if message is not None and attachments is not None else persona
-                agent = create_agent(model, tools=tools,
-                    middleware=middleware,
-                    system_prompt=prompt_persona + "\n" + instructions + "\n你的模拟外汇账户快照（话题涉及账户、行情或复盘时参考）：" + dump(state))
+                system_prompt = prompt_persona + "\n" + instructions
+                if kind not in ("trade_review", "group_summary"):
+                    system_prompt += "\n你的模拟外汇账户快照（话题涉及账户、行情或复盘时参考）：" + dump(state)
+                agent = create_agent(model, tools=tools, middleware=middleware, system_prompt=system_prompt)
                 prompt = diary_prompt or (message if message is not None else workflow("watch") +
                     ("\n" + task_instruction if task_instruction else ""))
                 if chat_messages and (len(chat_messages) > 1 or chat_messages[0][2]):

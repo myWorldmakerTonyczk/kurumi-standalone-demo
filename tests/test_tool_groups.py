@@ -48,22 +48,39 @@ class ToolGroupTest(unittest.IsolatedAsyncioTestCase):
                         count = len(app.engine.logs(gid))
                         responses = [AIMessage(content="", tool_calls=[dict(name=name, args=args, id=f"call-{index}")])
                                      for index, (name, args) in enumerate(calls)]
+                        if calls:
+                            responses.insert(0, AIMessage(content="", tool_calls=[
+                                dict(name="load_tool_group", args={"categories": ["trading"]}, id="load-trading"),
+                            ]))
+                        TrackingModel.bindings.clear()
                         responses.append(AIMessage(content="Final watch summary"))
                         with patch("app.model_client", return_value=TrackingModel(responses=responses)):
                             reply = await app.run_decision(app.engine.get(gid))
                         self.assertEqual(reply, "Final watch summary")
+                        self.assertEqual(set(TrackingModel.bindings[0]), {
+                            "load_tool_group", "watch_market", "price_history", "read_journal",
+                        })
+                        if calls:
+                            self.assertIn(calls[0][0], TrackingModel.bindings[1])
                         added = app.engine.logs(gid)[:len(app.engine.logs(gid)) - count]
                         self.assertEqual([entry["action"] for entry in added], expected)
                         if calls == [observe, observe]:
                             self.assertEqual(added[0]["reason"], "tool observation")
-                for message, expected_appointment in [("Which trade closed last?", False), ("六点提醒我", True)]:
+                for message, extra_tools in [
+                    ("Which trade closed last?", set()), ("六点提醒我", {"schedule_task"}),
+                    ("取消六点的预约", {"schedule_task", "cancel_scheduled_task"}),
+                ]:
                     TrackingModel.bindings.clear()
                     with patch("app.model_client", return_value=TrackingModel(responses=[AIMessage(content="[SKIP]")])):
                         await app.agent(app.engine.get(gid), message, attachments=[])
                     expected = {"load_tool_group", "watch_market", "read_journal"}
-                    if expected_appointment:
-                        expected.add("schedule_task")
-                    self.assertEqual(set(TrackingModel.bindings[0]), expected)
+                    self.assertEqual(set(TrackingModel.bindings[0]), expected | extra_tools)
+                for task, expected in [("diary", {"read_journal"}), ("trade_review", set()), ("group_summary", set())]:
+                    with self.subTest(task=task):
+                        TrackingModel.bindings.clear()
+                        with patch("app.model_client", return_value=TrackingModel(responses=[AIMessage(content="Report")])):
+                            self.assertEqual(await app.agent(app.engine.get(gid), diary_prompt="Task input", audit_task=task), "Report")
+                        self.assertEqual(set(TrackingModel.bindings[0] if TrackingModel.bindings else ()), expected)
             finally:
                 await app.timeline.close()
                 app.db.close()
